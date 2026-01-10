@@ -33,10 +33,19 @@ Load with `@.claude/skills/NAME.md` when needed:
 
 | Skill | Use For |
 |-------|---------|
+| **auth** | Authentication, login, OTP |
+| **chat** | LLM, streaming, chat completion |
+| **demo-arch** | Architecture, local dev, LM Studio |
+| **fast-api** | API endpoints, CORS |
+| **planning** | Project planning, phases, dependencies |
+| **postgres** | Database, schema, psql |
 | **project-setup** | Symlinks and Claude Code configuration |
-| **versioning** | Version bumps, semantic versioning, git tags |
 | **push** | Deploy and release utilities library |
-| **planning** | Planning improvements and features |
+| **pwa** | Offline, installable, Capacitor |
+| **search** | RAG, search, embeddings |
+| **skill-curation** | Skill and rule updates |
+| **versioning** | Version bumps, semantic versioning, git tags |
+| **voice-api** | Voice, speech, Deepgram, STT |
 
 ### Project Documentation
 

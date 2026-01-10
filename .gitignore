@@ -8,3 +8,9 @@
 
 # Error queue (user-specific, generated at runtime)
 ~/.error-queue.json
+
+# Claude Code local config (machine-specific symlinks)
+.claude/settings.local.json
+.claude/rules/
+.claude/skills/
+symlink_docs

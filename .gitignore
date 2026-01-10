@@ -1,0 +1,10 @@
+# Local development artifacts
+.DS_Store
+*.swp
+*.swo
+*~
+.env
+.env.local
+
+# Error queue (user-specific, generated at runtime)
+~/.error-queue.json

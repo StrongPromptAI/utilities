@@ -60,7 +60,7 @@ utilities/
 
 ### Error Logging
 
-**Location**: `error-logging/log-error.sh`
+**Location**: `error-logging/log-error.sh`, `error-logging/SPEC.md`
 
 **Purpose**: Centralized error capture for Claude Code tool failures.
 
@@ -74,7 +74,34 @@ utilities/
 - ISO 8601 timestamp
 - Tool name, error type, message, context
 
-**Status**: ✅ Active (v1.0.0)
+**Status**: ✅ Active (v1.1.0)
+
+### Project Management
+
+**Location**: `project-management/thoughts.json`, `project-management/SPEC.md`
+
+**Purpose**: Lightweight task management with par-baking phase (light research before execution).
+
+**Features**:
+- Capture tasks in seconds (no UI friction)
+- Par-bake: 30-60 min light research on approach before execution
+- Track lifecycle: `open` → `par_baked` → `in_progress` → `done`
+- Ruthless prioritization
+- Research notes stored for execution clarity
+
+**Usage**:
+```bash
+# Capture a task (open)
+# Edit ~/repos/utilities/project-management/thoughts.json
+
+# View par-baked tasks (ready to execute)
+cat ~/repos/utilities/project-management/thoughts.json | jq '.[] | select(.status=="par_baked")'
+
+# Get execution prompt
+cat ~/repos/utilities/project-management/thoughts.json | jq '.[] | select(.id==1).prompt'
+```
+
+**Status**: ✅ Active (v1.1.0, consolidated from ~/repos/pm)
 
 ---
 
@@ -266,4 +293,4 @@ In CI/CD pipelines, clone a specific version tag:
 
 ---
 
-*Utilities Library v1.0.0 - 2026-01-10*
+*Utilities Library v1.1.0 - 2026-01-10T20:30:00-07:00 | Error logging + Project management with par-baking*

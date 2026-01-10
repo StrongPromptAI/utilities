@@ -1,5 +1,47 @@
 # Utilities Library
 
+Quick capture for thoughts, dispatch to projects. Minimal execution - focus on planning and organization.
+
+## Adding a thought
+
+When the user shares a thought, idea, or todo about utilities:
+
+1. Read `thoughts.json`
+2. Add entry with:
+   - `id`: increment from last (or start at 1)
+   - `thought`: the user's thought/idea
+   - `project`: project name if mentioned (optional)
+   - `created`: ISO timestamp
+   - `status`: "open"
+3. Write the updated file
+4. Confirm briefly: "Captured: [thought]"
+
+## Viewing thoughts
+
+Show the list in a clean format. Ask which one they want to work on.
+
+## Picking a task
+
+When the user picks a task:
+
+1. Generate a **Claude Code prompt** they can paste into the target project
+2. The prompt should include:
+   - What to do (the thought, expanded if needed)
+   - Any relevant context or skills to use
+   - Clear success criteria
+3. Mark the thought status as "in_progress"
+
+## Completing thoughts
+
+When user says they finished something, mark status as "done".
+
+## Rules
+
+- **No execution here** - only capture, plan, and generate prompts
+- Keep it fast - one thought in, one prompt out
+- Don't let the user get sucked into doing work in this repo
+- Focus on utilities planning, not project-specific tasks
+
 ## Claude Code Setup
 
 ### Verify Symlinks

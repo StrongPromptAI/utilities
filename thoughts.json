@@ -70,5 +70,13 @@
     "created": "2026-01-10T18:45:00-07:00",
     "status": "open",
     "resource": "Q"
+  },
+  {
+    "id": 22,
+    "thought": "Diagnose frequent rebase conflicts - almost every push requires pull --rebase. Likely parallel Claude sessions racing to push.",
+    "project": "repo_docs",
+    "created": "2026-01-11T00:50:00-07:00",
+    "status": "open",
+    "resource": "C"
   }
 ]

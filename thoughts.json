@@ -1,1 +1,74 @@
-[]
+[
+  {
+    "id": 2,
+    "thought": "Set up staging environment on Railway for smoke testing before production deploys",
+    "project": "mainstreak",
+    "created": "2026-01-09T19:25:00-07:00",
+    "status": "open",
+    "resource": "Q"
+  },
+  {
+    "id": 8,
+    "thought": "Update StrongPrompt website to serve financial services and healthcare verticals, not just banking",
+    "project": "strongprompt-website",
+    "created": "2026-01-09T19:55:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 11,
+    "thought": "Migrate remaining Vercel-hosted sites to Railway and compare CLI patterns",
+    "project": "repo_docs/push",
+    "created": "2026-01-09T20:10:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 12,
+    "thought": "Implement PDF color and font changes for BFR retreat documentation",
+    "project": "bfr-comms",
+    "created": "2026-01-09T20:20:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 15,
+    "thought": "Create utilities library following symlink + git hybrid pattern",
+    "project": "repo_docs",
+    "created": "2026-01-10T03:40:00-07:00",
+    "status": "done",
+    "resource": "C"
+  },
+  {
+    "id": 18,
+    "thought": "Create Railway test plan for lora_training fax OCR + hybrid search deployment",
+    "project": "lora_training",
+    "created": "2026-01-10T18:30:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 19,
+    "thought": "Add PROJECT_MATURITY env variable to projects so planning understands POC vs MVP vs PROD scope",
+    "project": "repo_docs",
+    "created": "2026-01-10T18:35:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 20,
+    "thought": "Execute local testing of lora_training PT Assistant (native Postgres + LM Studio, TKR RAG chat)",
+    "project": "lora_training",
+    "created": "2026-01-10T18:40:00-07:00",
+    "status": "open",
+    "resource": "Q"
+  },
+  {
+    "id": 21,
+    "thought": "Add DME (durable medical equipment) data to lora_training local database for TKA post-op chat context",
+    "project": "lora_training",
+    "created": "2026-01-10T18:45:00-07:00",
+    "status": "open",
+    "resource": "Q"
+  }
+]

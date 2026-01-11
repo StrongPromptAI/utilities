@@ -1,0 +1,12 @@
+[project]
+name = "utilities"
+version = "1.1.0"
+description = "Shared utilities library for Strong Prompt projects"
+dependencies = [
+    "sentence-transformers>=2.2.2",
+    "requests>=2.31.0",
+    "pyyaml>=6.0",
+]
+
+[tool.setuptools]
+packages = []  # No packages to discover, just install dependencies

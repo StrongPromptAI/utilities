@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # Error logging script for Claude Code sessions
-# Usage: ~/repos/pm/log-error.sh "Tool" "error_type" "error_message" ["context"] ["skill_involved"] ["recovery"]
-# Example: ~/repos/pm/log-error.sh "Edit" "not_found" "String to replace not found in file"
+# Usage: ~/repos/utilities/error-logging/log-error.sh "Tool" "error_type" "error_message" ["context"] ["skill_involved"] ["recovery"]
+# Example: ~/repos/utilities/error-logging/log-error.sh "Edit" "not_found" "String to replace not found in file"
 
 set -e
 
-QUEUE_FILE="$HOME/repos/pm/error-queue.json"
+QUEUE_FILE="$HOME/.error-queue.json"
 TOOL="${1:-Unknown}"
 ERROR_TYPE="${2:-other}"
 ERROR_MESSAGE="${3:-}"

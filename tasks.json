@@ -32,14 +32,6 @@
     "resource": "C"
   },
   {
-    "id": 15,
-    "description": "Create utilities library following symlink + git hybrid pattern",
-    "project": "repo_docs",
-    "created": "2026-01-10T03:40:00-07:00",
-    "status": "done",
-    "resource": "C"
-  },
-  {
     "id": 18,
     "description": "Create Railway test plan for lora_training fax OCR + hybrid search deployment",
     "project": "lora_training",
@@ -48,20 +40,12 @@
     "resource": "C"
   },
   {
-    "id": 19,
-    "description": "Add PROJECT_MATURITY env variable to projects so planning understands POC vs MVP vs PROD scope",
-    "project": "repo_docs",
-    "created": "2026-01-10T18:35:00-07:00",
-    "status": "open",
-    "resource": "C"
-  },
-  {
     "id": 20,
     "description": "Execute local testing of lora_training PT Assistant (native Postgres + LM Studio, TKR RAG chat)",
     "project": "lora_training",
     "created": "2026-01-10T18:40:00-07:00",
-    "status": "open",
-    "resource": "Q"
+    "status": "in_progress",
+    "resource": "C"
   },
   {
     "id": 21,
@@ -85,6 +69,30 @@
     "project": "repo_docs",
     "created": "2026-01-12T12:00:00-07:00",
     "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 25,
+    "description": "Search for old supabase references in skills files and subskills files and remove them",
+    "project": "repo_docs",
+    "created": "2026-01-11T12:40:00-07:00",
+    "status": "in_progress",
+    "resource": "C"
+  },
+  {
+    "id": 26,
+    "description": "Standardize local Postgres database setup with username 'postgres' and password '55' across all projects and documentation",
+    "project": "repo_docs",
+    "created": "2026-01-11T12:45:00-07:00",
+    "status": "in_progress",
+    "resource": "C"
+  },
+  {
+    "id": 28,
+    "description": "Improve postgres skill: change embedding column naming from embedding_{model} to embedding_dev/embedding_prod, use singleton table (model_settings) to hold active model and backup model configuration, update singleton.md",
+    "project": "repo_docs",
+    "created": "2026-01-11T13:00:00-07:00",
+    "status": "done",
     "resource": "C"
   }
 ]

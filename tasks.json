@@ -78,5 +78,13 @@
     "created": "2026-01-11T00:50:00-07:00",
     "status": "open",
     "resource": "C"
+  },
+  {
+    "id": 23,
+    "description": "Set up MCP database connections: global MCPs for local dev (db-local-lora, db-local-burntfork), per-project .mcp.json for Railway prod (lora_training, burntfork)",
+    "project": "repo_docs",
+    "created": "2026-01-12T12:00:00-07:00",
+    "status": "open",
+    "resource": "C"
   }
 ]

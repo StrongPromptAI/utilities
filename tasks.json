@@ -94,5 +94,29 @@
     "created": "2026-01-11T13:00:00-07:00",
     "status": "done",
     "resource": "C"
+  },
+  {
+    "id": 29,
+    "description": "Verify complexity scoring and save/load behavior implementation, create combined app arch doc (user-level overview of save and checksum), delete original spec docs",
+    "project": "burntfork",
+    "created": "2026-01-11T13:05:00-07:00",
+    "status": "in_progress",
+    "resource": "C"
+  },
+  {
+    "id": 30,
+    "description": "Add Boolean column prefix convention to postgres skill (is_, has_, can_, should_) with domain-specific examples (healthcare, e-commerce, SaaS, finance). Singular tables (DONE). Optional: View naming guidance. Skip JSONB as non-convention.",
+    "project": "repo_docs",
+    "created": "2026-01-11T13:10:00-07:00",
+    "status": "in_progress",
+    "resource": "C"
+  },
+  {
+    "id": 31,
+    "description": "Create deterministic_vs_semantic.md using /Users/metatron3/repos/lora_training/symlink_docs/plans/deterministic_vs_semantic_rag.md as source",
+    "project": "repo_docs",
+    "created": "2026-01-11T13:15:00-07:00",
+    "status": "open",
+    "resource": "C"
   }
 ]

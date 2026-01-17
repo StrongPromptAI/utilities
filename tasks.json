@@ -20,7 +20,7 @@
     "description": "Migrate remaining Vercel-hosted sites to Railway and compare CLI patterns",
     "project": "repo_docs/push",
     "created": "2026-01-09T20:10:00-07:00",
-    "status": "open",
+    "status": "done",
     "resource": "C"
   },
   {
@@ -44,7 +44,7 @@
     "description": "Execute local testing of lora_training PT Assistant (native Postgres + LM Studio, TKR RAG chat)",
     "project": "lora_training",
     "created": "2026-01-10T18:40:00-07:00",
-    "status": "in_progress",
+    "status": "done",
     "resource": "C"
   },
   {
@@ -76,7 +76,7 @@
     "description": "Search for old supabase references in skills files and subskills files and remove them",
     "project": "repo_docs",
     "created": "2026-01-11T12:40:00-07:00",
-    "status": "in_progress",
+    "status": "done",
     "resource": "C"
   },
   {
@@ -117,6 +117,38 @@
     "project": "repo_docs",
     "created": "2026-01-11T13:15:00-07:00",
     "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 32,
+    "description": "Confirm that three fields in pt_assistant_dev.public.reports are unnecessary and can be deleted: Search Vector, Embedding Dev, and Embedding Prod",
+    "project": "pt_assistant_dev",
+    "created": "2026-01-13T00:00:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 33,
+    "description": "Improve header and footer recognition in fax ingestion: Add remove_footer_and_metadata() function to ingest_operative_report_v2.py to strip signature blocks, JOB#, DM/DD/DT fields preventing footer contamination in chunks. Detect patterns: Xx + signature, JOB#: \\d+, DM: \\w+/\\w+. Test with ingest script to verify Postoperative Plan chunks are clean.",
+    "project": "lora_training",
+    "created": "2026-01-13T00:00:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 34,
+    "description": "Railway CLI config strategy: ~/.railway/config.json stores project links (machine-specific, not committed). Options: (1) track expected config somewhere, (2) update project-setup skill to verify/repair railway links. Decide approach and implement.",
+    "project": "repo_docs",
+    "created": "2026-01-16T10:00:00-07:00",
+    "status": "done",
+    "resource": "C"
+  },
+  {
+    "id": 35,
+    "description": "Move pt-assistant-schema.md from global skills (~/.../postgres/pt-assistant-schema.md) to project folder. Update project-setup skill to include database schema file convention for project-specific schemas. Delete subskill and any refs.",
+    "project": "repo_docs",
+    "created": "2026-01-16T10:05:00-07:00",
+    "status": "done",
     "resource": "C"
   }
 ]

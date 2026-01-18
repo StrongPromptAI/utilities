@@ -153,7 +153,8 @@
   },
   {
     "id": 36,
-    "description": "Migrate from uuid-ossp to native gen_random_uuid() - replace uuid_generate_v4() with gen_random_uuid() in schema to remove unnecessary extension dependency",
+    "description": "Migrate PT assistant (local + Railway) from uuid-ossp to native gen_random_uuid(): replace uuid_generate_v4() → gen_random_uuid() in schema. Bundle with PG18 upgrade for CREATE OR REPLACE TRIGGER support (idempotent migrations). Test locally first, then Railway staging.",
+    "project": "pt_assistant_dev",
     "created": "2026-01-18T10:00:00-07:00",
     "status": "open"
   }

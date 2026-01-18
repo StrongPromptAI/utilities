@@ -150,5 +150,11 @@
     "created": "2026-01-16T10:05:00-07:00",
     "status": "done",
     "resource": "C"
+  },
+  {
+    "id": 36,
+    "description": "Migrate from uuid-ossp to native gen_random_uuid() - replace uuid_generate_v4() with gen_random_uuid() in schema to remove unnecessary extension dependency",
+    "created": "2026-01-18T10:00:00-07:00",
+    "status": "open"
   }
 ]

@@ -163,6 +163,6 @@
     "description": "Update pg dump skill with production-hardened guidance: (1) check ALL schema objects (tables, ENUMs, functions) before restore + DROP SCHEMA CASCADE if needed; (2) add pg_restore error handling (--clean --if-exists vs manual drop); (3) improve Railway CLI JSON extraction pattern; (4) add post-restore verification checklist (table counts, extensions, embeddings, sample query); (5) clarify extension auto-handling; (6) guide when to use direct pipe vs snapshot file",
     "project": "repo_docs",
     "created": "2026-01-18T10:15:00-07:00",
-    "status": "open"
+    "status": "in_progress"
   }
 ]

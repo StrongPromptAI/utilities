@@ -36,7 +36,7 @@
     "description": "Create Railway test plan for lora_training fax OCR + hybrid search deployment",
     "project": "lora_training",
     "created": "2026-01-10T18:30:00-07:00",
-    "status": "open",
+    "status": "done",
     "resource": "C"
   },
   {
@@ -49,18 +49,10 @@
   },
   {
     "id": 21,
-    "description": "Add DME (durable medical equipment) data to lora_training local database for TKA post-op chat context",
+    "description": "Leverage MinerU OCR library to create MD document to help LLM understand the structure of the overall document and how a specific chunk or picture fits into the document",
     "project": "lora_training",
     "created": "2026-01-10T18:45:00-07:00",
-    "status": "open",
-    "resource": "C"
-  },
-  {
-    "id": 22,
-    "description": "Diagnose frequent rebase conflicts - almost every push requires pull --rebase. Likely parallel Claude sessions racing to push.",
-    "project": "repo_docs",
-    "created": "2026-01-11T00:50:00-07:00",
-    "status": "open",
+    "status": "in_progress",
     "resource": "C"
   },
   {
@@ -68,7 +60,7 @@
     "description": "Set up MCP database connections: global MCPs for local dev (db-local-lora, db-local-burntfork), per-project .mcp.json for Railway prod (lora_training, burntfork)",
     "project": "repo_docs",
     "created": "2026-01-12T12:00:00-07:00",
-    "status": "open",
+    "status": "done",
     "resource": "C"
   },
   {
@@ -84,7 +76,7 @@
     "description": "Standardize local Postgres database setup with username 'postgres' and password '55' across all projects and documentation",
     "project": "repo_docs",
     "created": "2026-01-11T12:45:00-07:00",
-    "status": "in_progress",
+    "status": "done",
     "resource": "C"
   },
   {
@@ -100,7 +92,7 @@
     "description": "Verify complexity scoring and save/load behavior implementation, create combined app arch doc (user-level overview of save and checksum), delete original spec docs",
     "project": "burntfork",
     "created": "2026-01-11T13:05:00-07:00",
-    "status": "in_progress",
+    "status": "done",
     "resource": "C"
   },
   {
@@ -108,15 +100,7 @@
     "description": "Add Boolean column prefix convention to postgres skill (is_, has_, can_, should_) with domain-specific examples (healthcare, e-commerce, SaaS, finance). Singular tables (DONE). Optional: View naming guidance. Skip JSONB as non-convention.",
     "project": "repo_docs",
     "created": "2026-01-11T13:10:00-07:00",
-    "status": "in_progress",
-    "resource": "C"
-  },
-  {
-    "id": 31,
-    "description": "Create deterministic_vs_semantic.md using /Users/metatron3/repos/lora_training/symlink_docs/plans/deterministic_vs_semantic_rag.md as source",
-    "project": "repo_docs",
-    "created": "2026-01-11T13:15:00-07:00",
-    "status": "open",
+    "status": "done",
     "resource": "C"
   },
   {
@@ -156,13 +140,31 @@
     "description": "Migrate PT assistant (local + Railway) from uuid-ossp to native gen_random_uuid(): replace uuid_generate_v4() → gen_random_uuid() in schema. Bundle with PG18 upgrade for CREATE OR REPLACE TRIGGER support (idempotent migrations). Test locally first, then Railway staging.",
     "project": "pt_assistant_dev",
     "created": "2026-01-18T10:00:00-07:00",
-    "status": "open"
+    "status": "open",
+    "resource": "C"
   },
   {
     "id": 37,
     "description": "Update pg dump skill with production-hardened guidance: (1) check ALL schema objects (tables, ENUMs, functions) before restore + DROP SCHEMA CASCADE if needed; (2) add pg_restore error handling (--clean --if-exists vs manual drop); (3) improve Railway CLI JSON extraction pattern; (4) add post-restore verification checklist (table counts, extensions, embeddings, sample query); (5) clarify extension auto-handling; (6) guide when to use direct pipe vs snapshot file",
     "project": "repo_docs",
     "created": "2026-01-18T10:15:00-07:00",
-    "status": "in_progress"
+    "status": "in_progress",
+    "resource": "C"
+  },
+  {
+    "id": 38,
+    "description": "Implement LTP Roadmap Voting System: Domain-based authorization, 10 votes/month budget, vote reallocation, vote counts by item, admin domain management, voter/admin UI, FastAPI backend with transaction safety",
+    "project": "lora_training",
+    "created": "2026-01-21T00:00:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 39,
+    "description": "Implement MinerU Structural Context: Add heading_level, heading_text, heading_path, parent_chunk_id, bbox columns to resource_chunk. Build heading hierarchy breadcrumbs. Map chunks to actual page_idx from MinerU JSON. Update ingestion pipeline (models, mineru_processor, chunker, database).",
+    "project": "lora_training",
+    "created": "2026-01-21T00:00:00-07:00",
+    "status": "open",
+    "resource": "C"
   }
 ]

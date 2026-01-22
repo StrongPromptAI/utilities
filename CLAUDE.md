@@ -43,56 +43,24 @@ When user says they finished something, mark status as "done".
 - Don't let the user get sucked into doing work in this repo
 - Focus on task planning, not project-specific execution
 
-## Claude Code Setup
+## Global Skills
 
-### Verify Symlinks
+Skills are globally configured via `~/repo_docs/skills/.REGISTRY.md`.
 
-If skills aren't loading or you see "file not found" errors:
+Use any skill by name:
+- "use devops" → devops skill loads
+- "use postgres" → postgres skill loads
+- "use utilities" → utilities skill loads
+- "use show-tasks" → utilities/show-tasks subskill loads
 
-```bash
-file .claude/rules/uv.md .claude/rules/golden-stack.md
-ls .claude/skills/
-file symlink_docs
-```
+**Full skills list**: See `~/repo_docs/skills/.REGISTRY.md`
 
-If broken or missing, ask: **"Help me fix Claude Code symlinks"**
+**If you haven't run global setup yet:**
+- See `~/repo_docs/skills/global-setup/SKILL.md` for one-time machine configuration
+- After that, all skills work in all projects automatically
 
-### Verify Gitignore
+---
 
-Before using symlinks, ensure `.gitignore` has these entries:
-
-```bash
-grep -E "\.claude/rules|\.claude/skills|symlink_docs" .gitignore
-```
-
-### Rules (Always Loaded)
-
-- **uv.md** - Use `uv run`, not `python`
-- **golden-stack.md** - 6 core architecture principles
-
-### Skills (On-Demand)
-
-Symlinked at `.claude/skills/NAME.md`. Load with `@.claude/skills/NAME.md` when needed.
-
-**Full skills index**: `~/repo_docs/CLAUDE.md` (check for latest available skills)
-
-| Skill | Subskills | Trigger Keywords | When to Use |
-|-------|-----------|------------------|-------------|
-| **auth** | otp-fastmail-delivery | login, otp, session | User authentication, login flows |
-| **chat** | — | llm, streaming, response | LLM-powered features |
-| **demo-arch** | — | architecture, lm studio | Local development architecture |
-| **fast-api** | — | api, endpoints, cors | API endpoints, CORS |
-| **planning** | review | architecture, phases | Feature planning, phases |
-| **postgres** | pg_dump, mcp-dbhub, semantic-hybrid-search, singleton | database, schema, rag | Data pipelines, RAG search |
-| **project-setup** | — | symlinks, claude.md | Project initialization |
-| **push** | — | deploy, release | Deploy utilities library |
-| **pwa** | — | offline, installable | Progressive Web App patterns |
-| **search** | — | rag, embeddings | RAG search, embeddings |
-| **skill-curation** | — | skill, rule, update | Skill and rule updates |
-| **utilities** | show-tasks | tasks, open, view | Show open tasks, task management |
-| **versioning** | — | version, semver, tag | Git tags, releases |
-| **voice-api** | — | voice, deepgram, stt | Voice input, Deepgram STT |
-
-### Project Documentation
+## Project Documentation
 
 All planning documents go in `symlink_docs/plans/`, which symlinks to `~/repo_docs/utilities/plans/`.

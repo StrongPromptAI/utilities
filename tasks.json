@@ -166,5 +166,13 @@
     "created": "2026-01-21T00:00:00-07:00",
     "status": "open",
     "resource": "C"
+  },
+  {
+    "id": 40,
+    "description": "Update doctor office admin OTP flow to magic link instead of cut-and-paste email",
+    "project": "lora_training",
+    "created": "2026-01-22T10:00:00-07:00",
+    "status": "open",
+    "resource": "C"
   }
 ]

@@ -13,6 +13,7 @@ When the user shares a task, idea, or todo:
    - `project`: project name if mentioned (optional)
    - `created`: ISO timestamp
    - `status`: "open"
+   - `resource`: "Q" (Quinland) or "C" (Chris) - defaults to "C" if not specified
 3. Write the updated file
 4. Confirm briefly: "Captured: [description]"
 
@@ -64,30 +65,33 @@ Before using symlinks, ensure `.gitignore` has these entries:
 grep -E "\.claude/rules|\.claude/skills|symlink_docs" .gitignore
 ```
 
-### Core Rules (Always Loaded)
+### Rules (Always Loaded)
 
 - **uv.md** - Use `uv run`, not `python`
 - **golden-stack.md** - 6 core architecture principles
 
-### Active Skills (On-Demand)
+### Skills (On-Demand)
 
-Load with `@.claude/skills/NAME.md` when needed:
+Symlinked at `.claude/skills/NAME.md`. Load with `@.claude/skills/NAME.md` when needed.
 
-| Skill | Use For |
-|-------|---------|
-| **auth** | Authentication, login, OTP |
-| **chat** | LLM, streaming, chat completion |
-| **demo-arch** | Architecture, local dev, LM Studio |
-| **fast-api** | API endpoints, CORS |
-| **planning** | Project planning, phases, dependencies |
-| **postgres** | Database, schema, psql |
-| **project-setup** | Symlinks and Claude Code configuration |
-| **push** | Deploy and release utilities library |
-| **pwa** | Offline, installable, Capacitor |
-| **search** | RAG, search, embeddings |
-| **skill-curation** | Skill and rule updates |
-| **versioning** | Version bumps, semantic versioning, git tags |
-| **voice-api** | Voice, speech, Deepgram, STT |
+**Full skills index**: `~/repo_docs/CLAUDE.md` (check for latest available skills)
+
+| Skill | Subskills | Trigger Keywords | When to Use |
+|-------|-----------|------------------|-------------|
+| **auth** | otp-fastmail-delivery | login, otp, session | User authentication, login flows |
+| **chat** | — | llm, streaming, response | LLM-powered features |
+| **demo-arch** | — | architecture, lm studio | Local development architecture |
+| **fast-api** | — | api, endpoints, cors | API endpoints, CORS |
+| **planning** | review | architecture, phases | Feature planning, phases |
+| **postgres** | pg_dump, mcp-dbhub, semantic-hybrid-search, singleton | database, schema, rag | Data pipelines, RAG search |
+| **project-setup** | — | symlinks, claude.md | Project initialization |
+| **push** | — | deploy, release | Deploy utilities library |
+| **pwa** | — | offline, installable | Progressive Web App patterns |
+| **search** | — | rag, embeddings | RAG search, embeddings |
+| **skill-curation** | — | skill, rule, update | Skill and rule updates |
+| **utilities** | show-tasks | tasks, open, view | Show open tasks, task management |
+| **versioning** | — | version, semver, tag | Git tags, releases |
+| **voice-api** | — | voice, deepgram, stt | Voice input, Deepgram STT |
 
 ### Project Documentation
 

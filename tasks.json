@@ -174,5 +174,13 @@
     "created": "2026-01-22T10:00:00-07:00",
     "status": "open",
     "resource": "C"
+  },
+  {
+    "id": 41,
+    "description": "Build document chunking + Qdrant semantic search agent: fixed chunking (v1) for meeting transcripts, local LM Studio embeddings, collection management strategy, integration with Claude Code (skill/slash command or standalone script)",
+    "project": "utilities",
+    "created": "2026-01-22T14:30:00-07:00",
+    "status": "done",
+    "resource": "C"
   }
 ]

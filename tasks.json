@@ -182,5 +182,53 @@
     "created": "2026-01-22T14:30:00-07:00",
     "status": "done",
     "resource": "C"
+  },
+  {
+    "id": 42,
+    "description": "KB improvements: (1) Change project registration to store docs path (~/repo_docs/{project}) not code repo path, update get_project_docs() accordingly; (2) Add user_notes column to calls table for appending personal observations during ingestion; (3) Update kb-ingest to prompt for user notes after processing; (4) Add kb-help subskill with CLI-style quick reference; (5) Duplicate detection for ingestion; (6) Batch summarization via LM Studio (qwen3-vl-8b-instruct-mlx)",
+    "project": "utilities",
+    "created": "2026-01-24T17:00:00-07:00",
+    "status": "done",
+    "resource": "C"
+  },
+  {
+    "id": 43,
+    "description": "Add kb query types beyond kb-check: kb-ask (direct questions about stakeholders), kb-recall (what did we discuss about X), kb-compare (compare stakeholder positions). Update kb SKILL.md with new subskills.",
+    "project": "utilities",
+    "created": "2026-01-24T17:00:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 44,
+    "description": "Add document type descriptions (op_notes, pre_op_consult, mri_report) to resource table with purpose and structure. Merge reports into patient_resource and patient_resource_chunk so all resource types flow through patient_resource for simplified patient-associated lookups.",
+    "project": "lora_training",
+    "created": "2026-01-24T18:30:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 45,
+    "description": "Insert Mailbox services (HIPAA-compliant document routing) into provider tables. Build new 'Mega Inbox' section of PRD covering mailbox vendor integration for clinic document ingestion.",
+    "project": "lora_training",
+    "created": "2026-01-24T18:30:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 46,
+    "description": "Build Bawa demo database with time-travel capability: (1) Patient journey scrubber to jump forward/backward in recovery timeline (day 1, week 3, month 4); (2) Scenario templates - frozen knee, CPM non-compliance, normal recovery; (3) Let Bawa select patient types via UI to generate demo patients; (4) Use existing Bawa TKR protocol (PostOpTKAUPDATED_09112025_HSB.pdf already in pt_assistant_dev). Goal: show prevention AND recovery handling for each scenario.",
+    "project": "lora_training",
+    "created": "2026-01-24T19:00:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 47,
+    "description": "Document medical terminology in PROJECT_CONTEXT.md: (1) Document types - op notes (operative report, post-surgery details), pre-op consult/H&P (history & physical, pre-surgery baseline), face sheet (patient demographics + insurance), protocol (doctor's recovery guidelines); (2) Key terms - TKR (total knee replacement), ROM (range of motion), CPM (continuous passive motion machine), frozen knee (stiffness/limited ROM), ICD-10 (diagnosis codes); (3) Data sources - clean digital vs faxed/OCR quality issues.",
+    "project": "lora_training",
+    "created": "2026-01-24T19:00:00-07:00",
+    "status": "open",
+    "resource": "C"
   }
 ]

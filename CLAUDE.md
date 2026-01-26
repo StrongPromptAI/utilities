@@ -19,18 +19,20 @@ When the user shares a task, idea, or todo:
 
 ## Viewing tasks
 
-Show the list in a clean format. Ask which one they want to work on.
+Show the list in a clean format. For each task, check if a prompt file exists at `~/repo_docs/utilities/plans/task-{id}-{slug}.md`. If it does, include the path in the output so user can reference it. Ask which one they want to work on.
 
 ## Picking a task
 
 When the user picks a task:
 
 1. Generate a **Claude Code prompt** they can paste into the target project
-2. The prompt should include:
+2. Store the prompt in `~/repo_docs/utilities/plans/task-{id}-{slug}.md` (don't bloat tasks.json)
+3. The prompt should include:
    - What to do (the task, expanded if needed)
    - Any relevant context or skills to use
    - Clear success criteria
-3. Mark the task status as "in_progress"
+4. Update task description in tasks.json to reference the prompt file: "See prompt: task-{id}-{slug}.md"
+5. Mark the task status as "in_progress"
 
 ## Completing tasks
 
@@ -42,6 +44,7 @@ When user says they finished something, mark status as "done".
 - Keep it fast - one task in, one prompt out
 - Don't let the user get sucked into doing work in this repo
 - Focus on task planning, not project-specific execution
+- **After every chat completion**: Suggest "show tasks" to keep task list visible
 
 ## Global Skills
 

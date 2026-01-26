@@ -156,7 +156,7 @@
     "description": "Implement LTP Roadmap Voting System: Domain-based authorization, 10 votes/month budget, vote reallocation, vote counts by item, admin domain management, voter/admin UI, FastAPI backend with transaction safety",
     "project": "lora_training",
     "created": "2026-01-21T00:00:00-07:00",
-    "status": "open",
+    "status": "in_progress",
     "resource": "C"
   },
   {

@@ -1,3 +1,4 @@
+[
   {
     "id": 8,
     "description": "Finalize StrongPrompt website: (1) Connect top11 repo to strongprompt.ai domain; (2) Update content to serve financial services and healthcare verticals, not just banking; (3) Finalize last couple slides with case studies or market positioning",
@@ -141,5 +142,21 @@
     "created": "2026-01-26T10:50:00-07:00",
     "status": "open",
     "resource": "Q"
+  },
+  {
+    "id": 52,
+    "description": "Harvest railway_staging_environment_setup.md: Extract reusable content to devops/staging skill or railway skill, consolidate project-specific details into lora_training_railway_cicd_runbook.md, then delete the original file",
+    "project": "lora_training",
+    "created": "2026-01-26T12:00:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 53,
+    "description": "Build show-tasks CLI: uv run show",
+    "project": "utilities",
+    "created": "2026-01-26T12:15:00-07:00",
+    "status": "done",
+    "resource": "C"
   }
 ]

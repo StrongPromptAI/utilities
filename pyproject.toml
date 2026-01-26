@@ -2,6 +2,7 @@
 name = "utilities"
 version = "1.1.0"
 description = "Shared utilities library for Strong Prompt projects"
+requires-python = ">=3.12"
 dependencies = [
     "sentence-transformers>=2.2.2",
     "requests>=2.31.0",
@@ -9,7 +10,15 @@ dependencies = [
     "fastmcp>=0.1.0",
     "qdrant-client>=1.7.0",
     "openai>=1.0.0",
+    "psycopg[binary]>=3.3.2",
 ]
 
+[project.scripts]
+show = "scripts.show:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [tool.setuptools]
-packages = []  # No packages to discover, just install dependencies
+packages = ["scripts"]

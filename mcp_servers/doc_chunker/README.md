@@ -30,7 +30,7 @@ Add to `~/.config/claude-code/mcp_settings.json`:
       "args": [
         "run",
         "--directory",
-        "/Users/metatronfly/repos/utilities",
+        "/Users/YOUR_USERNAME/repos/utilities",
         "python",
         "mcp_servers/doc_chunker/server.py"
       ],

@@ -2,6 +2,10 @@
 
 Quick capture for tasks, dispatch to projects. Minimal execution - focus on planning and organization.
 
+**Tasks file location**: `~/repos/utilities/tasks.json` — Always read from here when displaying or updating tasks.
+
+**Prompt file location**: `~/repo_docs/utilities/plans/task-{id}-{slug}.md` — Task prompts stored here (e.g., `task-38-implement-ltp.md`). Check for existing prompts when displaying tasks.
+
 ## Adding a task
 
 When the user shares a task, idea, or todo:

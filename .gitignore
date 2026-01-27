@@ -9,8 +9,16 @@
 # Error queue (user-specific, generated at runtime)
 ~/.error-queue.json
 
-# Claude Code local config (machine-specific symlinks)
-.claude/settings.local.json
-.claude/rules/
-.claude/skills/
+# Claude Code local config (machine-specific)
+.claude/
+
+# Symlinked docs
 symlink_docs
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+*.so

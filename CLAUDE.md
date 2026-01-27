@@ -50,6 +50,24 @@ When user says they finished something, mark status as "done".
 - Focus on task planning, not project-specific execution
 - **After every chat completion**: Suggest "show tasks" to keep task list visible
 
+## KB (Knowledge Base)
+
+Stakeholder intelligence system. User asks natural language questions, you run `kb` commands via Bash tool.
+
+**Common requests:**
+- "Search kb for [topic]"
+- "Show me all stakeholders"
+- "What calls did I have with [name]?"
+- "Tell me about [stakeholder name]"
+- "Analyze call [id] using Peterson framework"
+
+**When user asks about kb:**
+1. Read `symlink_docs/plans/kb-guide.md` for available commands and usage patterns
+2. Run appropriate `uv run python scripts/kb` commands
+3. Present results in conversational format
+
+**Guide location:** `symlink_docs/plans/kb-guide.md` — Read this when user first asks about kb, or when you need command syntax
+
 ## Global Skills
 
 Skills are globally configured via `~/repo_docs/skills/.REGISTRY.md`.

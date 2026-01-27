@@ -17,6 +17,25 @@ wheels = [
 ]
 
 [[package]]
+name = "anthropic"
+version = "0.76.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "docstring-parser" },
+    { name = "httpx" },
+    { name = "jiter" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6e/be/d11abafaa15d6304826438170f7574d750218f49a106c54424a40cef4494/anthropic-0.76.0.tar.gz", hash = "sha256:e0cae6a368986d5cf6df743dfbb1b9519e6a9eee9c6c942ad8121c0b34416ffe", size = 495483, upload-time = "2026-01-13T18:41:14.908Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/70/7b0fd9c1a738f59d3babe2b4212031c34ab7d0fda4ffef15b58a55c5bcea/anthropic-0.76.0-py3-none-any.whl", hash = "sha256:81efa3113901192af2f0fe977d3ec73fdadb1e691586306c4256cd6d5ccc331c", size = 390309, upload-time = "2026-01-13T18:41:13.483Z" },
+]
+
+[[package]]
 name = "anyio"
 version = "4.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2334,6 +2353,8 @@ name = "utilities"
 version = "1.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anthropic" },
+    { name = "click" },
     { name = "fastmcp" },
     { name = "openai" },
     { name = "psycopg", extra = ["binary"] },
@@ -2345,6 +2366,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anthropic", specifier = ">=0.76.0" },
+    { name = "click", specifier = ">=8.1.0" },
     { name = "fastmcp", specifier = ">=0.1.0" },
     { name = "openai", specifier = ">=1.0.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.2" },

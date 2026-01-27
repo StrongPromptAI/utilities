@@ -11,6 +11,8 @@ dependencies = [
     "qdrant-client>=1.7.0",
     "openai>=1.0.0",
     "psycopg[binary]>=3.3.2",
+    "anthropic>=0.76.0",
+    "click>=8.1.0",
 ]
 
 [project.scripts]

@@ -41,10 +41,10 @@
   },
   {
     "id": 36,
-    "description": "Migrate PT assistant (local + Railway) from uuid-ossp to native gen_random_uuid(): (1) Upgrade PostgreSQL from 15 to 18 (why-pg18.md: native gen_random_uuid, CREATE OR REPLACE TRIGGER idempotency); (2) Replace uuid_generate_v4() → gen_random_uuid() in schema; (3) Test locally first with PG18, then Railway staging; (4) Verify schema-portability after upgrade (DataGrip, schema comparison). See postgres skill for version upgrade patterns.",
+    "description": "Migrate PT assistant (local + Railway) from uuid-ossp to native gen_random_uuid(). ✓ Complete: PG 17→18 upgraded locally and on Railway staging. Schema migrated, uuid-ossp removed, gen_random_uuid() in use.",
     "project": "lora_training",
     "created": "2026-01-18T10:00:00-07:00",
-    "status": "open",
+    "status": "done",
     "resource": "C"
   },
   {
@@ -157,6 +157,38 @@
     "project": "utilities",
     "created": "2026-01-26T12:15:00-07:00",
     "status": "done",
+    "resource": "C"
+  },
+  {
+    "id": 54,
+    "description": "Consolidate Claude.md rules to global level. See prompt: task-54-global-claude-md.md",
+    "project": "utilities",
+    "created": "2026-01-27T10:00:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 57,
+    "description": "Merge clawbot_thoughts.md into HJ personality MVP doc. See prompt: task-57-clawbot-merge.md",
+    "project": "lora_training",
+    "created": "2026-01-27T20:45:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 56,
+    "description": "Wire KB access from other project repos. Shell wrapper in ~/bin/kb that delegates to utilities venv. See prompt: task-56-kb-cross-repo.md",
+    "project": "utilities",
+    "created": "2026-01-27T20:30:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 55,
+    "description": "Bidirectional data flow diagram for Thursday meeting (Jan 30). Current diagram only covers order ingestion. Need to show post-ingestion lifecycle: back office pushes auth/fulfillment updates to mobile sales app via SSE + push notifications. Cover fulfillment decisioning (serialized asset, rep inventory, corporate drop ship, vendor drop ship), documentation requests (medical records, post-op reports for medical necessity), and task/notification system. Create straw man of mobile interface — keep it business-friendly, no field-level technical details. Stakeholders: Brett Varner, Jeff Salamon. See prompt: task-55-bidirectional-flow.md",
+    "project": "warm_fusion",
+    "created": "2026-01-27T20:00:00-07:00",
+    "status": "in_progress",
     "resource": "C"
   }
 ]

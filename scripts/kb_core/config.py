@@ -1,7 +1,7 @@
 """Configuration constants for knowledge base."""
 
 # Database
-DB_URL = "postgresql://localhost/knowledge_base"
+DB_URL = "postgresql://postgres:55@localhost/knowledge_base"
 
 # LM Studio
 LM_STUDIO_URL = "http://localhost:1234/v1"

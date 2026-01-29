@@ -190,5 +190,29 @@
     "created": "2026-01-27T20:00:00-07:00",
     "status": "in_progress",
     "resource": "C"
+  },
+  {
+    "id": 58,
+    "description": "Implement PWA home screen icon behavior and manifest setup for eye therapeutics. See prompt: task-58-pwa-home-screen-icons.md",
+    "project": "eye_therapeutics",
+    "created": "2026-01-28T19:00:00-07:00",
+    "status": "in_progress",
+    "resource": "C"
+  },
+  {
+    "id": 59,
+    "description": "Configure Claude Code to disable read permission requests for in-project files: Locate hooks config or settings file, disable permission prompts for file reads within project scope.",
+    "project": "utilities",
+    "created": "2026-01-28T19:15:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 60,
+    "description": "Check and standardize versioning logic for lora_training: Audit current version scheme, define semantic versioning strategy, establish version management pattern across backend and frontend, integrate with CI/CD release process.",
+    "project": "lora_training",
+    "created": "2026-01-28T19:20:00-07:00",
+    "status": "open",
+    "resource": "C"
   }
 ]

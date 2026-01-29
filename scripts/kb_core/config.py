@@ -17,3 +17,6 @@ BATCH_SIZE = 10  # chunks per batch (~5 min of conversation)
 # Search
 DEFAULT_DAYS_BACK = 21
 DECAY_RATE = 0.95  # Per-day decay factor
+
+# Quotes
+QUOTES_PER_BATCH = 5  # Target quotes per batch extraction

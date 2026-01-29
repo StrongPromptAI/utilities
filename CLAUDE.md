@@ -1,12 +1,18 @@
 # Utilities Library
 
+**Project Phase**: PROD
+
 Quick capture for tasks, dispatch to projects. Minimal execution - focus on planning and organization.
+
+---
+
+## Tasks Management
 
 **Tasks file location**: `~/repos/utilities/tasks.json` — Always read from here when displaying or updating tasks.
 
 **Prompt file location**: `~/repo_docs/utilities/plans/task-{id}-{slug}.md` — Task prompts stored here (e.g., `task-38-implement-ltp.md`). Check for existing prompts when displaying tasks.
 
-## Adding a task
+### Adding a task
 
 When the user shares a task, idea, or todo:
 
@@ -21,11 +27,11 @@ When the user shares a task, idea, or todo:
 3. Write the updated file
 4. Confirm briefly: "Captured: [description]"
 
-## Viewing tasks
+### Viewing tasks
 
 Show the list in a clean format. For each task, check if a prompt file exists at `~/repo_docs/utilities/plans/task-{id}-{slug}.md`. If it does, include the path in the output so user can reference it. Ask which one they want to work on.
 
-## Picking a task
+### Picking a task
 
 When the user picks a task:
 
@@ -38,17 +44,19 @@ When the user picks a task:
 4. Update task description in tasks.json to reference the prompt file: "See prompt: task-{id}-{slug}.md"
 5. Mark the task status as "in_progress"
 
-## Completing tasks
+### Completing tasks
 
 When user says they finished something, mark status as "done".
 
-## Rules
+### Rules
 
 - **No execution here** - only capture, plan, and generate prompts
 - Keep it fast - one task in, one prompt out
 - Don't let the user get sucked into doing work in this repo
 - Focus on task planning, not project-specific execution
 - **After every chat completion**: Suggest "show tasks" to keep task list visible
+
+---
 
 ## KB (Knowledge Base)
 
@@ -67,25 +75,3 @@ Stakeholder intelligence system. User asks natural language questions, you run `
 3. Present results in conversational format
 
 **Guide location:** `symlink_docs/plans/kb-guide.md` — Read this when user first asks about kb, or when you need command syntax
-
-## Global Skills
-
-Skills are globally configured via `~/repo_docs/skills/.REGISTRY.md`.
-
-Use any skill by name:
-- "use devops" → devops skill loads
-- "use postgres" → postgres skill loads
-- "use utilities" → utilities skill loads
-- "use show-tasks" → utilities/show-tasks subskill loads
-
-**Full skills list**: See `~/repo_docs/skills/.REGISTRY.md`
-
-**If you haven't run global setup yet:**
-- See `~/repo_docs/skills/global-setup/SKILL.md` for one-time machine configuration
-- After that, all skills work in all projects automatically
-
----
-
-## Project Documentation
-
-All planning documents go in `symlink_docs/plans/`, which symlinks to `~/repo_docs/utilities/plans/`.

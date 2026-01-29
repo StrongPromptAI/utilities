@@ -1,26 +1,33 @@
 """Agentic analysis functions for stakeholder intelligence."""
 
+from pathlib import Path
 from .db import get_db
 from .search import hybrid_search, get_stakeholder_context
+from .crud.quotes import get_approved_quotes
 
 
-def suggested_next_step(call_id: int) -> dict:
+def suggested_next_step(call_id: int, letter_path: str = None) -> dict:
     """
     Gather call context using agentic search for Claude Code analysis.
 
     Process:
     1. Retrieve call summary
     2. Load Peterson framework from reference_docs
-    3. Perform agentic search on relevant KB context
-    4. Return structured data for Claude Code to analyze
+    3. Load approved quotes for call vibe
+    4. Perform agentic search on relevant KB context
+    5. Optionally load letter for review
+    6. Return structured data for Claude Code to analyze
 
     Args:
         call_id: Call to analyze
+        letter_path: Optional path to letter/email to review
 
     Returns:
         {
             "call": {call data},
             "framework": "Peterson framework content",
+            "quotes": [approved quotes],
+            "letter": "letter content if provided",
             "agentic_search_results": [{query, text, score}, ...],
             "stakeholder_context": {stakeholder data},
             "analysis_prompt": "Formatted prompt for Claude Code"
@@ -57,7 +64,17 @@ def suggested_next_step(call_id: int) -> dict:
 
             framework_content = framework_doc['content']
 
-    # 3. Agentic search: Find related calls and context
+    # 3. Load approved quotes for call vibe
+    quotes = get_approved_quotes(call_id)
+
+    # 4. Load letter if provided
+    letter_content = None
+    if letter_path:
+        letter_file = Path(letter_path).expanduser()
+        if letter_file.exists():
+            letter_content = letter_file.read_text()
+
+    # 5. Agentic search: Find related calls and context
     search_queries = [
         f"conversations with {call['stakeholder_name']}",
         f"{call['project_name']} project discussions" if call['project_name'] else None,
@@ -84,7 +101,33 @@ def suggested_next_step(call_id: int) -> dict:
     # Get stakeholder context
     stakeholder_context = get_stakeholder_context(call['stakeholder_name'])
 
-    # 4. Build analysis prompt for Claude Code
+    # 6. Build analysis prompt for Claude Code
+
+    # Build quotes section
+    quotes_section = ""
+    if quotes:
+        quotes_lines = []
+        for q in quotes:
+            speaker = q.get('speaker') or 'Unknown'
+            category = f" [{q['category']}]" if q.get('category') else ""
+            quotes_lines.append(f'> "{q["quote_text"]}"\n> — {speaker}{category}')
+        quotes_section = f"""
+# Key Quotes (vibe of the call)
+
+{chr(10).join(quotes_lines)}
+"""
+
+    # Build letter section
+    letter_section = ""
+    if letter_content:
+        letter_section = f"""
+# Letter/Email to Review
+
+```markdown
+{letter_content}
+```
+"""
+
     analysis_prompt = f"""# Call Summary
 
 **Stakeholder:** {call['stakeholder_name']}
@@ -93,7 +136,7 @@ def suggested_next_step(call_id: int) -> dict:
 **Participants:** {', '.join(call['participants'])}
 
 {call['summary']}
-
+{quotes_section}
 # Related Context (from agentic search)
 
 {chr(10).join([f"- [{r['call_date']}] {r['text']}..." for r in agentic_search_results[:5]])}
@@ -112,7 +155,7 @@ def suggested_next_step(call_id: int) -> dict:
 4. Earn right to ask questions by sharing insights
 5. Use provocation with constructive tension
 6. Tell customer's story, not your story
-
+{letter_section}
 # Your Task
 
 Using Peterson's Power Messaging framework, provide:
@@ -123,10 +166,17 @@ Using Peterson's Power Messaging framework, provide:
 4. **Rationale:** Why this step, grounded in Peterson's principles
 5. **Peterson Concepts to Apply:** Which specific framework elements should guide this next step?"""
 
+    # Add letter review task if letter provided
+    if letter_content:
+        analysis_prompt += """
+6. **Letter Review:** Does this letter align with Peterson's principles? Specific improvements?"""
+
     return {
         "call_id": call_id,
         "call": dict(call),
         "framework": framework_content,
+        "quotes": [dict(q) for q in quotes],
+        "letter": letter_content,
         "agentic_search_results": agentic_search_results,
         "stakeholder_context": {
             "stakeholder": dict(stakeholder_context['stakeholder']),

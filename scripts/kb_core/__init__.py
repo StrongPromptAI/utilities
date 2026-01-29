@@ -16,6 +16,7 @@ from .config import (
     BATCH_SIZE,
     DEFAULT_DAYS_BACK,
     DECAY_RATE,
+    QUOTES_PER_BATCH,
 )
 
 # Core utilities
@@ -77,6 +78,26 @@ from .search import (
 # Analysis
 from .analysis import suggested_next_step
 
+# Quotes
+from .quotes import (
+    extract_quotes_from_batch,
+    extract_call_quotes,
+    deduplicate_quotes,
+    draft_letter,
+)
+
+# CRUD - Quotes
+from .crud.quotes import (
+    insert_candidate_quotes,
+    get_candidate_quotes,
+    get_approved_quotes,
+    approve_quote,
+    reject_quote,
+    bulk_approve_quotes,
+    bulk_reject_quotes,
+    clear_candidate_quotes,
+)
+
 __all__ = [
     # Config
     "DB_URL",
@@ -89,6 +110,7 @@ __all__ = [
     "BATCH_SIZE",
     "DEFAULT_DAYS_BACK",
     "DECAY_RATE",
+    "QUOTES_PER_BATCH",
     # Core
     "get_db",
     "get_embedding",
@@ -127,4 +149,17 @@ __all__ = [
     "get_stakeholder_context",
     # Analysis
     "suggested_next_step",
+    # Quotes
+    "extract_quotes_from_batch",
+    "extract_call_quotes",
+    "deduplicate_quotes",
+    "draft_letter",
+    "insert_candidate_quotes",
+    "get_candidate_quotes",
+    "get_approved_quotes",
+    "approve_quote",
+    "reject_quote",
+    "bulk_approve_quotes",
+    "bulk_reject_quotes",
+    "clear_candidate_quotes",
 ]

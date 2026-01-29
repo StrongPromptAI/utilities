@@ -14,6 +14,12 @@ from kb_core import (
     get_calls_for_stakeholder,
     get_stakeholder_context,
     suggested_next_step,
+    extract_call_quotes,
+    get_candidate_quotes,
+    get_approved_quotes,
+    bulk_approve_quotes,
+    bulk_reject_quotes,
+    draft_letter,
 )
 
 
@@ -189,12 +195,13 @@ def list_calls(stakeholder):
 
 @cli.command()
 @click.argument("call_id", type=int)
-def analyze(call_id):
+@click.option("--letter", "-l", help="Path to letter/email to review")
+def analyze(call_id, letter):
     """Generate agentic analysis prompt for a call."""
     try:
         click.secho(f"\n🔍 Analyzing call {call_id}...\n", fg="blue")
 
-        result = suggested_next_step(call_id)
+        result = suggested_next_step(call_id, letter_path=letter)
 
         # Display the formatted prompt
         click.secho("=" * 80, fg="cyan")
@@ -207,6 +214,9 @@ def analyze(call_id):
         click.secho(f"   • Agentic search results: {len(result['agentic_search_results'])}", dim=True)
         click.secho(f"   • Total stakeholder calls: {result['stakeholder_context']['total_calls']}", dim=True)
         click.secho(f"   • Total chunks: {result['stakeholder_context']['total_chunks']}", dim=True)
+        click.secho(f"   • Approved quotes: {len(result.get('quotes', []))}", dim=True)
+        if result.get('letter'):
+            click.secho(f"   • Letter included: Yes", dim=True)
         click.echo()
 
     except ValueError as e:
@@ -286,6 +296,204 @@ def context(stakeholder_name, query, limit):
                     text = text[:150] + "..."
                 click.secho(f"       {text}", fg="white")
                 click.echo()
+
+    except Exception as e:
+        click.secho(f"Error: {e}", fg="red")
+        sys.exit(1)
+
+
+@cli.command(name="pick-quotes")
+@click.argument("call_id", type=int)
+@click.option("--review", is_flag=True, help="Review existing candidates only (skip extraction)")
+@click.option("--show", is_flag=True, help="Show approved quotes only")
+def pick_quotes(call_id, review, show):
+    """Extract and curate notable quotes from a call."""
+    try:
+        # Show mode: display approved quotes
+        if show:
+            quotes = get_approved_quotes(call_id)
+            if not quotes:
+                click.secho(f"No approved quotes for call {call_id}", fg="yellow")
+                return
+
+            click.secho(f"\n✓ Approved quotes for call {call_id}:", fg="green", bold=True)
+            click.echo()
+            for q in quotes:
+                _display_quote(q, show_id=False)
+            return
+
+        # Extract new candidates (unless --review)
+        if not review:
+            click.secho(f"\nExtracting quotes from call {call_id}...", fg="blue")
+            result = extract_call_quotes(call_id)
+
+            if "error" in result:
+                click.secho(result["error"], fg="red")
+                sys.exit(1)
+
+            click.secho(
+                f"\n  Processed {result['batches_processed']} batches, "
+                f"found {result['quotes_extracted']} candidate quotes\n",
+                fg="cyan"
+            )
+
+        # Get candidates for review
+        candidates = get_candidate_quotes(call_id)
+        if not candidates:
+            click.secho("No candidate quotes to review.", fg="yellow")
+
+            # Check for approved quotes
+            approved = get_approved_quotes(call_id)
+            if approved:
+                click.secho(f"  ({len(approved)} quotes already approved)", dim=True)
+            return
+
+        click.secho(f"Found {len(candidates)} candidate quotes:\n", fg="blue", bold=True)
+
+        # Build ID mapping for user input
+        id_map = {}
+        for idx, q in enumerate(candidates, 1):
+            id_map[idx] = q["id"]
+            _display_quote(q, display_num=idx)
+
+        # Interactive approval loop
+        click.echo()
+        click.secho("Actions:", fg="cyan", bold=True)
+        click.secho('  Enter numbers to approve (e.g., "1 3 5")', dim=True)
+        click.secho('  "all" - approve all', dim=True)
+        click.secho('  "none" - reject all', dim=True)
+        click.secho('  "done" - finish and save', dim=True)
+        click.secho('  "quit" - exit without saving', dim=True)
+        click.echo()
+
+        approved_ids = []
+        rejected_ids = []
+        pending_ids = [q["id"] for q in candidates]
+
+        while pending_ids:
+            action = click.prompt(">", default="done").strip().lower()
+
+            if action == "quit":
+                click.secho("Exited without saving.", fg="yellow")
+                return
+
+            if action == "done":
+                break
+
+            if action == "all":
+                approved_ids.extend(pending_ids)
+                pending_ids = []
+                click.secho(f"Approved all {len(approved_ids)} quotes", fg="green")
+                break
+
+            if action == "none":
+                rejected_ids.extend(pending_ids)
+                pending_ids = []
+                click.secho("Rejected all quotes", fg="yellow")
+                break
+
+            # Parse numbers
+            try:
+                nums = [int(n) for n in action.split()]
+                for n in nums:
+                    if n in id_map and id_map[n] in pending_ids:
+                        approved_ids.append(id_map[n])
+                        pending_ids.remove(id_map[n])
+                        click.secho(f"  Approved [{n}]", fg="green")
+                    elif n not in id_map:
+                        click.secho(f"  Invalid number: {n}", fg="red")
+            except ValueError:
+                click.secho("  Enter numbers separated by spaces, or 'all'/'none'/'done'/'quit'", fg="red")
+
+            if pending_ids:
+                remaining = [k for k, v in id_map.items() if v in pending_ids]
+                click.secho(f"  Remaining: {remaining}", dim=True)
+
+        # Save approvals/rejections
+        if approved_ids:
+            count = bulk_approve_quotes(approved_ids)
+            click.secho(f"\n✓ Approved {count} quotes", fg="green", bold=True)
+
+        # Reject remaining pending
+        remaining_to_reject = [pid for pid in pending_ids if pid not in approved_ids]
+        if remaining_to_reject:
+            bulk_reject_quotes(remaining_to_reject)
+
+        if rejected_ids:
+            bulk_reject_quotes(rejected_ids)
+            click.secho(f"  Rejected {len(rejected_ids)} quotes", dim=True)
+
+        # Show final count
+        final_approved = get_approved_quotes(call_id)
+        click.secho(f"\nTotal approved quotes for call {call_id}: {len(final_approved)}", fg="cyan")
+
+    except Exception as e:
+        click.secho(f"Error: {e}", fg="red")
+        sys.exit(1)
+
+
+def _display_quote(quote: dict, display_num: int = None, show_id: bool = True):
+    """Display a single quote in formatted output."""
+    if display_num:
+        click.secho(f"[{display_num}] ", fg="cyan", nl=False)
+
+    click.secho(f'"{quote["quote_text"]}"', fg="white", bold=True)
+
+    meta = []
+    if quote.get("speaker"):
+        meta.append(f"Speaker: {quote['speaker']}")
+    if quote.get("category"):
+        meta.append(f"Category: {quote['category']}")
+
+    if meta:
+        click.secho(f"    {' | '.join(meta)}", fg="magenta")
+
+    if quote.get("context"):
+        click.secho(f"    Context: {quote['context']}", dim=True)
+
+    click.echo()
+
+
+@cli.command(name="draft-letter")
+@click.argument("call_id", type=int)
+@click.option("--instructions", "-i", help="Custom instructions for the letter")
+@click.option("--no-quotes", is_flag=True, help="Exclude approved quotes from letter")
+@click.option("--output", "-o", help="Output file path (default: ~/Desktop/letter-name-date.md)")
+@click.option("--stdout", is_flag=True, help="Print to stdout instead of file")
+def draft_letter_cmd(call_id, instructions, no_quotes, output, stdout):
+    """Generate a markdown follow-up letter for a call."""
+    try:
+        click.secho(f"Drafting letter for call {call_id}...", fg="blue")
+
+        result = draft_letter(
+            call_id=call_id,
+            instructions=instructions,
+            include_quotes=not no_quotes
+        )
+
+        if "error" in result:
+            click.secho(result["error"], fg="red")
+            sys.exit(1)
+
+        markdown = result["markdown"]
+
+        if stdout:
+            click.echo(markdown)
+        else:
+            # Determine output path
+            if output:
+                out_path = Path(output).expanduser()
+            else:
+                # Default to symlink_docs/comms/ in current project
+                comms_dir = Path("symlink_docs/comms")
+                if not comms_dir.exists():
+                    comms_dir.mkdir(parents=True, exist_ok=True)
+                out_path = comms_dir / result["filename"]
+
+            out_path.write_text(markdown)
+            click.secho(f"\n✓ Letter saved to: {out_path}", fg="green", bold=True)
+            click.secho(f"  Recipient: {result['recipient']}", dim=True)
+            click.secho(f"  Call date: {result['call_date']}", dim=True)
 
     except Exception as e:
         click.secho(f"Error: {e}", fg="red")

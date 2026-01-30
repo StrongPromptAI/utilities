@@ -214,5 +214,21 @@
     "created": "2026-01-28T19:20:00-07:00",
     "status": "open",
     "resource": "C"
+  },
+  {
+    "id": 61,
+    "description": "Research value of LM Studio v1 REST API for local inference integration: Evaluate native /api/v1/* endpoints (chat, model load/unload/download, stateful chats, MCP via API, auth tokens). Compare native API vs OpenAI-compat mode features (stateful chat, remote MCPs, model load streaming, prompt processing events, context length per-request). Determine use cases for local model management and how it fits into existing infrastructure.",
+    "project": "infrastructure",
+    "created": "2026-01-29T10:00:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 62,
+    "description": "Voice pipeline smoke test: Clone and evaluate Pipecat (macos-local-voice-agents) and/or RealtimeVoiceChat for local voice-to-voice orchestration. Configure with validated models (Whisper Turbo STT, Kokoro 82M TTS, LM Studio LLM). Evaluate turn-taking, echo cancellation, interruption, latency. Update voice_ai_solutions_report_v3.md with results. See prompt: task-62-voice-smoke-test.md",
+    "project": "lora_training",
+    "created": "2026-01-29T17:00:00-07:00",
+    "status": "open",
+    "resource": "C"
   }
 ]

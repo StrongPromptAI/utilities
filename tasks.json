@@ -25,15 +25,7 @@
   },
   {
     "id": 32,
-    "description": "Create 'documents' table for lora_training: New table to replace/supplement 'reports'. Documents are tied to patient-provider relationships with specific types (op_notes, pre_op_consult, mri_report, face_sheet, protocol, etc.). Schema: document_id, patient_id, provider_id, document_type, source_format (digital/fax/scanned), document_date, created_at, document_metadata (key fields per type). Create corresponding 'document_chunks' table with heading_level, heading_text, heading_path, parent_chunk_id, bbox (from MinerU). Define document type taxonomy with purpose and structure. Integrate with task 33 (header/footer cleanup) and task 39 (MinerU structural context).",
-    "project": "lora_training",
-    "created": "2026-01-13T00:00:00-07:00",
-    "status": "open",
-    "resource": "C"
-  },
-  {
-    "id": 33,
-    "description": "Evaluate header/footer removal strategy: Test unstructured.io for document structure comprehension (headers, footers, diagrams). Short patience—if not easy, pivot to MinerU (has vision model). Avoid maintaining both libraries. See prompt: task-33-header-footer.md",
+    "description": "Migrate medical document ingestion to MinerU + remove unstructured.io: Use MinerU for MRI/operative notes OCR ingestion with native header/footer handling. Consolidate operative_report + fax_production pipelines. Delete header_detector.py (MinerU replaces empirical detection). Update dependencies (remove unstructured.io from pyproject.toml). See prompt: ~/repo_docs/lora_training/plans/task-32-mineru-medical-documents.md",
     "project": "lora_training",
     "created": "2026-01-13T00:00:00-07:00",
     "status": "open",
@@ -69,7 +61,7 @@
     "project": "lora_training",
     "created": "2026-01-21T00:00:00-07:00",
     "status": "open",
-    "resource": "C"
+    "resource": "Q"
   },
   {
     "id": 40,
@@ -80,24 +72,16 @@
     "resource": "Q"
   },
   {
-    "id": 43,
-    "description": "Add kb query types beyond kb-check: kb-ask (direct questions about stakeholders), kb-recall (what did we discuss about X), kb-compare (compare stakeholder positions). Update kb SKILL.md with new subskills.",
-    "project": "utilities",
-    "created": "2026-01-24T17:00:00-07:00",
-    "status": "open",
-    "resource": "C"
-  },
-  {
     "id": 45,
     "description": "Insert Mailbox services (HIPAA-compliant document routing) into provider tables. Build new 'Mega Inbox' section of PRD covering mailbox vendor integration for clinic document ingestion.",
-    "project": "lora_training",
+    "project": "warm_fusion",
     "created": "2026-01-24T18:30:00-07:00",
     "status": "open",
     "resource": "C"
   },
   {
     "id": 46,
-    "description": "Build Bawa demo database with time-travel capability: (1) Patient journey scrubber to jump forward/backward in recovery timeline (day 1, week 3, month 4); (2) Scenario templates - frozen knee, CPM non-compliance, normal recovery; (3) Let Bawa select patient types via UI to generate demo patients; (4) Use existing Bawa TKR protocol (PostOpTKAUPDATED_09112025_HSB.pdf already in pt_assistant_dev). Goal: show prevention AND recovery handling for each scenario.",
+    "description": "MVP Scope: Doctor Demo (Dr. Bawa). Build demo database with time-travel capability: (1) Patient journey scrubber to jump forward/backward in recovery timeline (day 1, week 3, month 4); (2) Scenario templates - frozen knee, CPM non-compliance, normal recovery; (3) Let doctor select patient types via UI to generate demo patients; (4) Use existing TKR protocol (PostOpTKAUPDATED_09112025_HSB.pdf already in pt_assistant_dev). Goal: show prevention AND recovery handling for each scenario. Polished demo for stakeholder presentation.",
     "project": "lora_training",
     "created": "2026-01-24T19:00:00-07:00",
     "status": "open",
@@ -108,14 +92,6 @@
     "description": "Document medical terminology in PROJECT_CONTEXT.md: (1) Document types - op notes (operative report, post-surgery details), pre-op consult/H&P (history & physical, pre-surgery baseline), face sheet (patient demographics + insurance), protocol (doctor's recovery guidelines); (2) Key terms - TKR (total knee replacement), ROM (range of motion), CPM (continuous passive motion machine), frozen knee (stiffness/limited ROM), ICD-10 (diagnosis codes); (3) Data sources - clean digital vs faxed/OCR quality issues.",
     "project": "lora_training",
     "created": "2026-01-24T19:00:00-07:00",
-    "status": "open",
-    "resource": "C"
-  },
-  {
-    "id": 48,
-    "description": "Voice architecture expansion: Deepgram TTS integration (POC/MVP) + Personaplex GPU research (BETA). See prompt: task-48-voice-architecture.md",
-    "project": "infrastructure",
-    "created": "2026-01-26T10:00:00-07:00",
     "status": "open",
     "resource": "C"
   },
@@ -225,9 +201,16 @@
   },
   {
     "id": 62,
-    "description": "Voice pipeline smoke test: Clone and evaluate Pipecat (macos-local-voice-agents) and/or RealtimeVoiceChat for local voice-to-voice orchestration. Configure with validated models (Whisper Turbo STT, Kokoro 82M TTS, LM Studio LLM). Evaluate turn-taking, echo cancellation, interruption, latency. Update voice_ai_solutions_report_v3.md with results. See prompt: task-62-voice-smoke-test.md",
+    "description": "Voice architecture expansion & pipeline smoke test: (1) Deepgram TTS integration (POC/MVP) + Personaplex GPU research (BETA); (2) Evaluate Pipecat (macos-local-voice-agents) and/or RealtimeVoiceChat for local voice-to-voice orchestration; (3) Configure with validated models (Whisper Turbo STT, Kokoro 82M TTS, LM Studio LLM); (4) Evaluate turn-taking, echo cancellation, interruption, latency; (5) Update voice_ai_solutions_report_v3.md with all findings, integration plan, and architecture recommendations. See prompt: task-62-voice-smoke-test.md",
     "project": "lora_training",
     "created": "2026-01-29T17:00:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 63,
+    "description": "Purchase pop.clinic domain. Approved by Jeff (2026-01-28T00:00:00-07:00)",
+    "created": "2026-01-30T14:30:00-07:00",
     "status": "open",
     "resource": "C"
   }

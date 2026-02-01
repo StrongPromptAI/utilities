@@ -39,6 +39,7 @@ def preprocess_dialpad_transcript(raw_text: str, merge_speaker_turns: bool = Tru
     ]
 
     # Words that suggest possible filler (for LLM adjudication)
+    # Use word boundaries in word boundary checking below
     FILLER_INDICATORS = ['yeah', 'yup', 'yep', 'okay', 'ok', 'right', 'sure', 'alright', 'correct', 'true', 'exactly', 'definitely', 'absolutely', 'got it', 'i see', 'mm-hmm', 'uh-huh']
 
     def is_obvious_filler(text: str) -> bool:
@@ -57,36 +58,65 @@ def preprocess_dialpad_transcript(raw_text: str, merge_speaker_turns: bool = Tru
         # Borderline: 15-80 chars, starts with or contains filler words, but has more content
         if len(normalized) < 15 or len(normalized) > 80:
             return False
-        return any(ind in normalized for ind in FILLER_INDICATORS)
+        # Use word boundaries to avoid false positives (e.g., "sure" in "pressure")
+        return any(re.search(rf'\b{re.escape(ind)}\b', normalized) for ind in FILLER_INDICATORS)
 
     def llm_classify_filler(texts: list[str]) -> list[bool]:
         """Use local LLM to classify borderline statements. Returns list of is_filler bools."""
         if not texts:
             return []
 
-        client = OpenAI(base_url=LM_STUDIO_URL, api_key="not-needed")
+        try:
+            client = OpenAI(base_url=LM_STUDIO_URL, api_key="not-needed")
+        except Exception as e:
+            print(f"Warning: Could not connect to LM Studio: {e}. Keeping all borderline items.")
+            return [False] * len(texts)  # Fallback: keep all borderline items
 
-        results = []
-        # Process in batches
-        for text in texts:
-            prompt = f"""Classify this statement from a business call transcript.
-Is this FILLER (just agreement/acknowledgment with no real information) or CONTENT (has meaningful information)?
+        # Batch process all statements in one call for efficiency
+        # Format: "1. statement\n2. statement\n..."
+        numbered_statements = "\n".join([f'{i+1}. "{text}"' for i, text in enumerate(texts)])
 
-Statement: "{text}"
+        prompt = f"""Classify each statement from a business call transcript.
+Is it FILLER (just agreement/acknowledgment with no real information) or CONTENT (has meaningful information)?
 
-Reply with only one word: FILLER or CONTENT"""
+Statements:
+{numbered_statements}
 
-            # Hard fail if model not loaded - no fallback
+Reply with only the line number and classification, one per line:
+1. FILLER
+2. CONTENT
+etc."""
+
+        try:
             response = client.chat.completions.create(
                 model="qwen2.5-coder-1.5b-instruct-mlx",
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=10,
+                max_tokens=len(texts) * 10,
                 temperature=0
             )
             answer = response.choices[0].message.content.strip().upper()
-            results.append("FILLER" in answer)
 
-        return results
+            # Parse responses (format: "1. FILLER", "2. CONTENT", etc.)
+            results = []
+            lines = answer.split('\n')
+            for i, line in enumerate(lines):
+                if i < len(texts):
+                    if "FILLER" in line:
+                        results.append(True)
+                    elif "CONTENT" in line:
+                        results.append(False)
+                    else:
+                        # Unexpected format - default to keep (False = not filler)
+                        results.append(False)
+
+            # If parsing returned fewer results than expected, pad with False (keep)
+            while len(results) < len(texts):
+                results.append(False)
+
+            return results[:len(texts)]  # Return only as many results as texts
+        except Exception as e:
+            print(f"Warning: LLM classification failed: {e}. Keeping all borderline items.")
+            return [False] * len(texts)  # Fallback: keep all borderline items
 
     lines = []
     participants = set()

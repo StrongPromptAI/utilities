@@ -157,7 +157,7 @@ if __name__ == "__main__":
     ingest_parser = subparsers.add_parser("ingest", help="Ingest a document")
     ingest_parser.add_argument("file", help="Path to document")
     ingest_parser.add_argument("--stakeholder", required=True, help="Stakeholder name")
-    ingest_parser.add_argument("--type", required=True, choices=["doctor", "partner", "vendor", "investor", "employee", "other"])
+    ingest_parser.add_argument("--type", required=True, choices=["doctor", "partner", "vendor", "investor", "employee", "prospect", "other"])
     ingest_parser.add_argument("--date", required=True, help="Call date (YYYY-MM-DD)")
     ingest_parser.add_argument("--participants", required=True, help="Comma-separated participant names")
     ingest_parser.add_argument("--org", help="Organization name")

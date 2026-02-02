@@ -13,10 +13,12 @@ dependencies = [
     "psycopg[binary]>=3.3.2",
     "anthropic>=0.76.0",
     "click>=8.1.0",
+    "python-docx>=1.2.0",
 ]
 
 [project.scripts]
-show = "scripts.show:main"
+kb = "scripts.kb_cli:cli"
+kb-ingest = "scripts.kb_ingest:main"
 
 [build-system]
 requires = ["setuptools>=61.0"]

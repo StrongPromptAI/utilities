@@ -31,7 +31,7 @@ from .chunking import (
 )
 
 # Transcripts
-from .transcripts import preprocess_dialpad_transcript
+from .transcripts import preprocess_transcript
 
 # CRUD - Stakeholders
 from .crud.stakeholders import (
@@ -119,7 +119,7 @@ __all__ = [
     "chunk_by_sections",
     "chunk_transcript",
     # Transcripts
-    "preprocess_dialpad_transcript",
+    "preprocess_transcript",
     # Stakeholders
     "get_stakeholder",
     "list_stakeholders",

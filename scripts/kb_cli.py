@@ -5,10 +5,7 @@ import sys
 import click
 from pathlib import Path
 
-# Add scripts directory to Python path
-sys.path.insert(0, str(Path(__file__).parent))
-
-from kb_core import (
+from scripts.kb_core import (
     semantic_search,
     list_stakeholders,
     get_calls_for_stakeholder,
@@ -108,7 +105,7 @@ def search(query, stakeholder, project, limit, days):
 def list_stakeholders_cmd(type_filter):
     """List all stakeholders in the knowledge base."""
     try:
-        from kb_core import list_stakeholders as list_stakeholders_fn
+        from scripts.kb_core import list_stakeholders as list_stakeholders_fn
         stakeholders = list_stakeholders_fn(type_filter=type_filter)
 
         if not stakeholders:

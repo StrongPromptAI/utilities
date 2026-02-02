@@ -3,18 +3,76 @@
 import re
 import csv
 from io import StringIO
+from pathlib import Path
 from openai import OpenAI
 from .config import LM_STUDIO_URL
 
+MAX_LLM_BATCH = 15  # Stay within qwen2.5-coder-1.5b context window
 
-def preprocess_dialpad_transcript(raw_text: str, merge_speaker_turns: bool = True, filter_fillers: bool = True, llm_adjudicate: bool = True) -> dict:
-    """Preprocess Dialpad CSV transcript.
 
-    Strips timestamps, preserves speaker attribution, optionally merges
-    consecutive turns by the same speaker, filters out agreement fillers.
+def _extract_docx(file_path: str) -> str:
+    """Extract text from Teams DOCX transcript.
+
+    Teams DOCX structure: each paragraph has optional speaker icon (image)
+    followed by text in format: \nName   Timestamp\nContent
+
+    Images are automatically excluded by python-docx .text property.
+    """
+    from docx import Document
+    doc = Document(file_path)
+    return '\n'.join(p.text for p in doc.paragraphs if p.text.strip())
+
+
+def _detect_text_format(text: str) -> str:
+    """Detect transcript text format from content.
+
+    Returns: 'csv', 'plaintext', or raises ValueError.
+    """
+    first_lines = text.strip().split('\n')[:5]
+
+    # CSV: quotes + commas (Dialpad format)
+    if any('"' in line and ',' in line for line in first_lines):
+        return 'csv'
+
+    # Plaintext: Name  Timestamp pattern (Teams text export, other)
+    pattern = r'^[A-Za-z\s]+?\s+\d{1,2}:\d{2}'
+    if any(re.match(pattern, line.strip()) for line in first_lines if line.strip()):
+        return 'plaintext'
+
+    # Unknown
+    sample = text.strip()[:200]
+    raise ValueError(f"Unknown transcript format. First 200 chars:\n{sample}")
+
+
+def detect_and_extract(file_path: str) -> tuple[str, str]:
+    """Detect format and extract text. Returns (text, format_name)."""
+    path = Path(file_path)
+
+    # Level 1: Binary/file-level formats
+    if path.suffix.lower() == '.docx':
+        text = _extract_docx(str(path))
+        # After DOCX extraction, detect text-level format
+        # Teams DOCX extracts to plaintext format
+        try:
+            fmt = _detect_text_format(text)
+        except ValueError:
+            fmt = 'plaintext'
+        return text, fmt
+
+    # Level 2: Text content detection
+    raw = path.read_text(errors='replace')
+    return raw, _detect_text_format(raw)
+
+
+def preprocess_transcript(file_path: str, merge_speaker_turns: bool = True, filter_fillers: bool = True, llm_adjudicate: bool = True) -> dict:
+    """Preprocess a transcript file (any supported format).
+
+    Detects format (DOCX, CSV, plaintext), extracts text, strips timestamps,
+    preserves speaker attribution, optionally merges consecutive turns by the
+    same speaker, filters out agreement fillers.
 
     Args:
-        raw_text: Raw CSV content from Dialpad
+        file_path: Path to transcript file (DOCX, CSV, or plaintext)
         merge_speaker_turns: If True, merge consecutive lines from same speaker
         filter_fillers: If True, remove low-value agreement statements
         llm_adjudicate: If True, use local LLM to classify borderline cases
@@ -25,9 +83,12 @@ def preprocess_dialpad_transcript(raw_text: str, merge_speaker_turns: bool = Tru
             "participants": list of unique speakers,
             "turn_count": number of speaker turns,
             "filtered_count": number of filler turns removed,
-            "llm_filtered_count": number filtered by LLM adjudication
+            "llm_filtered_count": number filtered by LLM adjudication,
+            "format": detected format name
         }
     """
+    raw_text, fmt = detect_and_extract(file_path)
+
     # Filler patterns - obvious agreement/acknowledgment with no semantic value
     OBVIOUS_FILLER_PATTERNS = [
         r'^(yup|yep|yeah|yes|okay|ok|right|sure|uh-huh|uh huh|mm-hmm|mm hmm|mmm|hmm|alright|got it|correct|true|exactly|absolutely|definitely|totally|i see|oh|ah)\.?!?$',
@@ -39,7 +100,6 @@ def preprocess_dialpad_transcript(raw_text: str, merge_speaker_turns: bool = Tru
     ]
 
     # Words that suggest possible filler (for LLM adjudication)
-    # Use word boundaries in word boundary checking below
     FILLER_INDICATORS = ['yeah', 'yup', 'yep', 'okay', 'ok', 'right', 'sure', 'alright', 'correct', 'true', 'exactly', 'definitely', 'absolutely', 'got it', 'i see', 'mm-hmm', 'uh-huh']
 
     def is_obvious_filler(text: str) -> bool:
@@ -55,25 +115,12 @@ def preprocess_dialpad_transcript(raw_text: str, merge_speaker_turns: bool = Tru
     def is_borderline(text: str) -> bool:
         """Check if text is a borderline case needing LLM adjudication."""
         normalized = text.lower().strip()
-        # Borderline: 15-80 chars, starts with or contains filler words, but has more content
         if len(normalized) < 15 or len(normalized) > 80:
             return False
-        # Use word boundaries to avoid false positives (e.g., "sure" in "pressure")
         return any(re.search(rf'\b{re.escape(ind)}\b', normalized) for ind in FILLER_INDICATORS)
 
-    def llm_classify_filler(texts: list[str]) -> list[bool]:
-        """Use local LLM to classify borderline statements. Returns list of is_filler bools."""
-        if not texts:
-            return []
-
-        try:
-            client = OpenAI(base_url=LM_STUDIO_URL, api_key="not-needed")
-        except Exception as e:
-            print(f"Warning: Could not connect to LM Studio: {e}. Keeping all borderline items.")
-            return [False] * len(texts)  # Fallback: keep all borderline items
-
-        # Batch process all statements in one call for efficiency
-        # Format: "1. statement\n2. statement\n..."
+    def _classify_batch(client: OpenAI, texts: list[str]) -> list[bool]:
+        """Classify a single batch of texts. Returns list of is_filler bools."""
         numbered_statements = "\n".join([f'{i+1}. "{text}"' for i, text in enumerate(texts)])
 
         prompt = f"""Classify each statement from a business call transcript.
@@ -96,7 +143,6 @@ etc."""
             )
             answer = response.choices[0].message.content.strip().upper()
 
-            # Parse responses (format: "1. FILLER", "2. CONTENT", etc.)
             results = []
             lines = answer.split('\n')
             for i, line in enumerate(lines):
@@ -106,32 +152,42 @@ etc."""
                     elif "CONTENT" in line:
                         results.append(False)
                     else:
-                        # Unexpected format - default to keep (False = not filler)
                         results.append(False)
 
-            # If parsing returned fewer results than expected, pad with False (keep)
             while len(results) < len(texts):
                 results.append(False)
 
-            return results[:len(texts)]  # Return only as many results as texts
+            return results[:len(texts)]
         except Exception as e:
             print(f"Warning: LLM classification failed: {e}. Keeping all borderline items.")
-            return [False] * len(texts)  # Fallback: keep all borderline items
+            return [False] * len(texts)
+
+    def llm_classify_filler(texts: list[str]) -> list[bool]:
+        """Use local LLM to classify borderline statements in batches. Returns list of is_filler bools."""
+        if not texts:
+            return []
+
+        try:
+            client = OpenAI(base_url=LM_STUDIO_URL, api_key="not-needed")
+        except Exception as e:
+            print(f"Warning: Could not connect to LM Studio: {e}. Keeping all borderline items.")
+            return [False] * len(texts)
+
+        results = []
+        for batch_start in range(0, len(texts), MAX_LLM_BATCH):
+            batch = texts[batch_start:batch_start + MAX_LLM_BATCH]
+            batch_results = _classify_batch(client, batch)
+            results.extend(batch_results)
+        return results
 
     lines = []
     participants = set()
     filtered_count = 0
     llm_filtered_count = 0
-    borderline_items = []  # (index, speaker, text) for LLM adjudication
-
-    # Try to detect format: CSV vs plain text
+    borderline_items = []
     all_rows = []
 
-    # Check if it looks like CSV (has quotes and commas in first few lines)
-    first_lines = raw_text.strip().split('\n')[:5]
-    is_csv = any('"' in line and ',' in line for line in first_lines)
-
-    if is_csv:
+    if fmt == 'csv':
         # Parse CSV - Dialpad format: "timestamp","speaker","text"
         reader = csv.reader(StringIO(raw_text))
         for row in reader:
@@ -142,21 +198,45 @@ etc."""
                     participants.add(speaker)
                     all_rows.append({"speaker": speaker, "text": text})
     else:
-        # Parse plain text format: "Name   Timestamp[Content]"
-        # Pattern: Name (multi-word), whitespace, timestamp (MM:SS or H:MM:SS), content (no separator)
-        pattern = r'^([A-Za-z\s]+?)\s+(\d{1,2}:\d{2})(.*)$'
+        # Parse plain text format. Two variants:
+        # Single-line: "Name   0:03 Content on same line"
+        # Multi-line (Teams DOCX): "Name   0:03\nContent on next line(s)"
+        speaker_pattern = r'^([A-Za-z\s]+?)\s+(\d{1,2}:\d{2})(.*)$'
+        current_speaker = None
+        current_text_lines = []
+
         for line in raw_text.strip().split('\n'):
-            line = line.strip()
-            if not line:
+            stripped = line.strip()
+            if not stripped:
+                # Blank line: flush current turn if we have content
+                if current_speaker and current_text_lines:
+                    text = ' '.join(current_text_lines)
+                    participants.add(current_speaker)
+                    all_rows.append({"speaker": current_speaker, "text": text})
+                    current_speaker = None
+                    current_text_lines = []
                 continue
-            match = re.match(pattern, line)
+
+            match = re.match(speaker_pattern, stripped)
             if match:
-                speaker = match.group(1).strip()
-                # timestamp = match.group(2)  # Not used, but available if needed
-                text = match.group(3).strip()
-                if speaker and text:
-                    participants.add(speaker)
-                    all_rows.append({"speaker": speaker, "text": text})
+                # Flush previous turn
+                if current_speaker and current_text_lines:
+                    text = ' '.join(current_text_lines)
+                    participants.add(current_speaker)
+                    all_rows.append({"speaker": current_speaker, "text": text})
+
+                current_speaker = match.group(1).strip()
+                remainder = match.group(3).strip()
+                current_text_lines = [remainder] if remainder else []
+            elif current_speaker:
+                # Content line belonging to current speaker
+                current_text_lines.append(stripped)
+
+        # Flush last turn
+        if current_speaker and current_text_lines:
+            text = ' '.join(current_text_lines)
+            participants.add(current_speaker)
+            all_rows.append({"speaker": current_speaker, "text": text})
 
     # First pass: obvious fillers and identify borderline
     for i, row in enumerate(all_rows):
@@ -187,7 +267,7 @@ etc."""
             lines.append({"speaker": row["speaker"], "text": row["text"]})
 
     if not lines:
-        return {"text": raw_text, "participants": [], "turn_count": 0, "filtered_count": filtered_count, "llm_filtered_count": llm_filtered_count}
+        return {"text": raw_text, "participants": [], "turn_count": 0, "filtered_count": filtered_count, "llm_filtered_count": llm_filtered_count, "format": fmt}
 
     # Merge consecutive turns by same speaker
     if merge_speaker_turns:
@@ -226,5 +306,6 @@ etc."""
         "participants": sorted(list(participants)),
         "turn_count": len(lines),
         "filtered_count": filtered_count,
-        "llm_filtered_count": llm_filtered_count
+        "llm_filtered_count": llm_filtered_count,
+        "format": fmt
     }

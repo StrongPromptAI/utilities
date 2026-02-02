@@ -89,7 +89,7 @@ def chunk_transcript(text: str, target_chunk_size: int = TRANSCRIPT_TARGET_CHUNK
     never splitting mid-turn. Extracts speaker from [Name] prefix.
 
     Args:
-        text: Preprocessed transcript (output of preprocess_dialpad_transcript)
+        text: Preprocessed transcript (output of preprocess_transcript)
         target_chunk_size: Target chunk size in characters
 
     Returns:

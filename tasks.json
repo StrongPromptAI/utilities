@@ -213,5 +213,69 @@
     "created": "2026-01-30T14:30:00-07:00",
     "status": "open",
     "resource": "C"
+  },
+  {
+    "id": 64,
+    "description": "11 Truisms deck: Add 'What is AI?' intro slide before concept-01. Jared said his peers would define AI as 'a bot' or 'ChatGPT' — they'd give products, not concepts. The deck assumes shared understanding that doesn't exist. Use Chris's explanation from the call: code is deterministic (bug = didn't do what you asked), AI is a compressed database of billions of data points that predicts responses. Extend what people already know about software. Keep it simple — one slide, not a lecture. Aligns with PRD's 'flip the classroom' model: level-set before the truisms so async review doesn't lose people at slide 1. Source: call 18, chunk 18.",
+    "project": "ai-insights-hub",
+    "created": "2026-02-01T15:00:00-07:00",
+    "status": "done",
+    "resource": "C"
+  },
+  {
+    "id": 65,
+    "description": "11 Truisms deck: Add 'Why this matters to HR' line to each concept and trap card. Jared's closing feedback: 'This is what it means generally, but this is why it's important that you understand it. They need to say this is why it matters to me.' The deck explains truisms generically but doesn't connect to the HR business partner role. PRD confirms the audience is HR BPs who will carry this into conversations with business leads — they need to internalize why each truism is relevant to THEIR conversations, not just understand the concept abstractly. Use gearbox edit mode to make this a customizable field so other departments can tailor it. Source: call 18, chunks 53-54.",
+    "project": "ai-insights-hub",
+    "created": "2026-02-01T15:00:00-07:00",
+    "status": "done",
+    "resource": "C"
+  },
+  {
+    "id": 66,
+    "description": "11 Truisms deck: Rename concept-04 'Create the Digital Employee Envelope' to 'Define the Guardrails'. Jared flagged 'envelope' as unclear — asked if it was a technical term or Chris's word. He immediately edited it to 'AKA guardrails' during the call. 'Guardrails' is universally understood by non-technical HR audience; 'envelope' requires explanation. PRD warns against conference fatigue where people feel lost — jargon contributes to that. Update content.json concept-04 truism field. Source: call 18, chunks 46-47.",
+    "project": "ai-insights-hub",
+    "created": "2026-02-01T15:00:00-07:00",
+    "status": "done",
+    "resource": "C"
+  },
+  {
+    "id": 67,
+    "description": "11 Truisms deck: Replace concept-02 example with recruiting/generational hiring. Jared: 'I think we need a recruiting thing in here... recruiting and hiring the different generations would resonate more because we're talking HR and every hiring manager has got hire.' Current example (customer service training) is operations-facing, not HR-facing. PRD says audience is HR BPs at MACU — recruiting is daily life for them, training is a step removed. Keep the truism ('Extend, Don't Replace, Your Framework') but swap the challenge/solution to something like: 'Hiring across generations requires different engagement strategies — AI-enhanced recruiting extends existing playbooks rather than replacing recruiter judgment.' Source: call 18, chunk 51.",
+    "project": "ai-insights-hub",
+    "created": "2026-02-01T15:00:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 68,
+    "description": "11 Truisms deck: Add short definition to each concept/trap card. Jared: 'Each slide, what I think we're missing is this is the definition of what this means.' Truism names are catchy but not self-explanatory ('Unit of Value', 'Ascension-Ready Culture'). A one-line definition field on each card grounds the concept before the example. This pairs with the 'What is AI?' intro slide (task 64) — together they reduce the assumption gap. Consider adding a 'definition' field to content.json schema and rendering it as a subtitle or callout on the concept card. Source: call 18, chunk 18.",
+    "project": "ai-insights-hub",
+    "created": "2026-02-01T15:00:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 69,
+    "description": "11 Truisms deck: Add 'AI usage patterns' taxonomy slide or reference. Jared asked: 'What are the AI applications? Big rocks? Roll ups?' He wants a mental model of the landscape — bots, agents, Q&A, embedded training, etc. Chris responded that it's more a continuum than lanes (unit of value gets wider as agency increases). A simple visual showing the spectrum from stateless Q&A to autonomous agents would give the audience a shared vocabulary before they encounter vendor pitches. PRD's mentor positioning means equipping them to ask better questions at conferences — this taxonomy is that equipment. Keep it to one slide, not exhaustive. Source: call 18, chunks 31, 36.",
+    "project": "ai-insights-hub",
+    "created": "2026-02-01T15:00:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 70,
+    "description": "11 Truisms deck: Add 'building blocks, not ranked list' framing. Jared asked: 'Are these in order of priority? Criticality? Foundational? Building blocks?' Chris confirmed they're non-linear building blocks with deliberate cross-connections (like LLM dimensions). The deck currently presents them numbered 01-08 which implies ranking. Add framing text on the overview/nav that positions these as interconnected building blocks, not a priority list. This prevents the audience from skipping 'lower numbered' truisms or over-indexing on #1. Small change — a line of copy on the throughline or navigation view. Source: call 18, chunks 47-48.",
+    "project": "ai-insights-hub",
+    "created": "2026-02-01T15:00:00-07:00",
+    "status": "open",
+    "resource": "C"
+  },
+  {
+    "id": 71,
+    "description": "Re-address 11 Truisms deck and link to StrongPrompt.ai website. The deck currently lives standalone on Railway — connect it to the strongprompt.ai domain so it's accessible as a StrongPrompt offering. Coordinate with task 8 (strongprompt-website finalization). Consider: subdomain (truisms.strongprompt.ai) vs path routing (/truisms), branding alignment between deck and site, whether the deck should have a StrongPrompt header/footer or remain clean for 'flip the classroom' delivery. The deck is the first tangible product — linking it to the website establishes StrongPrompt as the source without making it feel like a pitch (PRD: mentor not hero, avoid 'I feel like I've been pitched' reaction).",
+    "project": "ai-insights-hub",
+    "created": "2026-02-01T15:15:00-07:00",
+    "status": "open",
+    "resource": "C"
   }
 ]

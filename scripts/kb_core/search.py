@@ -3,13 +3,13 @@
 from .db import get_db
 from .embeddings import get_embedding
 from .config import DEFAULT_DAYS_BACK, DECAY_RATE
-from .crud.stakeholders import get_stakeholder
-from .crud.calls import get_calls_for_stakeholder
+from .crud.clients import get_client
+from .crud.calls import get_calls_for_client
 
 
 def semantic_search(
     query: str,
-    stakeholder_name: str = None,
+    client_name: str = None,
     project_name: str = None,
     limit: int = 10,
     days_back: int = None,
@@ -22,7 +22,7 @@ def semantic_search(
 
     Args:
         query: Search query
-        stakeholder_name: Optional filter
+        client_name: Optional filter
         project_name: Optional filter
         limit: Max results
         days_back: Lookback window (None = no limit, use DEFAULT_DAYS_BACK for recency)
@@ -39,9 +39,9 @@ def semantic_search(
             where_clauses = []
             filter_params = []
 
-            if stakeholder_name:
-                where_clauses.append("stakeholder_name = %s")
-                filter_params.append(stakeholder_name)
+            if client_name:
+                where_clauses.append("client_name = %s")
+                filter_params.append(client_name)
 
             if project_name:
                 where_clauses.append("project_name = %s")
@@ -63,7 +63,7 @@ def semantic_search(
                 f"""WITH scored AS (
                         SELECT
                             id, chunk_idx, text, speaker,
-                            stakeholder_name, project_name, call_date, summary,
+                            client_name, project_name, call_date, summary,
                             embedding <=> %s::vector AS distance,
                             (CURRENT_DATE - call_date) AS days_old,
                             (1 - (embedding <=> %s::vector)) * POWER(%s, CURRENT_DATE - call_date) AS recency_score
@@ -80,7 +80,7 @@ def semantic_search(
 
 def hybrid_search(
     query: str,
-    stakeholder_name: str = None,
+    client_name: str = None,
     project_name: str = None,
     limit: int = 10,
     days_back: int = None,
@@ -99,7 +99,7 @@ def hybrid_search(
 
     Args:
         query: Search query
-        stakeholder_name: Optional filter
+        client_name: Optional filter
         project_name: Optional filter
         limit: Max results
         days_back: Lookback window (None = no limit)
@@ -118,9 +118,9 @@ def hybrid_search(
             where_clauses = []
             filter_params = []
 
-            if stakeholder_name:
-                where_clauses.append("stakeholder_name = %s")
-                filter_params.append(stakeholder_name)
+            if client_name:
+                where_clauses.append("client_name = %s")
+                filter_params.append(client_name)
 
             if project_name:
                 where_clauses.append("project_name = %s")
@@ -146,7 +146,7 @@ def hybrid_search(
 
             cur.execute(
                 f"""WITH semantic AS (
-                        SELECT id, text, speaker, stakeholder_name, project_name, call_date, summary,
+                        SELECT id, text, speaker, client_name, project_name, call_date, summary,
                                (1 - (embedding <=> %s::vector)) * 8.0 as semantic_score,
                                (CURRENT_DATE - call_date) as days_old
                         FROM chunks_with_context
@@ -156,7 +156,7 @@ def hybrid_search(
                         LIMIT 100
                     ),
                     fts AS (
-                        SELECT id, text, speaker, stakeholder_name, project_name, call_date, summary,
+                        SELECT id, text, speaker, client_name, project_name, call_date, summary,
                                ts_rank_cd(search_vector, websearch_to_tsquery('english', %s)) * 8.0 as fts_score,
                                (CURRENT_DATE - call_date) as days_old
                         FROM chunks_with_context
@@ -169,7 +169,7 @@ def hybrid_search(
                         COALESCE(s.id, f.id) as id,
                         COALESCE(s.text, f.text) as text,
                         COALESCE(s.speaker, f.speaker) as speaker,
-                        COALESCE(s.stakeholder_name, f.stakeholder_name) as stakeholder_name,
+                        COALESCE(s.client_name, f.client_name) as client_name,
                         COALESCE(s.project_name, f.project_name) as project_name,
                         COALESCE(s.call_date, f.call_date) as call_date,
                         COALESCE(s.summary, f.summary) as summary,
@@ -189,7 +189,7 @@ def hybrid_search(
 
 def semantic_search_with_fallback(
     query: str,
-    stakeholder_name: str = None,
+    client_name: str = None,
     project_name: str = None,
     limit: int = 10
 ) -> dict:
@@ -204,7 +204,7 @@ def semantic_search_with_fallback(
     """
     results = semantic_search(
         query,
-        stakeholder_name=stakeholder_name,
+        client_name=client_name,
         project_name=project_name,
         limit=limit,
         days_back=DEFAULT_DAYS_BACK
@@ -217,16 +217,16 @@ def semantic_search_with_fallback(
     }
 
 
-def get_stakeholder_context(stakeholder_name: str, query: str = None, limit: int = 20) -> dict:
-    """Get comprehensive context about a stakeholder."""
-    stakeholder = get_stakeholder(stakeholder_name)
-    if not stakeholder:
-        return {"error": f"Stakeholder '{stakeholder_name}' not found"}
+def get_client_context(client_name: str, query: str = None, limit: int = 20) -> dict:
+    """Get comprehensive context about a client."""
+    client = get_client(client_name)
+    if not client:
+        return {"error": f"Client '{client_name}' not found"}
 
-    calls = get_calls_for_stakeholder(stakeholder_name)
+    calls = get_calls_for_client(client_name)
 
     result = {
-        "stakeholder": stakeholder,
+        "client": client,
         "calls": calls,
         "all_chunks_count": 0
     }
@@ -234,12 +234,12 @@ def get_stakeholder_context(stakeholder_name: str, query: str = None, limit: int
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT count(*) as cnt FROM chunks_with_context WHERE stakeholder_name = %s",
-                (stakeholder_name,)
+                "SELECT count(*) as cnt FROM chunks_with_context WHERE client_name = %s",
+                (client_name,)
             )
             result["all_chunks_count"] = cur.fetchone()["cnt"]
 
     if query:
-        result["relevant_chunks"] = semantic_search(query, stakeholder_name=stakeholder_name, limit=limit)
+        result["relevant_chunks"] = semantic_search(query, client_name=client_name, limit=limit)
 
     return result

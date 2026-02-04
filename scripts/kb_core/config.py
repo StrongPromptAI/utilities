@@ -1,12 +1,14 @@
 """Configuration constants for knowledge base."""
 
 # Database
-DB_URL = "postgresql://postgres:55@localhost/knowledge_base"
+DB_URL = "postgresql://postgres:55@localhost:5433/knowledge_base"
 
-# LM Studio
+# LM Studio (for LLM inference)
 LM_STUDIO_URL = "http://localhost:1234/v1"
-EMBED_MODEL = "nomic-embed-text"
-SUMMARY_MODEL = "qwen3-vl-8b-instruct-mlx"
+
+# Embedding (sentence-transformers, local)
+EMBED_MODEL = "nomic-ai/nomic-embed-text-v1.5"
+SUMMARY_MODEL = "mistral-small-3.2-24b-instruct-2506"
 
 # Chunking
 DEFAULT_CHUNK_SIZE = 512

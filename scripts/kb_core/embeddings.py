@@ -1,11 +1,20 @@
-"""Embedding generation via LM Studio."""
+"""Embedding generation via sentence-transformers (local) or TEI (production)."""
 
-from openai import OpenAI
-from .config import LM_STUDIO_URL, EMBED_MODEL
+import os
+from functools import lru_cache
+
+from .config import EMBED_MODEL
+
+
+@lru_cache(maxsize=1)
+def _get_model():
+    """Load sentence-transformers model once, cache across calls."""
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(EMBED_MODEL, trust_remote_code=True)
 
 
 def get_embedding(text: str) -> list[float]:
-    """Generate embedding via LM Studio."""
-    client = OpenAI(base_url=LM_STUDIO_URL, api_key="not-needed")
-    response = client.embeddings.create(model=EMBED_MODEL, input=text)
-    return response.data[0].embedding
+    """Generate embedding using sentence-transformers locally."""
+    model = _get_model()
+    embedding = model.encode(text, normalize_embeddings=True)
+    return embedding.tolist()

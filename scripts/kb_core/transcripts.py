@@ -34,8 +34,8 @@ def _detect_text_format(text: str) -> str:
     if any('"' in line and ',' in line for line in first_lines):
         return 'csv'
 
-    # Plaintext: Name  Timestamp pattern (Teams text export, other)
-    pattern = r'^[A-Za-z\s]+?\s+\d{1,2}:\d{2}'
+    # Plaintext: Name  Timestamp pattern (Teams text export, pipe-delimited, other)
+    pattern = r'^[A-Za-z\s]+?\s*\|?\s*\d{1,2}:\d{2}'
     if any(re.match(pattern, line.strip()) for line in first_lines if line.strip()):
         return 'plaintext'
 
@@ -201,7 +201,7 @@ etc."""
         # Parse plain text format. Two variants:
         # Single-line: "Name   0:03 Content on same line"
         # Multi-line (Teams DOCX): "Name   0:03\nContent on next line(s)"
-        speaker_pattern = r'^([A-Za-z\s]+?)\s+(\d{1,2}:\d{2})(.*)$'
+        speaker_pattern = r'^([A-Za-z\s]+?)\s*\|\s*(\d{1,2}:\d{2})(.*)$|^([A-Za-z\s]+?)\s+(\d{1,2}:\d{2})(.*)$'
         current_speaker = None
         current_text_lines = []
 

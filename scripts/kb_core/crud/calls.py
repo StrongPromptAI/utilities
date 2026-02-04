@@ -14,10 +14,10 @@ def get_call_by_source_file(source_file: str) -> Optional[dict]:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT c.*, s.name as stakeholder_name, p.name as project_name,
+                """SELECT c.*, s.name as client_name, p.name as project_name,
                           (SELECT count(*) FROM chunks WHERE call_id = c.id) as chunk_count
                    FROM calls c
-                   JOIN stakeholders s ON c.stakeholder_id = s.id
+                   JOIN clients s ON c.client_id = s.id
                    LEFT JOIN projects p ON c.project_id = p.id
                    WHERE c.source_file = %s""",
                 (source_file,)
@@ -35,10 +35,10 @@ def delete_call(call_id: int) -> dict:
         with conn.cursor() as cur:
             # Get info before deletion
             cur.execute(
-                """SELECT c.id, c.call_date, c.source_file, s.name as stakeholder_name,
+                """SELECT c.id, c.call_date, c.source_file, s.name as client_name,
                           (SELECT count(*) FROM chunks WHERE call_id = c.id) as chunk_count
                    FROM calls c
-                   JOIN stakeholders s ON c.stakeholder_id = s.id
+                   JOIN clients s ON c.client_id = s.id
                    WHERE c.id = %s""",
                 (call_id,)
             )
@@ -53,7 +53,7 @@ def delete_call(call_id: int) -> dict:
             return {
                 "deleted_call_id": call_info["id"],
                 "call_date": call_info["call_date"],
-                "stakeholder": call_info["stakeholder_name"],
+                "client": call_info["client_name"],
                 "chunks_deleted": call_info["chunk_count"],
                 "source_file": call_info["source_file"]
             }
@@ -61,8 +61,7 @@ def delete_call(call_id: int) -> dict:
 
 def create_call(
     call_date: date,
-    participants: list[str],
-    stakeholder_id: int,
+    client_id: int,
     source_type: str,
     source_file: str = None,
     summary: str = None,
@@ -76,26 +75,26 @@ def create_call(
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO calls (call_date, participants, stakeholder_id, source_type, source_file, summary, project_id, user_notes)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                (call_date, participants, stakeholder_id, source_type, source_file, summary, project_id, user_notes)
+                """INSERT INTO calls (call_date, client_id, source_type, source_file, summary, project_id, user_notes)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                (call_date, client_id, source_type, source_file, summary, project_id, user_notes)
             )
             conn.commit()
             return cur.fetchone()["id"]
 
 
-def get_calls_for_stakeholder(stakeholder_name: str) -> list[dict]:
-    """Get all calls for a stakeholder."""
+def get_calls_for_client(client_name: str) -> list[dict]:
+    """Get all calls for a client."""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT c.*, s.name as stakeholder_name, p.name as project_name
+                """SELECT c.*, s.name as client_name, p.name as project_name
                    FROM calls c
-                   JOIN stakeholders s ON c.stakeholder_id = s.id
+                   JOIN clients s ON c.client_id = s.id
                    LEFT JOIN projects p ON c.project_id = p.id
                    WHERE s.name = %s
                    ORDER BY c.call_date DESC""",
-                (stakeholder_name,)
+                (client_name,)
             )
             return cur.fetchall()
 

@@ -211,7 +211,7 @@
     "id": 63,
     "description": "Purchase pop.clinic domain. Approved by Jeff (2026-01-28T00:00:00-07:00)",
     "created": "2026-01-30T14:30:00-07:00",
-    "status": "open",
+    "status": "done",
     "resource": "C"
   },
   {
@@ -240,7 +240,7 @@
   },
   {
     "id": 67,
-    "description": "11 Truisms deck: Replace concept-02 example with recruiting/generational hiring. Jared: 'I think we need a recruiting thing in here... recruiting and hiring the different generations would resonate more because we're talking HR and every hiring manager has got hire.' Current example (customer service training) is operations-facing, not HR-facing. PRD says audience is HR BPs at MACU — recruiting is daily life for them, training is a step removed. Keep the truism ('Extend, Don't Replace, Your Framework') but swap the challenge/solution to something like: 'Hiring across generations requires different engagement strategies — AI-enhanced recruiting extends existing playbooks rather than replacing recruiter judgment.' Source: call 18, chunk 51.",
+    "description": "11 Truisms deck: Final content updates (consolidates former tasks 67-69). Four changes:\n\n1. ADD OBJECTIVES STATEMENT at the beginning of the deck:\n   'After this discussion you will:\n   1. Better understand and be able to better define what is AI\n   2. Know your role as the Human side of the future workforce (Human + Digital)\n   3. Be a more capable, valued & trusted partner, and voice to the organization when it comes to when, how, and why to use AI'\n\n2. REPLACE concept-02 example with recruiting/generational hiring. Jared: 'recruiting and hiring the different generations would resonate more because we're talking HR and every hiring manager has got hire.' Current example (customer service training) is operations-facing, not HR-facing. Keep the truism ('Extend, Don't Replace, Your Framework') but swap to HR-facing scenario. Source: call 18, chunk 51.\n\n3. ADD short definition to each concept/trap card. Jared: 'Each slide, what I think we're missing is the definition of what this means.' One-line definition field on each card. Consider adding 'definition' field to content.json schema. Source: call 18, chunk 18.\n\n4. ADD 'AI usage patterns' taxonomy slide. Jared: 'What are the AI applications? Big rocks?' A single slide showing the spectrum from stateless Q&A to autonomous agents — shared vocabulary before vendor pitches. Keep it to one slide, not exhaustive. Source: call 18, chunks 31, 36.",
     "project": "ai-insights-hub",
     "created": "2026-02-01T15:00:00-07:00",
     "status": "open",
@@ -248,18 +248,18 @@
   },
   {
     "id": 68,
-    "description": "11 Truisms deck: Add short definition to each concept/trap card. Jared: 'Each slide, what I think we're missing is this is the definition of what this means.' Truism names are catchy but not self-explanatory ('Unit of Value', 'Ascension-Ready Culture'). A one-line definition field on each card grounds the concept before the example. This pairs with the 'What is AI?' intro slide (task 64) — together they reduce the assumption gap. Consider adding a 'definition' field to content.json schema and rendering it as a subtitle or callout on the concept card. Source: call 18, chunk 18.",
+    "description": "Consolidated into task 67",
     "project": "ai-insights-hub",
     "created": "2026-02-01T15:00:00-07:00",
-    "status": "open",
+    "status": "done",
     "resource": "C"
   },
   {
     "id": 69,
-    "description": "11 Truisms deck: Add 'AI usage patterns' taxonomy slide or reference. Jared asked: 'What are the AI applications? Big rocks? Roll ups?' He wants a mental model of the landscape — bots, agents, Q&A, embedded training, etc. Chris responded that it's more a continuum than lanes (unit of value gets wider as agency increases). A simple visual showing the spectrum from stateless Q&A to autonomous agents would give the audience a shared vocabulary before they encounter vendor pitches. PRD's mentor positioning means equipping them to ask better questions at conferences — this taxonomy is that equipment. Keep it to one slide, not exhaustive. Source: call 18, chunks 31, 36.",
+    "description": "Consolidated into task 67",
     "project": "ai-insights-hub",
     "created": "2026-02-01T15:00:00-07:00",
-    "status": "open",
+    "status": "done",
     "resource": "C"
   },
   {
@@ -267,7 +267,7 @@
     "description": "11 Truisms deck: Add 'building blocks, not ranked list' framing. Jared asked: 'Are these in order of priority? Criticality? Foundational? Building blocks?' Chris confirmed they're non-linear building blocks with deliberate cross-connections (like LLM dimensions). The deck currently presents them numbered 01-08 which implies ranking. Add framing text on the overview/nav that positions these as interconnected building blocks, not a priority list. This prevents the audience from skipping 'lower numbered' truisms or over-indexing on #1. Small change — a line of copy on the throughline or navigation view. Source: call 18, chunks 47-48.",
     "project": "ai-insights-hub",
     "created": "2026-02-01T15:00:00-07:00",
-    "status": "open",
+    "status": "done",
     "resource": "C"
   },
   {
@@ -275,6 +275,14 @@
     "description": "Re-address 11 Truisms deck and link to StrongPrompt.ai website. The deck currently lives standalone on Railway — connect it to the strongprompt.ai domain so it's accessible as a StrongPrompt offering. Coordinate with task 8 (strongprompt-website finalization). Consider: subdomain (truisms.strongprompt.ai) vs path routing (/truisms), branding alignment between deck and site, whether the deck should have a StrongPrompt header/footer or remain clean for 'flip the classroom' delivery. The deck is the first tangible product — linking it to the website establishes StrongPrompt as the source without making it feel like a pitch (PRD: mentor not hero, avoid 'I feel like I've been pitched' reaction).",
     "project": "ai-insights-hub",
     "created": "2026-02-01T15:15:00-07:00",
+    "status": "done",
+    "resource": "C"
+  },
+  {
+    "id": 72,
+    "description": "FDIC Regulation Monitor — smoke test. See prompt: task-72-fdic-monitor.md",
+    "project": "fdic-monitor",
+    "created": "2026-02-03T16:00:00-07:00",
     "status": "open",
     "resource": "C"
   }

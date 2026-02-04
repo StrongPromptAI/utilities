@@ -15,7 +15,7 @@ def extract_quotes_from_batch(chunks: list[dict], call_context: str = "") -> lis
 
     Args:
         chunks: List of chunk dicts with 'text' and optionally 'speaker'
-        call_context: Optional context about the call (stakeholder, topic)
+        call_context: Optional context about the call (client, topic)
 
     Returns:
         List of quote dicts with keys: quote_text, speaker, context, category
@@ -30,7 +30,7 @@ def extract_quotes_from_batch(chunks: list[dict], call_context: str = "") -> lis
     prompt = f"""Analyze this business call transcript segment and extract 2-5 of the most notable quotes.
 
 Select quotes that are:
-1. **Insightful** - Reveals stakeholder thinking, priorities, or motivations
+1. **Insightful** - Reveals client thinking, priorities, or motivations
 2. **Memorable** - Phrased distinctively or powerfully
 3. **Actionable** - Contains a commitment, decision, or action item
 4. **Revealing** - Exposes objections, concerns, or underlying issues
@@ -182,16 +182,16 @@ def _get_call_context(call_id: int) -> str:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT c.call_date, s.name as stakeholder, p.name as project
+                """SELECT c.call_date, s.name as client, p.name as project
                    FROM calls c
-                   JOIN stakeholders s ON c.stakeholder_id = s.id
+                   JOIN clients s ON c.client_id = s.id
                    LEFT JOIN projects p ON c.project_id = p.id
                    WHERE c.id = %s""",
                 (call_id,)
             )
             row = cur.fetchone()
             if row:
-                parts = [f"Call with {row['stakeholder']}"]
+                parts = [f"Call with {row['client']}"]
                 if row.get("project"):
                     parts.append(f"re: {row['project']}")
                 parts.append(f"on {row['call_date']}")
@@ -223,10 +223,10 @@ def draft_letter(
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT c.call_date, c.summary, s.name as stakeholder,
+                """SELECT c.call_date, c.summary, s.name as client,
                           s.organization, p.name as project
                    FROM calls c
-                   JOIN stakeholders s ON c.stakeholder_id = s.id
+                   JOIN clients s ON c.client_id = s.id
                    LEFT JOIN projects p ON c.project_id = p.id
                    WHERE c.id = %s""",
                 (call_id,)
@@ -256,13 +256,13 @@ def draft_letter(
     if instructions:
         custom = f"\n\nADDITIONAL INSTRUCTIONS: {instructions}"
 
-    # Get first name from stakeholder
-    recipient_first = call["stakeholder"].split()[0]
+    # Get first name from client
+    recipient_first = call["client"].split()[0]
 
     prompt = f"""Write a professional follow-up email/letter in Markdown format.
 
 CONTEXT:
-- Recipient: {call["stakeholder"]}
+- Recipient: {call["client"]}
 - Date of call: {call["call_date"]}
 - Project: {call.get("project") or "General discussion"}
 
@@ -295,12 +295,12 @@ OUTPUT only the markdown letter, nothing else:"""
 
     # Generate filename
     date_str = str(call["call_date"]).replace("-", "")
-    name_slug = call["stakeholder"].lower().replace(" ", "-")
+    name_slug = call["client"].lower().replace(" ", "-")
     filename = f"letter-{name_slug}-{date_str}.md"
 
     return {
         "markdown": letter,
-        "recipient": call["stakeholder"],
+        "recipient": call["client"],
         "filename": filename,
         "call_date": str(call["call_date"])
     }

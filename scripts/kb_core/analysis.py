@@ -1,8 +1,8 @@
-"""Agentic analysis functions for stakeholder intelligence."""
+"""Agentic analysis functions for client intelligence."""
 
 from pathlib import Path
 from .db import get_db
-from .search import hybrid_search, get_stakeholder_context
+from .search import hybrid_search, get_client_context
 from .crud.quotes import get_approved_quotes
 
 
@@ -29,7 +29,7 @@ def suggested_next_step(call_id: int, letter_path: str = None) -> dict:
             "quotes": [approved quotes],
             "letter": "letter content if provided",
             "agentic_search_results": [{query, text, score}, ...],
-            "stakeholder_context": {stakeholder data},
+            "client_context": {client data},
             "analysis_prompt": "Formatted prompt for Claude Code"
         }
     """
@@ -37,9 +37,9 @@ def suggested_next_step(call_id: int, letter_path: str = None) -> dict:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT c.*, s.name as stakeholder_name, p.name as project_name
+                SELECT c.*, s.name as client_name, p.name as project_name
                 FROM calls c
-                JOIN stakeholders s ON c.stakeholder_id = s.id
+                JOIN clients s ON c.client_id = s.id
                 LEFT JOIN projects p ON c.project_id = p.id
                 WHERE c.id = %s
             """, (call_id,))
@@ -76,7 +76,7 @@ def suggested_next_step(call_id: int, letter_path: str = None) -> dict:
 
     # 5. Agentic search: Find related calls and context
     search_queries = [
-        f"conversations with {call['stakeholder_name']}",
+        f"conversations with {call['client_name']}",
         f"{call['project_name']} project discussions" if call['project_name'] else None,
         "sales strategy and next steps"
     ]
@@ -87,7 +87,7 @@ def suggested_next_step(call_id: int, letter_path: str = None) -> dict:
     for query in search_queries:
         results = hybrid_search(
             query=query,
-            stakeholder_name=call['stakeholder_name'],
+            client_name=call['client_name'],
             limit=3
         )
         for r in results:
@@ -98,10 +98,19 @@ def suggested_next_step(call_id: int, letter_path: str = None) -> dict:
                 "call_date": str(r['call_date'])
             })
 
-    # Get stakeholder context
-    stakeholder_context = get_stakeholder_context(call['stakeholder_name'])
+    # Get client context
+    client_context = get_client_context(call['client_name'])
 
     # 6. Build analysis prompt for Claude Code
+
+    # Get participants from participants table
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT name FROM participants WHERE call_id = %s ORDER BY name",
+                (call_id,)
+            )
+            participants = [row['name'] for row in cur.fetchall()]
 
     # Build quotes section
     quotes_section = ""
@@ -128,12 +137,14 @@ def suggested_next_step(call_id: int, letter_path: str = None) -> dict:
 ```
 """
 
+    participants_str = ', '.join(participants) if participants else 'None'
+
     analysis_prompt = f"""# Call Summary
 
-**Stakeholder:** {call['stakeholder_name']}
+**Client:** {call['client_name']}
 **Project:** {call['project_name'] or 'None'}
 **Date:** {call['call_date']}
-**Participants:** {', '.join(call['participants'])}
+**Participants:** {participants_str}
 
 {call['summary']}
 {quotes_section}
@@ -141,10 +152,10 @@ def suggested_next_step(call_id: int, letter_path: str = None) -> dict:
 
 {chr(10).join([f"- [{r['call_date']}] {r['text']}..." for r in agentic_search_results[:5]])}
 
-# Stakeholder History
+# Client History
 
-- Total calls: {len(stakeholder_context['calls'])}
-- Total chunks: {stakeholder_context['all_chunks_count']}
+- Total calls: {len(client_context['calls'])}
+- Total chunks: {client_context['all_chunks_count']}
 
 # Peterson Framework Principles
 
@@ -178,10 +189,10 @@ Using Peterson's Power Messaging framework, provide:
         "quotes": [dict(q) for q in quotes],
         "letter": letter_content,
         "agentic_search_results": agentic_search_results,
-        "stakeholder_context": {
-            "stakeholder": dict(stakeholder_context['stakeholder']),
-            "total_calls": len(stakeholder_context['calls']),
-            "total_chunks": stakeholder_context['all_chunks_count']
+        "client_context": {
+            "client": dict(client_context['client']),
+            "total_calls": len(client_context['calls']),
+            "total_chunks": client_context['all_chunks_count']
         },
         "analysis_prompt": analysis_prompt
     }

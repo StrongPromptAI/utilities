@@ -33,12 +33,12 @@ from .chunking import (
 # Transcripts
 from .transcripts import preprocess_transcript
 
-# CRUD - Stakeholders
-from .crud.stakeholders import (
-    get_stakeholder,
-    list_stakeholders,
-    create_stakeholder,
-    get_or_create_stakeholder,
+# CRUD - Clients
+from .crud.clients import (
+    get_client,
+    list_clients,
+    create_client,
+    get_or_create_client,
 )
 
 # CRUD - Projects
@@ -53,7 +53,7 @@ from .crud.calls import (
     get_call_by_source_file,
     delete_call,
     create_call,
-    get_calls_for_stakeholder,
+    get_calls_for_client,
     update_call_summary,
 )
 
@@ -67,12 +67,20 @@ from .crud.chunks import (
     get_call_summary_text,
 )
 
+# CRUD - Participants
+from .crud.participants import (
+    add_participant,
+    add_participants,
+    get_call_participants,
+    get_calls_by_participant,
+)
+
 # Search
 from .search import (
     semantic_search,
     hybrid_search,
     semantic_search_with_fallback,
-    get_stakeholder_context,
+    get_client_context,
 )
 
 # Analysis
@@ -98,6 +106,46 @@ from .crud.quotes import (
     clear_candidate_quotes,
 )
 
+# CRUD - Decisions
+from .crud.decisions import (
+    create_decision,
+    get_decision,
+    list_decisions,
+    update_decision_status,
+    clear_candidate_decisions,
+    insert_candidate_decisions,
+    get_candidate_decisions,
+    confirm_decision,
+    reject_decision,
+)
+
+# CRUD - Open Questions
+from .crud.open_questions import (
+    create_open_question,
+    get_open_question,
+    list_open_questions,
+    resolve_question,
+    clear_candidate_questions,
+    insert_candidate_questions,
+    get_candidate_questions,
+    abandon_question,
+)
+
+# Harvest
+from .harvest import (
+    harvest_from_summaries,
+    harvest_call,
+    deduplicate_harvest,
+)
+
+# Clustering
+from .clustering import (
+    compute_clusters,
+    store_clusters,
+    get_cluster_details,
+    expand_by_cluster,
+)
+
 __all__ = [
     # Config
     "DB_URL",
@@ -120,11 +168,11 @@ __all__ = [
     "chunk_transcript",
     # Transcripts
     "preprocess_transcript",
-    # Stakeholders
-    "get_stakeholder",
-    "list_stakeholders",
-    "create_stakeholder",
-    "get_or_create_stakeholder",
+    # Clients
+    "get_client",
+    "list_clients",
+    "create_client",
+    "get_or_create_client",
     # Projects
     "get_project",
     "list_projects",
@@ -133,7 +181,7 @@ __all__ = [
     "get_call_by_source_file",
     "delete_call",
     "create_call",
-    "get_calls_for_stakeholder",
+    "get_calls_for_client",
     "update_call_summary",
     # Chunks
     "insert_chunks",
@@ -142,11 +190,16 @@ __all__ = [
     "generate_call_batch_summaries",
     "get_call_batch_summaries",
     "get_call_summary_text",
+    # Participants
+    "add_participant",
+    "add_participants",
+    "get_call_participants",
+    "get_calls_by_participant",
     # Search
     "semantic_search",
     "hybrid_search",
     "semantic_search_with_fallback",
-    "get_stakeholder_context",
+    "get_client_context",
     # Analysis
     "suggested_next_step",
     # Quotes
@@ -162,4 +215,32 @@ __all__ = [
     "bulk_approve_quotes",
     "bulk_reject_quotes",
     "clear_candidate_quotes",
+    # Decisions
+    "create_decision",
+    "get_decision",
+    "list_decisions",
+    "update_decision_status",
+    "clear_candidate_decisions",
+    "insert_candidate_decisions",
+    "get_candidate_decisions",
+    "confirm_decision",
+    "reject_decision",
+    # Open Questions
+    "create_open_question",
+    "get_open_question",
+    "list_open_questions",
+    "resolve_question",
+    "clear_candidate_questions",
+    "insert_candidate_questions",
+    "get_candidate_questions",
+    "abandon_question",
+    # Harvest
+    "harvest_from_summaries",
+    "harvest_call",
+    "deduplicate_harvest",
+    # Clustering
+    "compute_clusters",
+    "store_clusters",
+    "get_cluster_details",
+    "expand_by_cluster",
 ]

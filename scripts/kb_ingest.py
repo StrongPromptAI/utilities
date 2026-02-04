@@ -14,17 +14,18 @@ from scripts.kb_core import (
     preprocess_transcript,
     chunk_transcript,
     chunk_by_sections,
-    get_or_create_stakeholder,
+    get_or_create_client,
     get_call_by_source_file,
     create_call,
     insert_chunks,
+    add_participants,
 )
 
 
 def ingest(
     file_path: str,
-    stakeholder_name: str,
-    stakeholder_type: str,
+    client_name: str,
+    client_type: str,
     call_date: date,
     participants: list[str],
     source_type: str = "call_transcript",
@@ -63,16 +64,19 @@ def ingest(
 
     print(f"  Chunks: {len(chunks)}")
 
-    # Create stakeholder + call
-    stakeholder_id = get_or_create_stakeholder(stakeholder_name, stakeholder_type, organization)
+    # Create client + call
+    client_id = get_or_create_client(client_name, client_type, organization)
     call_id = create_call(
         call_date=call_date,
-        participants=participants,
-        stakeholder_id=stakeholder_id,
+        client_id=client_id,
         source_type=source_type,
         source_file=str(path),
         summary=summary,
     )
+
+    # Add participants to participants table
+    if participants:
+        add_participants(call_id, participants)
 
     # Insert chunks with embeddings
     print("Embedding and inserting chunks...")
@@ -81,7 +85,7 @@ def ingest(
     print(f"Ingested: call {call_id}, {count} chunks, {result['filtered_count']} + {result['llm_filtered_count']} fillers removed")
     return {
         "call_id": call_id,
-        "stakeholder": stakeholder_name,
+        "client": client_name,
         "chunks_indexed": count,
         "filtered_count": result["filtered_count"],
         "llm_filtered_count": result["llm_filtered_count"],
@@ -97,7 +101,7 @@ def main():
     # Ingest command
     ingest_parser = subparsers.add_parser("ingest", help="Ingest a transcript")
     ingest_parser.add_argument("file", help="Path to transcript (DOCX, CSV, or plaintext)")
-    ingest_parser.add_argument("--stakeholder", required=True, help="Stakeholder name")
+    ingest_parser.add_argument("--client", required=True, help="Client name")
     ingest_parser.add_argument("--type", required=True, choices=["doctor", "partner", "vendor", "investor", "employee", "prospect", "other"])
     ingest_parser.add_argument("--date", required=True, help="Call date (YYYY-MM-DD)")
     ingest_parser.add_argument("--participants", required=True, help="Comma-separated participant names")
@@ -110,8 +114,8 @@ def main():
     if args.command == "ingest":
         ingest(
             file_path=args.file,
-            stakeholder_name=args.stakeholder,
-            stakeholder_type=args.type,
+            client_name=args.client,
+            client_type=args.type,
             call_date=date.fromisoformat(args.date),
             participants=[p.strip() for p in args.participants.split(",")],
             organization=args.org,

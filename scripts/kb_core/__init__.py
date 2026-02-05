@@ -9,6 +9,7 @@ from .config import (
     DB_URL,
     LM_STUDIO_URL,
     EMBED_MODEL,
+    EMBED_BACKEND,
     SUMMARY_MODEL,
     DEFAULT_CHUNK_SIZE,
     DEFAULT_OVERLAP,
@@ -33,12 +34,24 @@ from .chunking import (
 # Transcripts
 from .transcripts import preprocess_transcript
 
-# CRUD - Clients
-from .crud.clients import (
-    get_client,
-    list_clients,
-    create_client,
-    get_or_create_client,
+# CRUD - Org
+from .crud.org import (
+    get_org,
+    list_org,
+    create_org,
+    get_or_create_org,
+)
+
+# CRUD - Contacts
+from .crud.contacts import (
+    get_contact,
+    get_contact_by_id,
+    list_contacts,
+    create_contact,
+    get_or_create_contact,
+    add_contacts_to_call,
+    get_call_contacts,
+    get_calls_by_contact,
 )
 
 # CRUD - Projects
@@ -53,8 +66,25 @@ from .crud.calls import (
     get_call_by_source_file,
     delete_call,
     create_call,
-    get_calls_for_client,
+    get_calls_for_org,
     update_call_summary,
+    update_user_notes,
+    list_calls,
+    get_call_detail,
+)
+
+# CRUD - Actions
+from .crud.actions import (
+    create_action,
+    list_actions,
+    get_action,
+    get_action_prompt_file,
+    update_action_status,
+    insert_candidate_actions,
+    get_candidate_actions,
+    clear_candidate_actions,
+    confirm_action,
+    reject_action,
 )
 
 # CRUD - Chunks
@@ -67,20 +97,12 @@ from .crud.chunks import (
     get_call_summary_text,
 )
 
-# CRUD - Participants
-from .crud.participants import (
-    add_participant,
-    add_participants,
-    get_call_participants,
-    get_calls_by_participant,
-)
-
 # Search
 from .search import (
     semantic_search,
     hybrid_search,
     semantic_search_with_fallback,
-    get_client_context,
+    get_org_context,
 )
 
 # Analysis
@@ -90,6 +112,7 @@ from .analysis import suggested_next_step
 from .quotes import (
     extract_quotes_from_batch,
     extract_call_quotes,
+    rank_quotes,
     deduplicate_quotes,
     draft_letter,
 )
@@ -119,11 +142,11 @@ from .crud.decisions import (
     reject_decision,
 )
 
-# CRUD - Open Questions
-from .crud.open_questions import (
+# CRUD - Questions
+from .crud.questions import (
     create_open_question,
     get_open_question,
-    list_open_questions,
+    list_questions as list_open_questions,
     resolve_question,
     clear_candidate_questions,
     insert_candidate_questions,
@@ -138,12 +161,22 @@ from .harvest import (
     deduplicate_harvest,
 )
 
+# Synthesis
+from .synthesis import (
+    synthesize_call,
+    synthesize_project,
+    type_to_slug,
+    apply_additions,
+    _build_seed_template,
+)
+
 # Clustering
 from .clustering import (
     compute_clusters,
     store_clusters,
     get_cluster_details,
     expand_by_cluster,
+    cluster_label,
 )
 
 __all__ = [
@@ -151,6 +184,7 @@ __all__ = [
     "DB_URL",
     "LM_STUDIO_URL",
     "EMBED_MODEL",
+    "EMBED_BACKEND",
     "SUMMARY_MODEL",
     "DEFAULT_CHUNK_SIZE",
     "DEFAULT_OVERLAP",
@@ -168,11 +202,20 @@ __all__ = [
     "chunk_transcript",
     # Transcripts
     "preprocess_transcript",
-    # Clients
-    "get_client",
-    "list_clients",
-    "create_client",
-    "get_or_create_client",
+    # Org
+    "get_org",
+    "list_org",
+    "create_org",
+    "get_or_create_org",
+    # Contacts
+    "get_contact",
+    "get_contact_by_id",
+    "list_contacts",
+    "create_contact",
+    "get_or_create_contact",
+    "add_contacts_to_call",
+    "get_call_contacts",
+    "get_calls_by_contact",
     # Projects
     "get_project",
     "list_projects",
@@ -181,8 +224,22 @@ __all__ = [
     "get_call_by_source_file",
     "delete_call",
     "create_call",
-    "get_calls_for_client",
+    "get_calls_for_org",
     "update_call_summary",
+    "update_user_notes",
+    "list_calls",
+    "get_call_detail",
+    # Actions
+    "create_action",
+    "list_actions",
+    "get_action",
+    "get_action_prompt_file",
+    "update_action_status",
+    "insert_candidate_actions",
+    "get_candidate_actions",
+    "clear_candidate_actions",
+    "confirm_action",
+    "reject_action",
     # Chunks
     "insert_chunks",
     "get_call_chunks",
@@ -190,21 +247,17 @@ __all__ = [
     "generate_call_batch_summaries",
     "get_call_batch_summaries",
     "get_call_summary_text",
-    # Participants
-    "add_participant",
-    "add_participants",
-    "get_call_participants",
-    "get_calls_by_participant",
     # Search
     "semantic_search",
     "hybrid_search",
     "semantic_search_with_fallback",
-    "get_client_context",
+    "get_org_context",
     # Analysis
     "suggested_next_step",
     # Quotes
     "extract_quotes_from_batch",
     "extract_call_quotes",
+    "rank_quotes",
     "deduplicate_quotes",
     "draft_letter",
     "insert_candidate_quotes",
@@ -225,7 +278,7 @@ __all__ = [
     "get_candidate_decisions",
     "confirm_decision",
     "reject_decision",
-    # Open Questions
+    # Questions
     "create_open_question",
     "get_open_question",
     "list_open_questions",
@@ -238,9 +291,16 @@ __all__ = [
     "harvest_from_summaries",
     "harvest_call",
     "deduplicate_harvest",
+    # Synthesis
+    "synthesize_call",
+    "synthesize_project",
+    "type_to_slug",
+    "apply_additions",
+    "_build_seed_template",
     # Clustering
     "compute_clusters",
     "store_clusters",
     "get_cluster_details",
     "expand_by_cluster",
+    "cluster_label",
 ]

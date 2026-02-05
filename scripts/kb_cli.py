@@ -7,12 +7,14 @@ from pathlib import Path
 
 from scripts.kb_core import (
     semantic_search,
-    list_clients,
-    get_calls_for_client,
-    get_client_context,
-    get_call_participants,
+    list_org,
+    list_contacts,
+    get_calls_for_org,
+    get_org_context,
+    get_call_contacts,
     suggested_next_step,
     extract_call_quotes,
+    rank_quotes,
     get_candidate_quotes,
     get_approved_quotes,
     bulk_approve_quotes,
@@ -29,9 +31,16 @@ from scripts.kb_core import (
     get_candidate_questions,
     resolve_question,
     abandon_question,
+    get_candidate_actions,
+    confirm_action,
+    reject_action,
+    update_user_notes,
     store_clusters,
     get_cluster_details,
     expand_by_cluster,
+    synthesize_call,
+    apply_additions,
+    _build_seed_template,
 )
 
 
@@ -43,7 +52,7 @@ def cli():
 
 @cli.command()
 @click.argument("query")
-@click.option("--client", "-c", help="Filter by client name")
+@click.option("--client", "-c", help="Filter by org name")
 @click.option("--project", "-p", help="Filter by project name")
 @click.option("--limit", "-l", default=10, help="Max results (default: 10)")
 @click.option("--days", "-d", type=int, help="Limit to last N days")
@@ -65,11 +74,11 @@ def search(query, client, project, limit, days, expand):
                 click.secho(f"Try expanding beyond {days} days with --days flag or removing it.", dim=True)
             return
 
-        click.secho(f"\n🔍 Found {len(results)} results for: ", fg="blue", nl=False)
+        click.secho(f"\n Found {len(results)} results for: ", fg="blue", nl=False)
         click.secho(query, bold=True)
 
         if client:
-            click.secho(f"   Client: {client}", dim=True)
+            click.secho(f"   Org: {client}", dim=True)
         if project:
             click.secho(f"   Project: {project}", dim=True)
         if days:
@@ -85,11 +94,11 @@ def search(query, client, project, limit, days, expand):
             result_ids = [r["id"] for r in results]
             expanded = expand_by_cluster(result_ids)
             if expanded:
-                click.secho(f"── Cluster expansion: {len(expanded)} related chunks ──\n", fg="magenta", bold=True)
+                click.secho(f"-- Cluster expansion: {len(expanded)} related chunks --\n", fg="magenta", bold=True)
                 for i, ex in enumerate(expanded, len(results) + 1):
                     click.secho(f"[{i}] ", fg="magenta", nl=False)
                     click.secho(ex["client_name"], fg="green", bold=True, nl=False)
-                    click.secho(f" • {ex['call_date']}", fg="yellow", nl=False)
+                    click.secho(f" * {ex['call_date']}", fg="yellow", nl=False)
                     click.secho(f"  (cluster {ex['cluster_id']})", dim=True)
 
                     text = ex["text"]
@@ -102,7 +111,7 @@ def search(query, client, project, limit, days, expand):
                     click.echo(text)
 
                     if ex.get("summary"):
-                        click.secho(f"   📝 {ex['summary']}", fg="cyan", dim=True)
+                        click.secho(f"   {ex['summary']}", fg="cyan", dim=True)
                     click.echo()
             else:
                 click.secho("No cluster expansion available. Run 'kb cluster' first to compute clusters.", dim=True)
@@ -118,9 +127,9 @@ def _display_search_result(i: int, result: dict):
     click.secho(result['client_name'], fg="green", bold=True, nl=False)
 
     if result.get('project_name'):
-        click.secho(f" • {result['project_name']}", fg="blue", nl=False)
+        click.secho(f" * {result['project_name']}", fg="blue", nl=False)
 
-    click.secho(f" • {result['call_date']}", fg="yellow")
+    click.secho(f" * {result['call_date']}", fg="yellow")
 
     # Scores
     score_info = f"   Score: {result.get('recency_score', 0):.3f}"
@@ -142,44 +151,92 @@ def _display_search_result(i: int, result: dict):
 
     # Summary if available
     if result.get('summary'):
-        click.secho(f"   📝 {result['summary']}", fg="cyan", dim=True)
+        click.secho(f"   {result['summary']}", fg="cyan", dim=True)
 
     click.echo()
 
 
-@cli.command(name="list-clients")
-@click.option("--type", "-t", "type_filter", help="Filter by type (client, prospect, partner, etc.)")
-def list_clients_cmd(type_filter):
-    """List all clients in the knowledge base."""
+@cli.command(name="list-org")
+@click.option("--type", "-t", "type_filter", help="Filter by type (client, end-user, vendor, other)")
+def list_org_cmd(type_filter):
+    """List all organizations in the knowledge base."""
     try:
-        from scripts.kb_core import list_clients as list_clients_fn
-        clients = list_clients_fn(type_filter=type_filter)
+        from scripts.kb_core import list_org as list_org_fn
+        orgs = list_org_fn(type_filter=type_filter)
 
-        if not clients:
+        if not orgs:
             if type_filter:
-                click.secho(f"No clients found with type: {type_filter}", fg="yellow")
+                click.secho(f"No orgs found with type: {type_filter}", fg="yellow")
             else:
-                click.secho("No clients found.", fg="yellow")
+                click.secho("No orgs found.", fg="yellow")
             return
 
-        click.secho(f"\n📋 Clients", fg="blue", bold=True)
+        click.secho(f"\nOrganizations", fg="blue", bold=True)
         if type_filter:
             click.secho(f"   Type: {type_filter}", dim=True)
-        click.secho(f"   Total: {len(clients)}\n", dim=True)
+        click.secho(f"   Total: {len(orgs)}\n", dim=True)
 
-        for s in clients:
-            click.secho(f"• {s['name']}", fg="green", bold=True, nl=False)
+        for o in orgs:
+            click.secho(f"* {o['name']}", fg="green", bold=True, nl=False)
 
-            if s.get('type'):
-                click.secho(f" ({s['type']})", fg="cyan", nl=False)
-
-            if s.get('organization'):
-                click.secho(f" @ {s['organization']}", fg="blue")
+            if o.get('type'):
+                click.secho(f" ({o['type']})", fg="cyan")
             else:
                 click.echo()
 
-            if s.get('notes'):
-                notes = s['notes']
+            if o.get('notes'):
+                notes = o['notes']
+                if len(notes) > 100:
+                    notes = notes[:100] + "..."
+                click.secho(f"  {notes}", dim=True)
+
+            click.echo()
+
+    except Exception as e:
+        click.secho(f"Error: {e}", fg="red")
+        sys.exit(1)
+
+
+@cli.command(name="list-contacts")
+@click.option("--org", "-o", "org_name", help="Filter by org name")
+def list_contacts_cmd(org_name):
+    """List all contacts in the knowledge base."""
+    try:
+        from scripts.kb_core import list_contacts as list_contacts_fn
+        from scripts.kb_core.crud.org import get_org
+
+        org_id = None
+        if org_name:
+            org = get_org(org_name)
+            if not org:
+                click.secho(f"Org not found: {org_name}", fg="red")
+                sys.exit(1)
+            org_id = org["id"]
+
+        contacts = list_contacts_fn(org_id=org_id)
+
+        if not contacts:
+            click.secho("No contacts found.", fg="yellow")
+            return
+
+        click.secho(f"\nContacts", fg="blue", bold=True)
+        if org_name:
+            click.secho(f"   Org: {org_name}", dim=True)
+        click.secho(f"   Total: {len(contacts)}\n", dim=True)
+
+        for c in contacts:
+            click.secho(f"* {c['name']}", fg="green", bold=True, nl=False)
+
+            if c.get('role'):
+                click.secho(f" ({c['role']})", fg="cyan", nl=False)
+
+            if c.get('org_name'):
+                click.secho(f" @ {c['org_name']}", fg="blue")
+            else:
+                click.echo()
+
+            if c.get('notes'):
+                notes = c['notes']
                 if len(notes) > 100:
                     notes = notes[:100] + "..."
                 click.secho(f"  {notes}", dim=True)
@@ -192,22 +249,22 @@ def list_clients_cmd(type_filter):
 
 
 @cli.command()
-@click.option("--client", "-c", help="Filter by client name")
+@click.option("--client", "-c", help="Filter by org name")
 def list_calls(client):
-    """List calls, optionally filtered by client."""
+    """List calls, optionally filtered by org."""
     try:
         if not client:
             click.secho("Error: --client is required", fg="red")
             click.secho("Usage: kb list-calls --client 'Name'", dim=True)
             sys.exit(1)
 
-        calls = get_calls_for_client(client)
+        calls = get_calls_for_org(client)
 
         if not calls:
             click.secho(f"No calls found for: {client}", fg="yellow")
             return
 
-        click.secho(f"\n📞 Calls for ", fg="blue", nl=False)
+        click.secho(f"\nCalls for ", fg="blue", nl=False)
         click.secho(client, fg="green", bold=True)
         click.secho(f"   Total: {len(calls)}\n", dim=True)
 
@@ -216,15 +273,15 @@ def list_calls(client):
             click.secho(f"{call['call_date']}", fg="yellow", bold=True, nl=False)
 
             if call.get('project_name'):
-                click.secho(f" • {call['project_name']}", fg="blue")
+                click.secho(f" * {call['project_name']}", fg="blue")
             else:
                 click.echo()
 
-            # Show participants from participants table
-            participants = get_call_participants(call['id'])
-            if participants:
-                names = ', '.join(p['name'] for p in participants)
-                click.secho(f"     👥 {names}", dim=True)
+            # Show contacts from call_contacts junction
+            contacts = get_call_contacts(call['id'])
+            if contacts:
+                names = ', '.join(c['name'] for c in contacts)
+                click.secho(f"     {names}", dim=True)
 
             if call.get('summary'):
                 summary = call['summary']
@@ -239,13 +296,42 @@ def list_calls(client):
         sys.exit(1)
 
 
-@cli.command()
+@cli.command(name="add-notes")
+@click.argument("call_id", type=int)
+@click.argument("notes")
+@click.option("--append", "-a", is_flag=True, help="Append to existing notes instead of replacing")
+def add_notes(call_id, notes, append):
+    """Add or update personal notes on a call."""
+    try:
+        if append:
+            from scripts.kb_core.db import get_db
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT user_notes FROM calls WHERE id = %s", (call_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        click.secho(f"Call {call_id} not found", fg="red")
+                        sys.exit(1)
+                    existing = row["user_notes"] or ""
+                    notes = f"{existing}\n{notes}".strip()
+
+        if update_user_notes(call_id, notes):
+            click.secho(f"Notes updated for call {call_id}", fg="green")
+        else:
+            click.secho(f"Call {call_id} not found", fg="red")
+            sys.exit(1)
+    except Exception as e:
+        click.secho(f"Error: {e}", fg="red")
+        sys.exit(1)
+
+
+@cli.command(name="peterson-analyze")
 @click.argument("call_id", type=int)
 @click.option("--letter", "-l", help="Path to letter/email to review")
-def analyze(call_id, letter):
-    """Generate agentic analysis prompt for a call."""
+def peterson_analyze(call_id, letter):
+    """Analyze a call using Peterson's Power Messaging framework."""
     try:
-        click.secho(f"\n🔍 Analyzing call {call_id}...\n", fg="blue")
+        click.secho(f"\nAnalyzing call {call_id}...\n", fg="blue")
 
         result = suggested_next_step(call_id, letter_path=letter)
 
@@ -256,13 +342,13 @@ def analyze(call_id, letter):
 
         # Additional context
         click.echo()
-        click.secho("📊 Analysis Context:", fg="blue", bold=True)
-        click.secho(f"   • Agentic search results: {len(result['agentic_search_results'])}", dim=True)
-        click.secho(f"   • Total client calls: {result['client_context']['total_calls']}", dim=True)
-        click.secho(f"   • Total chunks: {result['client_context']['total_chunks']}", dim=True)
-        click.secho(f"   • Approved quotes: {len(result.get('quotes', []))}", dim=True)
+        click.secho("Analysis Context:", fg="blue", bold=True)
+        click.secho(f"   * Agentic search results: {len(result['agentic_search_results'])}", dim=True)
+        click.secho(f"   * Total client calls: {result['client_context']['total_calls']}", dim=True)
+        click.secho(f"   * Total chunks: {result['client_context']['total_chunks']}", dim=True)
+        click.secho(f"   * Approved quotes: {len(result.get('quotes', []))}", dim=True)
         if result.get('letter'):
-            click.secho(f"   • Letter included: Yes", dim=True)
+            click.secho(f"   * Letter included: Yes", dim=True)
         click.echo()
 
     except ValueError as e:
@@ -274,48 +360,45 @@ def analyze(call_id, letter):
 
 
 @cli.command()
-@click.argument("client_name")
+@click.argument("org_name")
 @click.option("--query", "-q", help="Optional semantic search query")
 @click.option("--limit", "-l", default=20, help="Max chunks in query results (default: 20)")
-def context(client_name, query, limit):
-    """Show comprehensive context about a client."""
+def context(org_name, query, limit):
+    """Show comprehensive context about an org."""
     try:
-        result = get_client_context(client_name, query=query, limit=limit)
+        result = get_org_context(org_name, query=query, limit=limit)
 
         if 'error' in result:
             click.secho(result['error'], fg="red")
             sys.exit(1)
 
-        # Client info
-        client = result['client']
-        click.secho(f"\n👤 {client['name']}", fg="green", bold=True)
+        # Org info
+        org = result['client']
+        click.secho(f"\n{org['name']}", fg="green", bold=True)
 
-        if client.get('type'):
-            click.secho(f"   Type: {client['type']}", fg="cyan")
+        if org.get('type'):
+            click.secho(f"   Type: {org['type']}", fg="cyan")
 
-        if client.get('organization'):
-            click.secho(f"   Organization: {client['organization']}", fg="blue")
-
-        if client.get('notes'):
-            click.secho(f"   Notes: {client['notes']}", dim=True)
+        if org.get('notes'):
+            click.secho(f"   Notes: {org['notes']}", dim=True)
 
         click.echo()
 
         # Stats
-        click.secho(f"📊 Activity:", fg="blue", bold=True)
-        click.secho(f"   • Total calls: {len(result['calls'])}", dim=True)
-        click.secho(f"   • Total chunks: {result['all_chunks_count']}", dim=True)
+        click.secho(f"Activity:", fg="blue", bold=True)
+        click.secho(f"   * Total calls: {len(result['calls'])}", dim=True)
+        click.secho(f"   * Total chunks: {result['all_chunks_count']}", dim=True)
         click.echo()
 
         # Recent calls
         if result['calls']:
-            click.secho(f"📞 Recent Calls:", fg="blue", bold=True)
+            click.secho(f"Recent Calls:", fg="blue", bold=True)
             for call in result['calls'][:5]:
                 click.secho(f"   [{call['id']}] ", fg="cyan", nl=False)
                 click.secho(f"{call['call_date']}", fg="yellow", nl=False)
 
                 if call.get('project_name'):
-                    click.secho(f" • {call['project_name']}", fg="blue")
+                    click.secho(f" * {call['project_name']}", fg="blue")
                 else:
                     click.echo()
 
@@ -327,13 +410,13 @@ def context(client_name, query, limit):
         # Query results
         if query and 'relevant_chunks' in result:
             chunks = result['relevant_chunks']
-            click.secho(f"🔍 Relevant to '{query}':", fg="blue", bold=True)
+            click.secho(f"Relevant to '{query}':", fg="blue", bold=True)
             click.secho(f"   Found {len(chunks)} chunks\n", dim=True)
 
             for i, chunk in enumerate(chunks[:5], 1):
                 click.secho(f"   [{i}] {chunk['call_date']}", fg="yellow", nl=False)
                 if chunk.get('project_name'):
-                    click.secho(f" • {chunk['project_name']}", fg="blue")
+                    click.secho(f" * {chunk['project_name']}", fg="blue")
                 else:
                     click.echo()
 
@@ -352,8 +435,10 @@ def context(client_name, query, limit):
 @click.argument("call_id", type=int)
 @click.option("--review", is_flag=True, help="Review existing candidates only (skip extraction)")
 @click.option("--show", is_flag=True, help="Show approved quotes only")
-def pick_quotes(call_id, review, show):
-    """Extract and curate notable quotes from a call."""
+@click.option("--no-rank", is_flag=True, help="Skip PROJECT.md-aware ranking, show all candidates")
+@click.option("--top", default=10, help="Number of top quotes to present (default: 10)")
+def pick_quotes(call_id, review, show, no_rank, top):
+    """Extract, rank by project context, and curate notable quotes from a call."""
     try:
         # Show mode: display approved quotes
         if show:
@@ -362,7 +447,7 @@ def pick_quotes(call_id, review, show):
                 click.secho(f"No approved quotes for call {call_id}", fg="yellow")
                 return
 
-            click.secho(f"\n✓ Approved quotes for call {call_id}:", fg="green", bold=True)
+            click.secho(f"\nApproved quotes for call {call_id}:", fg="green", bold=True)
             click.echo()
             for q in quotes:
                 _display_quote(q, show_id=False)
@@ -383,8 +468,13 @@ def pick_quotes(call_id, review, show):
                 fg="cyan"
             )
 
-        # Get candidates for review
-        candidates = get_candidate_quotes(call_id)
+        # Rank candidates using PROJECT.md context (unless --no-rank)
+        if no_rank:
+            candidates = get_candidate_quotes(call_id)
+        else:
+            click.secho("Ranking quotes against PROJECT.md...", fg="blue")
+            candidates = rank_quotes(call_id, top_n=top)
+
         if not candidates:
             click.secho("No candidate quotes to review.", fg="yellow")
 
@@ -394,7 +484,8 @@ def pick_quotes(call_id, review, show):
                 click.secho(f"  ({len(approved)} quotes already approved)", dim=True)
             return
 
-        click.secho(f"Found {len(candidates)} candidate quotes:\n", fg="blue", bold=True)
+        label = f"Top {len(candidates)} ranked quotes" if not no_rank else f"Found {len(candidates)} candidate quotes"
+        click.secho(f"{label}:\n", fg="blue", bold=True)
 
         # Build ID mapping for user input
         id_map = {}
@@ -458,7 +549,7 @@ def pick_quotes(call_id, review, show):
         # Save approvals/rejections
         if approved_ids:
             count = bulk_approve_quotes(approved_ids)
-            click.secho(f"\n✓ Approved {count} quotes", fg="green", bold=True)
+            click.secho(f"\nApproved {count} quotes", fg="green", bold=True)
 
         # Reject remaining pending
         remaining_to_reject = [pid for pid in pending_ids if pid not in approved_ids]
@@ -496,6 +587,9 @@ def _display_quote(quote: dict, display_num: int = None, show_id: bool = True):
 
     if quote.get("context"):
         click.secho(f"    Context: {quote['context']}", dim=True)
+
+    if quote.get("llm_reason"):
+        click.secho(f"    Ranked: {quote['llm_reason']}", fg="yellow")
 
     click.echo()
 
@@ -537,7 +631,7 @@ def draft_letter_cmd(call_id, instructions, no_quotes, output, stdout):
                 out_path = comms_dir / result["filename"]
 
             out_path.write_text(markdown)
-            click.secho(f"\n✓ Letter saved to: {out_path}", fg="green", bold=True)
+            click.secho(f"\nLetter saved to: {out_path}", fg="green", bold=True)
             click.secho(f"  Recipient: {result['recipient']}", dim=True)
             click.secho(f"  Call date: {result['call_date']}", dim=True)
 
@@ -551,7 +645,7 @@ def draft_letter_cmd(call_id, instructions, no_quotes, output, stdout):
 @click.option("--project", "-p", required=True, help="Project name")
 @click.option("--review", is_flag=True, help="Review existing candidates only (skip extraction)")
 def harvest(call_id, project, review):
-    """Extract decisions and open questions from a call."""
+    """Extract decisions, open questions, and action items from a call."""
     try:
         from scripts.kb_core.crud.projects import get_project
 
@@ -561,7 +655,7 @@ def harvest(call_id, project, review):
             click.secho("Available projects:", dim=True)
             from scripts.kb_core import list_projects
             for p in list_projects():
-                click.secho(f"  • {p['name']}", dim=True)
+                click.secho(f"  * {p['name']}", dim=True)
             sys.exit(1)
 
         project_id = proj["id"]
@@ -577,53 +671,74 @@ def harvest(call_id, project, review):
 
             click.secho(
                 f"\n  Found {result['decisions_extracted']} decisions, "
-                f"{result['questions_extracted']} open questions\n",
+                f"{result['questions_extracted']} questions, "
+                f"{result['actions_extracted']} action items\n",
                 fg="cyan",
             )
 
         # Display candidates for review
         decisions = get_candidate_decisions(project_id, call_id)
         questions = get_candidate_questions(project_id, call_id)
+        actions = get_candidate_actions(project_id, call_id)
 
-        if not decisions and not questions:
+        if not decisions and not questions and not actions:
             click.secho("No candidates to review.", fg="yellow")
             return
+
+        # Build unified number → (type, db_id) mapping
+        num_map = {}
+        idx = 1
 
         # Display decisions
         if decisions:
             click.secho("DECISIONS:", fg="blue", bold=True)
             click.echo()
-            d_map = {}
-            for idx, d in enumerate(decisions, 1):
-                d_map[idx] = d["id"]
+            for d in decisions:
+                num_map[idx] = ("decision", d["id"])
                 status_color = "green" if d["status"] == "confirmed" else "yellow"
                 click.secho(f"[{idx}] ", fg="cyan", nl=False)
                 click.secho(f"({d['status']}) ", fg=status_color, nl=False)
                 click.secho(d["topic"], fg="white", bold=True)
                 click.secho(f"    {d['summary']}", fg="white")
                 if d.get("decided_by"):
-                    click.secho(f"    Decided by: {', '.join(d['decided_by'])}", dim=True)
+                    names = ", ".join(c["name"] for c in d["decided_by"])
+                    click.secho(f"    Decided by: {names}", dim=True)
                 click.echo()
+                idx += 1
 
         # Display questions
         if questions:
-            q_offset = len(decisions)
             click.secho("OPEN QUESTIONS:", fg="blue", bold=True)
             click.echo()
-            q_map = {}
-            for idx, q in enumerate(questions, q_offset + 1):
-                q_map[idx] = q["id"]
+            for q in questions:
+                num_map[idx] = ("question", q["id"])
                 click.secho(f"[{idx}] ", fg="cyan", nl=False)
                 click.secho(q["topic"], fg="white", bold=True)
                 click.secho(f"    {q['question']}", fg="white")
                 if q.get("context"):
                     click.secho(f"    Why: {q['context']}", dim=True)
-                if q.get("owner"):
-                    click.secho(f"    Owner: {q['owner']}", fg="magenta")
+                if q.get("owner_name"):
+                    click.secho(f"    Owner: {q['owner_name']}", fg="magenta")
                 click.echo()
+                idx += 1
+
+        # Display action items
+        if actions:
+            click.secho("ACTION ITEMS:", fg="blue", bold=True)
+            click.echo()
+            for a in actions:
+                num_map[idx] = ("action", a["id"])
+                click.secho(f"[{idx}] ", fg="cyan", nl=False)
+                click.secho(a["title"], fg="white", bold=True)
+                if a.get("description"):
+                    click.secho(f"    {a['description']}", fg="white")
+                if a.get("assigned_name"):
+                    click.secho(f"    Assigned: {a['assigned_name']}", fg="magenta")
+                click.echo()
+                idx += 1
 
         # Interactive approval
-        click.secho("Actions:", fg="cyan", bold=True)
+        click.secho("Approve/Reject:", fg="cyan", bold=True)
         click.secho('  Enter numbers to approve (e.g., "1 3 5")', dim=True)
         click.secho('  "all" - approve all', dim=True)
         click.secho('  "none" - reject all', dim=True)
@@ -631,10 +746,7 @@ def harvest(call_id, project, review):
         click.secho('  "quit" - exit without saving', dim=True)
         click.echo()
 
-        approved_d_ids = []
-        approved_q_ids = []
-        all_d_ids = [d["id"] for d in decisions]
-        all_q_ids = [q["id"] for q in questions]
+        approved = set()
 
         while True:
             action = click.prompt(">", default="done").strip().lower()
@@ -647,9 +759,8 @@ def harvest(call_id, project, review):
                 break
 
             if action == "all":
-                approved_d_ids = all_d_ids[:]
-                approved_q_ids = all_q_ids[:]
-                click.secho(f"Approved all ({len(approved_d_ids)} decisions, {len(approved_q_ids)} questions)", fg="green")
+                approved = set(num_map.keys())
+                click.secho(f"Approved all {len(approved)} items", fg="green")
                 break
 
             if action == "none":
@@ -659,31 +770,43 @@ def harvest(call_id, project, review):
             try:
                 nums = [int(n) for n in action.split()]
                 for n in nums:
-                    if n in d_map and d_map[n] not in approved_d_ids:
-                        approved_d_ids.append(d_map[n])
-                        click.secho(f"  Approved decision [{n}]", fg="green")
-                    elif n in q_map and q_map[n] not in approved_q_ids:
-                        approved_q_ids.append(q_map[n])
-                        click.secho(f"  Approved question [{n}]", fg="green")
-                    elif n not in d_map and n not in q_map:
+                    if n in num_map and n not in approved:
+                        approved.add(n)
+                        item_type = num_map[n][0]
+                        click.secho(f"  Approved {item_type} [{n}]", fg="green")
+                    elif n not in num_map:
                         click.secho(f"  Invalid number: {n}", fg="red")
             except ValueError:
                 click.secho("  Enter numbers, or 'all'/'none'/'done'/'quit'", fg="red")
 
         # Apply approvals/rejections
-        for did in approved_d_ids:
-            confirm_decision(did)
-        for did in all_d_ids:
-            if did not in approved_d_ids:
-                reject_decision(did)
+        d_approved = q_approved = a_approved = 0
+        for num, (item_type, db_id) in num_map.items():
+            if num in approved:
+                if item_type == "decision":
+                    confirm_decision(db_id)
+                    d_approved += 1
+                elif item_type == "question":
+                    pass  # open questions stay open (approved = keep)
+                    q_approved += 1
+                elif item_type == "action":
+                    confirm_action(db_id)
+                    a_approved += 1
+            else:
+                if item_type == "decision":
+                    reject_decision(db_id)
+                elif item_type == "question":
+                    abandon_question(db_id)
+                elif item_type == "action":
+                    reject_action(db_id)
 
-        for qid in approved_q_ids:
-            pass  # open questions stay open (approved = keep)
-        for qid in all_q_ids:
-            if qid not in approved_q_ids:
-                abandon_question(qid)
+        click.secho(
+            f"\nConfirmed {d_approved} decisions, kept {q_approved} questions, kept {a_approved} actions",
+            fg="green", bold=True,
+        )
 
-        click.secho(f"\nConfirmed {len(approved_d_ids)} decisions, kept {len(approved_q_ids)} questions", fg="green", bold=True)
+        click.echo()
+        click.secho(f"Tip: Run 'kb synthesize {project}' to update stakeholder docs", dim=True)
 
     except Exception as e:
         click.secho(f"Error: {e}", fg="red")
@@ -791,7 +914,7 @@ def questions(project, status):
 def resolve(question_id, resolution, decision):
     """Mark an open question as answered."""
     try:
-        from scripts.kb_core.crud.open_questions import get_open_question
+        from scripts.kb_core.crud.questions import get_open_question
 
         q = get_open_question(question_id)
         if not q:
@@ -841,7 +964,7 @@ def update_decision_cmd(decision_id, status, summary):
 
         click.secho(f"Updated decision {decision_id}: {d['topic']}", fg="green", bold=True)
         if status:
-            click.secho(f"  Status: {d['status']} → {status}", dim=True)
+            click.secho(f"  Status: {d['status']} -> {status}", dim=True)
         if summary:
             preview = summary[:120] + "..." if len(summary) > 120 else summary
             click.secho(f"  Summary: {preview}", dim=True)
@@ -857,7 +980,7 @@ def update_decision_cmd(decision_id, status, summary):
 def dismiss_question_cmd(question_id, reason):
     """Dismiss an open question (out of scope, not applicable, etc.)."""
     try:
-        from scripts.kb_core.crud.open_questions import get_open_question
+        from scripts.kb_core.crud.questions import get_open_question
 
         q = get_open_question(question_id)
         if not q:
@@ -900,7 +1023,7 @@ def cluster(call_id, threshold, min_size, recompute):
             with conn.cursor() as cur:
                 if call_id:
                     cur.execute(
-                        "SELECT count(*) as cnt FROM chunk_clusters WHERE chunk_id IN (SELECT id FROM chunks WHERE call_id = %s)",
+                        "SELECT count(*) as cnt FROM chunk_clusters WHERE chunk_id IN (SELECT id FROM call_chunks WHERE call_id = %s)",
                         (call_id,),
                     )
                 else:
@@ -929,19 +1052,19 @@ def cluster(call_id, threshold, min_size, recompute):
 
         for cl in clusters:
             # Cluster header
-            click.secho(f"━━ Cluster {cl['cluster_id']} ", fg="cyan", bold=True, nl=False)
+            click.secho(f"== Cluster {cl['cluster_id']} ", fg="cyan", bold=True, nl=False)
             click.secho(f"({cl['size']} chunks) ", fg="cyan", nl=False)
 
-            # Show clients represented
-            clients = list(set(c["client_name"] for c in cl["chunks"]))
-            click.secho(f"[{', '.join(clients)}]", fg="green")
+            # Show orgs represented
+            orgs = list(set(c["client_name"] for c in cl["chunks"]))
+            click.secho(f"[{', '.join(orgs)}]", fg="green")
 
             # Show representative chunks (first 3)
             for chunk in cl["chunks"][:3]:
                 text = chunk["text"]
                 if len(text) > 120:
                     text = text[:120] + "..."
-                click.secho(f"  • ", fg="white", nl=False)
+                click.secho(f"  * ", fg="white", nl=False)
                 if chunk.get("speaker"):
                     click.secho(f"{chunk['speaker']}: ", fg="magenta", nl=False)
                 click.echo(text)
@@ -949,6 +1072,131 @@ def cluster(call_id, threshold, min_size, recompute):
             if cl["size"] > 3:
                 click.secho(f"  ... and {cl['size'] - 3} more chunks", dim=True)
 
+            click.echo()
+
+    except Exception as e:
+        click.secho(f"Error: {e}", fg="red")
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument("project")
+@click.argument("call_id", type=int)
+@click.option("--type", "-t", "stakeholder_type", help="Single stakeholder type to synthesize")
+@click.option("--dry-run", is_flag=True, help="Show proposed additions only, don't write files")
+def synthesize(project, call_id, stakeholder_type, dry_run):
+    """Distill stakeholder intelligence from a call into living .md docs.
+
+    Reads call summaries, proposes additions per stakeholder type.
+    Each stakeholder type gets a persistent doc that grows over time.
+
+    \b
+    Examples:
+      kb synthesize POP_Demo 27              # all stakeholder types
+      kb synthesize POP_Demo 27 -t Patient   # single type
+      kb synthesize POP_Demo 27 --dry-run    # preview only
+    """
+    try:
+        click.secho(f"\nDistilling call {call_id} for '{project}'...", fg="blue")
+        if stakeholder_type:
+            click.secho(f"  Type filter: {stakeholder_type}", dim=True)
+        click.echo()
+
+        results = synthesize_call(project, call_id, stakeholder_type=stakeholder_type)
+
+        # Check for errors (top-level errors have only 'error' key)
+        if results and results[0].get("error") and "stakeholder_type" not in results[0]:
+            click.secho(results[0]["error"], fg="red")
+            sys.exit(1)
+
+        # Get call date for attribution
+        from scripts.kb_core.db import get_db
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT call_date FROM calls WHERE id = %s", (call_id,))
+                row = cur.fetchone()
+                call_date = str(row["call_date"]) if row else "unknown"
+
+        for r in results:
+            st = r["stakeholder_type"]
+            slug = r["slug"]
+            additions = r["proposed_additions"]
+
+            if r.get("error"):
+                click.secho(f"== {st} == ERROR: {r['error']}", fg="red")
+                continue
+
+            is_new = r["existing_doc"] is None
+            status = "NEW" if is_new else "UPDATE"
+            click.secho(f"== {st} == ", fg="blue", bold=True, nl=False)
+            click.secho(f"[{status}]", fg="green" if is_new else "yellow")
+
+            if not additions:
+                click.secho("   No new insights for this stakeholder type.", dim=True)
+                click.echo()
+                continue
+
+            click.secho(f"   {len(additions)} proposed additions:\n", dim=True)
+
+            # Display proposed additions with numbers
+            num_map = {}
+            for idx, a in enumerate(additions, 1):
+                num_map[idx] = a
+                click.secho(f"   [{idx}] ", fg="cyan", nl=False)
+                click.secho(f"{a['section']}", fg="magenta", nl=False)
+                click.echo(f": {a['content']}")
+                if a.get("evidence"):
+                    click.secho(f"       Evidence: {a['evidence']}", dim=True)
+
+            click.echo()
+
+            if dry_run:
+                continue
+
+            # Interactive approval
+            click.secho("   Approve additions:", fg="cyan", bold=True)
+            click.secho('   Enter numbers (e.g., "1 3 5"), "all", "none", or "quit"', dim=True)
+
+            action = click.prompt("   >", default="all").strip().lower()
+
+            if action == "quit":
+                click.secho("   Skipped.", fg="yellow")
+                continue
+
+            if action == "none":
+                click.secho("   No additions applied.", fg="yellow")
+                click.echo()
+                continue
+
+            # Determine approved additions
+            if action == "all":
+                approved = list(additions)
+            else:
+                try:
+                    nums = [int(n) for n in action.split()]
+                    approved = [num_map[n] for n in nums if n in num_map]
+                except ValueError:
+                    click.secho("   Invalid input, skipping.", fg="red")
+                    continue
+
+            if not approved:
+                click.secho("   No additions selected.", fg="yellow")
+                click.echo()
+                continue
+
+            # Build or update document
+            file_path = r["file_path"]
+            if is_new:
+                existing = _build_seed_template(st, project)
+            else:
+                existing = r["existing_doc"]
+
+            updated_doc = apply_additions(existing, approved, call_date)
+
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(updated_doc)
+
+            click.secho(f"   Applied {len(approved)} additions to {file_path}", fg="green", bold=True)
             click.echo()
 
     except Exception as e:

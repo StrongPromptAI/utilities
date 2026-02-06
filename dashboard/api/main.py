@@ -9,7 +9,7 @@ app = FastAPI(title="KB Dashboard", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5176", "http://127.0.0.1:5176"],
+    allow_origins=["http://localhost:3006", "http://127.0.0.1:3006"],
     allow_methods=["GET"],
     allow_headers=["*"],
 )

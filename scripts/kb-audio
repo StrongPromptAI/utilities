@@ -1,0 +1,386 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WEBDAV_BASE="https://webdav.fastmail.com/recordings"
+KEYCHAIN_SERVICE="fastmail-webdav"
+KEYCHAIN_ACCOUNT_SERVICE="fastmail-webdav-account"
+
+# --- Credential helpers ---
+
+get_credentials() {
+  local email password
+  email=$(security find-generic-password -s "$KEYCHAIN_ACCOUNT_SERVICE" -w 2>/dev/null) || {
+    echo "Error: No credentials found. Run 'kb-audio setup' first." >&2
+    exit 1
+  }
+  password=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -w 2>/dev/null) || {
+    echo "Error: No credentials found. Run 'kb-audio setup' first." >&2
+    exit 1
+  }
+  FASTMAIL_USER="$email"
+  FASTMAIL_PASS="$password"
+}
+
+# --- Commands ---
+
+cmd_setup() {
+  echo "kb-audio setup — store Fastmail WebDAV credentials in macOS Keychain"
+  echo ""
+  read -rp "Fastmail email: " email
+  read -rsp "App-specific password: " password
+  echo ""
+
+  # Delete existing entries if present (ignore errors)
+  security delete-generic-password -s "$KEYCHAIN_ACCOUNT_SERVICE" 2>/dev/null || true
+  security delete-generic-password -s "$KEYCHAIN_SERVICE" 2>/dev/null || true
+
+  security add-generic-password -s "$KEYCHAIN_ACCOUNT_SERVICE" -a "kb-audio" -w "$email"
+  security add-generic-password -s "$KEYCHAIN_SERVICE" -a "$email" -w "$password"
+
+  echo "Credentials stored in Keychain."
+}
+
+cmd_upload() {
+  local local_file="${1:?Usage: kb-audio upload <local-file> [cloud-path]}"
+  local cloud_path="${2:-$(basename "$local_file")}"
+
+  if [[ ! -f "$local_file" ]]; then
+    echo "Error: File not found: $local_file" >&2
+    exit 1
+  fi
+
+  get_credentials
+
+  # Create subdirectory if cloud_path contains /
+  local dir_part
+  dir_part=$(dirname "$cloud_path")
+  if [[ "$dir_part" != "." ]]; then
+    ensure_directory "$dir_part"
+  fi
+
+  local url="$WEBDAV_BASE/$cloud_path"
+  local local_size
+  local_size=$(stat -f%z "$local_file")
+
+  echo "Uploading $(basename "$local_file") ($(human_size "$local_size")) → $url"
+
+  local http_code
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    -u "$FASTMAIL_USER:$FASTMAIL_PASS" \
+    -T "$local_file" \
+    "$url")
+
+  if [[ "$http_code" =~ ^2 ]]; then
+    echo "Upload complete (HTTP $http_code)"
+    echo "Remote: $url"
+  else
+    echo "Error: Upload failed (HTTP $http_code)" >&2
+    exit 1
+  fi
+}
+
+cmd_verify() {
+  local cloud_path="${1:?Usage: kb-audio verify <cloud-path>}"
+  get_credentials
+
+  local url="$WEBDAV_BASE/$cloud_path"
+  local response
+  response=$(curl -s -I -o /dev/null -w "%{http_code} %{size_download}" \
+    -u "$FASTMAIL_USER:$FASTMAIL_PASS" \
+    "$url")
+  local http_code="${response%% *}"
+
+  if [[ ! "$http_code" =~ ^2 ]]; then
+    echo "Error: File not found in cloud (HTTP $http_code): $cloud_path" >&2
+    exit 1
+  fi
+
+  local remote_size
+  remote_size=$(curl -s -I -u "$FASTMAIL_USER:$FASTMAIL_PASS" "$url" \
+    | grep -i '^content-length:' | tr -d '\r' | awk '{print $2}')
+
+  echo "Cloud: $cloud_path"
+  echo "Remote size: $(human_size "${remote_size:-0}")"
+
+  # Compare to local file if it exists
+  local local_name
+  local_name=$(basename "$cloud_path")
+  if [[ -f "$local_name" ]]; then
+    local local_size
+    local_size=$(stat -f%z "$local_name")
+    echo "Local size:  $(human_size "$local_size")"
+    if [[ "$local_size" == "$remote_size" ]]; then
+      echo "Status: MATCH"
+    else
+      echo "Status: SIZE MISMATCH" >&2
+    fi
+  else
+    echo "Status: OK (no local file to compare)"
+  fi
+}
+
+cmd_rm_local() {
+  local local_file="${1:?Usage: kb-audio rm-local <local-file>}"
+
+  if [[ ! -f "$local_file" ]]; then
+    echo "Error: Local file not found: $local_file" >&2
+    exit 1
+  fi
+
+  get_credentials
+
+  local cloud_path
+  cloud_path=$(basename "$local_file")
+  local url="$WEBDAV_BASE/$cloud_path"
+
+  local http_code
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    -u "$FASTMAIL_USER:$FASTMAIL_PASS" \
+    -I "$url")
+
+  if [[ ! "$http_code" =~ ^2 ]]; then
+    echo "Error: Cloud copy not found at $cloud_path — refusing to delete local file." >&2
+    exit 1
+  fi
+
+  rm "$local_file"
+  echo "Deleted local: $local_file (cloud copy verified)"
+}
+
+cmd_archive() {
+  local local_file="${1:?Usage: kb-audio archive <local-file> [cloud-path]}"
+  local cloud_path="${2:-$(basename "$local_file")}"
+
+  cmd_upload "$local_file" "$cloud_path"
+
+  echo ""
+  echo "Verifying upload..."
+  get_credentials
+
+  local url="$WEBDAV_BASE/$cloud_path"
+  local local_size
+  local_size=$(stat -f%z "$local_file")
+
+  local http_code
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    -u "$FASTMAIL_USER:$FASTMAIL_PASS" \
+    -I "$url")
+
+  if [[ ! "$http_code" =~ ^2 ]]; then
+    echo "Error: Verification failed — NOT deleting local file." >&2
+    exit 1
+  fi
+
+  local remote_size
+  remote_size=$(curl -s -I -u "$FASTMAIL_USER:$FASTMAIL_PASS" "$url" \
+    | grep -i '^content-length:' | tr -d '\r' | awk '{print $2}')
+
+  if [[ "$local_size" != "$remote_size" ]]; then
+    echo "Error: Size mismatch (local: $local_size, remote: ${remote_size:-unknown}) — NOT deleting local file." >&2
+    exit 1
+  fi
+
+  echo "Verified: sizes match ($(human_size "$local_size"))"
+  rm "$local_file"
+  echo "Deleted local: $local_file"
+  echo ""
+  echo "Archived: $cloud_path"
+}
+
+cmd_ls() {
+  local cloud_path="${1:-}"
+  get_credentials
+
+  local url="$WEBDAV_BASE/"
+  if [[ -n "$cloud_path" ]]; then
+    url="$WEBDAV_BASE/$cloud_path/"
+  fi
+
+  local response
+  response=$(curl -s -u "$FASTMAIL_USER:$FASTMAIL_PASS" \
+    -X PROPFIND \
+    -H "Depth: 1" \
+    -H "Content-Type: application/xml" \
+    -d '<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><getcontentlength/><getlastmodified/></prop></propfind>' \
+    "$url")
+
+  local http_code
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    -u "$FASTMAIL_USER:$FASTMAIL_PASS" \
+    -X PROPFIND \
+    -H "Depth: 1" \
+    -H "Content-Type: application/xml" \
+    -d '<?xml version="1.0" encoding="utf-8"?><propfind xmlns="DAV:"><prop><getcontentlength/><getlastmodified/></prop></propfind>' \
+    "$url")
+
+  if [[ ! "$http_code" =~ ^2 ]]; then
+    echo "Error: PROPFIND failed (HTTP $http_code)" >&2
+    exit 1
+  fi
+
+  # Parse XML response — extract href and content-length pairs
+  echo "$response" | parse_propfind "$url"
+}
+
+cmd_pull() {
+  local cloud_path="${1:?Usage: kb-audio pull <cloud-path> [local-dest]}"
+  local local_dest="${2:-.}"
+
+  get_credentials
+
+  local url="$WEBDAV_BASE/$cloud_path"
+  local filename
+  filename=$(basename "$cloud_path")
+
+  if [[ -d "$local_dest" ]]; then
+    local_dest="$local_dest/$filename"
+  fi
+
+  echo "Downloading $cloud_path → $local_dest"
+
+  local http_code
+  http_code=$(curl -s -o "$local_dest" -w "%{http_code}" \
+    -u "$FASTMAIL_USER:$FASTMAIL_PASS" \
+    "$url")
+
+  if [[ "$http_code" =~ ^2 ]]; then
+    local size
+    size=$(stat -f%z "$local_dest")
+    echo "Downloaded: $local_dest ($(human_size "$size"))"
+  else
+    rm -f "$local_dest"
+    echo "Error: Download failed (HTTP $http_code)" >&2
+    exit 1
+  fi
+}
+
+cmd_help() {
+  cat <<'HELP'
+kb-audio — archive audio recordings to Fastmail WebDAV
+
+USAGE:
+  kb-audio <command> [args...]
+
+COMMANDS:
+  setup                              Store Fastmail credentials in macOS Keychain
+  upload  <local-file> [cloud-path]  Upload file to cloud storage
+  verify  <cloud-path>               Check file exists in cloud, compare sizes
+  rm-local <local-file>              Delete local file after confirming cloud copy
+  archive <local-file> [cloud-path]  Upload + verify + delete local (hot path)
+  ls      [cloud-path]               List files in cloud storage
+  pull    <cloud-path> [local-dest]  Download file from cloud
+  help                               Show this help
+
+NAMING CONVENTION:
+  {YYMMDD}-{project}-{participant}-{seq}.{ext}
+  Example: 260206-fortress-don-1.wav
+
+EXAMPLES:
+  kb-audio setup
+  kb-audio archive 260206-fortress-don-1.wav fortress/260206-fortress-don-1.wav
+  kb-audio ls fortress/
+  kb-audio pull fortress/260206-fortress-don-1.wav
+HELP
+}
+
+# --- Helpers ---
+
+human_size() {
+  local bytes="${1:-0}"
+  if [[ "$bytes" -ge 1073741824 ]]; then
+    printf "%.1f GB" "$(echo "scale=1; $bytes / 1073741824" | bc)"
+  elif [[ "$bytes" -ge 1048576 ]]; then
+    printf "%.1f MB" "$(echo "scale=1; $bytes / 1048576" | bc)"
+  elif [[ "$bytes" -ge 1024 ]]; then
+    printf "%.1f KB" "$(echo "scale=1; $bytes / 1024" | bc)"
+  else
+    printf "%d B" "$bytes"
+  fi
+}
+
+ensure_directory() {
+  local dir_path="$1"
+  local url="$WEBDAV_BASE/$dir_path/"
+
+  # Try MKCOL — 405 means it already exists, which is fine
+  local http_code
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+    -u "$FASTMAIL_USER:$FASTMAIL_PASS" \
+    -X MKCOL \
+    "$url")
+
+  if [[ "$http_code" =~ ^2 ]] || [[ "$http_code" == "405" ]]; then
+    return 0
+  else
+    echo "Error: Failed to create directory $dir_path (HTTP $http_code)" >&2
+    exit 1
+  fi
+}
+
+parse_propfind() {
+  local base_url="$1"
+  # Use grep/sed to extract hrefs and sizes from WebDAV XML
+  local xml
+  xml=$(cat)
+
+  # Extract each response block
+  local hrefs sizes
+  hrefs=$(echo "$xml" | grep -oE '<[Dd]:href>[^<]+</[Dd]:href>' | sed 's/<[^>]*>//g')
+  sizes=$(echo "$xml" | grep -oE '<[Dd]:getcontentlength>[^<]*</[Dd]:getcontentlength>' | sed 's/<[^>]*>//g')
+
+  # Convert to arrays
+  local -a href_arr size_arr
+  IFS=$'\n' read -r -d '' -a href_arr <<< "$hrefs" || true
+  IFS=$'\n' read -r -d '' -a size_arr <<< "$sizes" || true
+
+  local count=0
+  local size_idx=0
+
+  for href in "${href_arr[@]}"; do
+    # Skip the collection itself (first entry)
+    if [[ $count -eq 0 ]]; then
+      ((count++))
+      continue
+    fi
+
+    # Decode the path — show just the filename/dirname
+    local name
+    name=$(basename "$href" | python3 -c "import sys, urllib.parse; print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || basename "$href")
+
+    # Check if it's a directory (href ends with /)
+    if [[ "$href" == */ ]]; then
+      printf "  %-50s  [dir]\n" "$name/"
+    else
+      local size="${size_arr[$size_idx]:-0}"
+      printf "  %-50s  %s\n" "$name" "$(human_size "$size")"
+      ((size_idx++))
+    fi
+
+    ((count++))
+  done
+
+  if [[ $count -le 1 ]]; then
+    echo "  (empty)"
+  fi
+}
+
+# --- Main dispatch ---
+
+command="${1:-help}"
+shift || true
+
+case "$command" in
+  setup)    cmd_setup "$@" ;;
+  upload)   cmd_upload "$@" ;;
+  verify)   cmd_verify "$@" ;;
+  rm-local) cmd_rm_local "$@" ;;
+  archive)  cmd_archive "$@" ;;
+  ls)       cmd_ls "$@" ;;
+  pull)     cmd_pull "$@" ;;
+  help|-h|--help) cmd_help ;;
+  *)
+    echo "Unknown command: $command" >&2
+    echo "Run 'kb-audio help' for usage." >&2
+    exit 1
+    ;;
+esac

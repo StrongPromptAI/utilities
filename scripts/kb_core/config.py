@@ -1,14 +1,11 @@
-"""Configuration constants for knowledge base."""
+"""Configuration constants for knowledge base.
+
+LLM/embedding config lives in kb_config singleton table.
+Static tuning parameters stay here.
+"""
 
 # Database
 DB_URL = "postgresql://postgres:55@localhost:5433/knowledge_base"
-
-# LM Studio (for LLM inference)
-LM_STUDIO_URL = "http://localhost:1234/v1"
-
-# Embedding (sentence-transformers, local)
-EMBED_MODEL = "nomic-ai/nomic-embed-text-v1.5"
-SUMMARY_MODEL = "mistral-small-3.2-24b-instruct-2506"
 
 # Chunking
 DEFAULT_CHUNK_SIZE = 512
@@ -22,3 +19,24 @@ DECAY_RATE = 0.95  # Per-day decay factor
 
 # Quotes
 QUOTES_PER_BATCH = 5  # Target quotes per batch extraction
+
+
+def _load_singleton() -> dict:
+    """Load kb_config singleton row. Cached after first call."""
+    import psycopg
+    from psycopg.rows import dict_row
+    with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM kb_config WHERE id = 1")
+            return dict(cur.fetchone())
+
+
+_config = _load_singleton()
+
+# LM Studio (for LLM inference)
+LM_STUDIO_URL = _config["llm_url"]
+SUMMARY_MODEL = _config["llm_model"]
+
+# Embedding (sentence-transformers, local)
+EMBED_MODEL = _config["embed_model"]
+EMBED_BACKEND = _config["embed_backend"]

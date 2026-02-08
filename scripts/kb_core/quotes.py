@@ -177,21 +177,176 @@ def deduplicate_quotes(quotes: list[dict]) -> list[dict]:
     return result
 
 
+def rank_quotes(
+    call_id: int,
+    top_n: int = 10,
+    show_progress: bool = True,
+) -> list[dict]:
+    """Rank candidate quotes using PROJECT.md context via LLM.
+
+    Reads project documentation to understand goals, priorities, and current phase,
+    then asks the LLM to select the top_n most strategically relevant quotes.
+
+    Args:
+        call_id: The call whose candidates to rank
+        top_n: Number of top quotes to return
+        show_progress: Print progress
+
+    Returns:
+        Ordered list of candidate quote dicts (best first), trimmed to top_n.
+        Each dict includes the original DB fields (id, quote_text, speaker, etc.)
+        plus an "llm_reason" field explaining why it was selected.
+    """
+    from .crud.quotes import get_candidate_quotes
+    from .crud.projects import get_project_docs
+
+    candidates = get_candidate_quotes(call_id)
+    if not candidates:
+        return []
+
+    # If fewer candidates than top_n, just return them all
+    if len(candidates) <= top_n:
+        for c in candidates:
+            c["llm_reason"] = "Included — fewer candidates than requested"
+        return candidates
+
+    # Load project docs + user notes for context
+    project_context = _get_project_context(call_id)
+
+    # Add user notes to ranking context
+    user_notes = _get_user_notes(call_id)
+    if user_notes:
+        project_context += f"\n\nUSER NOTES (observations from the call owner — use to guide ranking):\n{user_notes}"
+
+    if show_progress:
+        print(f"  Ranking {len(candidates)} candidates with project context...")
+
+    # Build numbered candidate list for LLM
+    candidates_text = ""
+    for idx, q in enumerate(candidates, 1):
+        speaker = q.get("speaker") or "Unknown"
+        category = q.get("category") or "uncategorized"
+        candidates_text += f"\n[{idx}] ({category}) {speaker}: \"{q['quote_text']}\""
+        if q.get("context"):
+            candidates_text += f"\n    Context: {q['context']}"
+
+    prompt = f"""You are a stakeholder intelligence analyst. Your job is to select the {top_n} most strategically valuable quotes from a business call.
+
+PROJECT CONTEXT:
+{project_context}
+
+CANDIDATE QUOTES:
+{candidates_text}
+
+Select the {top_n} quotes that are most valuable given the project context. Prioritize quotes that:
+1. Reveal stakeholder priorities, concerns, or decision criteria relevant to the project
+2. Contain commitments, decisions, or action items that move the project forward
+3. Expose objections or risks that need to be addressed
+4. Provide leverage or talking points for future conversations
+5. Capture the authentic voice/tone of the stakeholder relationship
+
+Return a JSON array of objects, each with:
+- "num": the candidate number (e.g. 1, 5, 12)
+- "reason": one sentence explaining why this quote is strategically valuable
+
+Order from most to least valuable. Return ONLY valid JSON array, no other text.
+
+JSON:"""
+
+    client = OpenAI(base_url=LM_STUDIO_URL, api_key="not-needed")
+    response = client.chat.completions.create(
+        model=SUMMARY_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1500,
+        temperature=0.3,
+    )
+
+    content = response.choices[0].message.content.strip()
+
+    # Parse JSON response
+    try:
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.strip()
+
+        rankings = json.loads(content)
+        if not isinstance(rankings, list):
+            if show_progress:
+                print("  Warning: LLM returned non-list, falling back to all candidates")
+            return candidates[:top_n]
+    except json.JSONDecodeError:
+        if show_progress:
+            print("  Warning: Could not parse LLM ranking, falling back to all candidates")
+        return candidates[:top_n]
+
+    # Map rankings back to candidate dicts
+    ranked = []
+    for r in rankings:
+        if not isinstance(r, dict) or "num" not in r:
+            continue
+        idx = r["num"] - 1  # 0-indexed
+        if 0 <= idx < len(candidates):
+            q = candidates[idx].copy()
+            q["llm_reason"] = r.get("reason", "")
+            ranked.append(q)
+
+    if show_progress:
+        print(f"  Selected {len(ranked)} top quotes from {len(candidates)} candidates")
+
+    return ranked[:top_n]
+
+
+def _get_project_context(call_id: int) -> str:
+    """Load PROJECT.md content for the project linked to a call."""
+    from .crud.projects import get_project_docs
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT p.name as project_name
+                   FROM calls c
+                   JOIN projects p ON c.project_id = p.id
+                   WHERE c.id = %s""",
+                (call_id,)
+            )
+            row = cur.fetchone()
+
+    if not row or not row.get("project_name"):
+        return "(No project linked to this call — rank based on general business value)"
+
+    docs = get_project_docs(row["project_name"])
+    if "error" in docs or not docs.get("project"):
+        return f"Project: {row['project_name']}\n(PROJECT.md not found — rank based on general business value)"
+
+    return f"Project: {row['project_name']}\n\n{docs['project']}"
+
+
+def _get_user_notes(call_id: int) -> str | None:
+    """Get user_notes for a call, or None."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_notes FROM calls WHERE id = %s", (call_id,))
+            row = cur.fetchone()
+            return row["user_notes"] if row and row.get("user_notes") else None
+
+
 def _get_call_context(call_id: int) -> str:
     """Get brief context about a call for quote extraction."""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT c.call_date, s.name as client, p.name as project
+                """SELECT c.call_date, o.name as org, p.name as project
                    FROM calls c
-                   JOIN clients s ON c.client_id = s.id
+                   JOIN orgs o ON c.org_id = o.id
                    LEFT JOIN projects p ON c.project_id = p.id
                    WHERE c.id = %s""",
                 (call_id,)
             )
             row = cur.fetchone()
             if row:
-                parts = [f"Call with {row['client']}"]
+                parts = [f"Call with {row['org']}"]
                 if row.get("project"):
                     parts.append(f"re: {row['project']}")
                 parts.append(f"on {row['call_date']}")
@@ -223,10 +378,10 @@ def draft_letter(
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT c.call_date, c.summary, s.name as client,
-                          s.organization, p.name as project
+                """SELECT c.call_date, c.summary, c.user_notes, o.name as org_name,
+                          p.name as project
                    FROM calls c
-                   JOIN clients s ON c.client_id = s.id
+                   JOIN orgs o ON c.org_id = o.id
                    LEFT JOIN projects p ON c.project_id = p.id
                    WHERE c.id = %s""",
                 (call_id,)
@@ -251,32 +406,48 @@ def draft_letter(
         ])
         quotes_section = f"\n\n---\n\n**P.S. — Quotes from our call:**\n\n{quotes_md}"
 
+    # Include user notes if present
+    user_notes = ""
+    if call.get("user_notes"):
+        user_notes = f"\n\nMY NOTES (use to guide tone and emphasis):\n{call['user_notes']}"
+
+    # Build quotes context for the LLM prompt
+    quotes_context = ""
+    if quotes:
+        quotes_lines = "\n".join([
+            f'- "{q["quote_text"]}" — {q.get("speaker") or "Unknown"}'
+            for q in quotes
+        ])
+        quotes_context = f"\n\nKEY QUOTES (use these to match the vibe and priorities of the call):\n{quotes_lines}"
+
     # Build custom instructions
     custom = ""
     if instructions:
         custom = f"\n\nADDITIONAL INSTRUCTIONS: {instructions}"
 
     # Get first name from client
-    recipient_first = call["client"].split()[0]
+    recipient_first = call["org_name"].split()[0]
 
     prompt = f"""Write a professional follow-up email/letter in Markdown format.
 
 CONTEXT:
-- Recipient: {call["client"]}
+- Recipient: {call["org_name"]}
 - Date of call: {call["call_date"]}
 - Project: {call.get("project") or "General discussion"}
 
 CALL SUMMARY:
 {summary_text}
+{user_notes}
+{quotes_context}
 {custom}
 
 REQUIREMENTS:
 - Address to "{recipient_first},"
 - Recap key points from the call concisely
 - Use headers and bullet points for readability
-- Professional but warm tone
+- Professional but warm tone — let the quotes and notes guide your emphasis
 - Sign off as "{sender_name}"
-- Do NOT include quotes section - that will be added separately
+- Do NOT include a quotes section — quotes will be appended separately
 
 OUTPUT only the markdown letter, nothing else:"""
 
@@ -295,12 +466,12 @@ OUTPUT only the markdown letter, nothing else:"""
 
     # Generate filename
     date_str = str(call["call_date"]).replace("-", "")
-    name_slug = call["client"].lower().replace(" ", "-")
+    name_slug = call["org_name"].lower().replace(" ", "-")
     filename = f"letter-{name_slug}-{date_str}.md"
 
     return {
         "markdown": letter,
-        "recipient": call["client"],
+        "recipient": call["org_name"],
         "filename": filename,
         "call_date": str(call["call_date"])
     }

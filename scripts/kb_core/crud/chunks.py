@@ -27,7 +27,7 @@ def insert_chunks(call_id: int, chunks: list, show_progress: bool = True) -> int
             embedding = get_embedding(text)
             with conn.cursor() as cur:
                 cur.execute(
-                    """INSERT INTO chunks (call_id, chunk_idx, text, speaker, embedding)
+                    """INSERT INTO call_chunks(call_id, chunk_idx, text, speaker, embedding)
                        VALUES (%s, %s, %s, %s, %s)""",
                     (call_id, idx, text, speaker, embedding)
                 )
@@ -42,7 +42,7 @@ def get_call_chunks(call_id: int) -> list[dict]:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, chunk_idx, speaker, text FROM chunks WHERE call_id = %s ORDER BY chunk_idx",
+                "SELECT id, chunk_idx, speaker, text FROM call_chunks WHERE call_id = %s ORDER BY chunk_idx",
                 (call_id,)
             )
             return cur.fetchall()

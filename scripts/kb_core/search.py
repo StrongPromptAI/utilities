@@ -3,8 +3,8 @@
 from .db import get_db
 from .embeddings import get_embedding
 from .config import DEFAULT_DAYS_BACK, DECAY_RATE
-from .crud.clients import get_client
-from .crud.calls import get_calls_for_client
+from .crud.org import get_org
+from .crud.calls import get_calls_for_org
 
 
 def semantic_search(
@@ -217,16 +217,16 @@ def semantic_search_with_fallback(
     }
 
 
-def get_client_context(client_name: str, query: str = None, limit: int = 20) -> dict:
-    """Get comprehensive context about a client."""
-    client = get_client(client_name)
-    if not client:
-        return {"error": f"Client '{client_name}' not found"}
+def get_org_context(org_name: str, query: str = None, limit: int = 20) -> dict:
+    """Get comprehensive context about an org."""
+    org = get_org(org_name)
+    if not org:
+        return {"error": f"Org '{org_name}' not found"}
 
-    calls = get_calls_for_client(client_name)
+    calls = get_calls_for_org(org_name)
 
     result = {
-        "client": client,
+        "org": org,
         "calls": calls,
         "all_chunks_count": 0
     }
@@ -235,11 +235,11 @@ def get_client_context(client_name: str, query: str = None, limit: int = 20) -> 
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT count(*) as cnt FROM chunks_with_context WHERE client_name = %s",
-                (client_name,)
+                (org_name,)
             )
             result["all_chunks_count"] = cur.fetchone()["cnt"]
 
     if query:
-        result["relevant_chunks"] = semantic_search(query, client_name=client_name, limit=limit)
+        result["relevant_chunks"] = semantic_search(query, client_name=org_name, limit=limit)
 
     return result

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from .db import get_db
-from .search import hybrid_search, get_client_context
+from .search import hybrid_search, get_org_context
 from .crud.quotes import get_approved_quotes
 
 
@@ -37,9 +37,9 @@ def suggested_next_step(call_id: int, letter_path: str = None) -> dict:
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT c.*, s.name as client_name, p.name as project_name
+                SELECT c.*, o.name as org_name, p.name as project_name
                 FROM calls c
-                JOIN clients s ON c.client_id = s.id
+                JOIN orgs o ON c.org_id = o.id
                 LEFT JOIN projects p ON c.project_id = p.id
                 WHERE c.id = %s
             """, (call_id,))
@@ -76,7 +76,7 @@ def suggested_next_step(call_id: int, letter_path: str = None) -> dict:
 
     # 5. Agentic search: Find related calls and context
     search_queries = [
-        f"conversations with {call['client_name']}",
+        f"conversations with {call['org_name']}",
         f"{call['project_name']} project discussions" if call['project_name'] else None,
         "sales strategy and next steps"
     ]
@@ -87,7 +87,7 @@ def suggested_next_step(call_id: int, letter_path: str = None) -> dict:
     for query in search_queries:
         results = hybrid_search(
             query=query,
-            client_name=call['client_name'],
+            client_name=call['org_name'],
             limit=3
         )
         for r in results:
@@ -98,19 +98,21 @@ def suggested_next_step(call_id: int, letter_path: str = None) -> dict:
                 "call_date": str(r['call_date'])
             })
 
-    # Get client context
-    client_context = get_client_context(call['client_name'])
+    # Get org context
+    org_context = get_org_context(call['org_name'])
 
     # 6. Build analysis prompt for Claude Code
 
-    # Get participants from participants table
+    # Get contacts via call_contacts junction
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT name FROM participants WHERE call_id = %s ORDER BY name",
+                """SELECT ct.name FROM contacts ct
+                   JOIN call_contacts cc ON cc.contact_id = ct.id
+                   WHERE cc.call_id = %s ORDER BY ct.name""",
                 (call_id,)
             )
-            participants = [row['name'] for row in cur.fetchall()]
+            contacts = [row['name'] for row in cur.fetchall()]
 
     # Build quotes section
     quotes_section = ""
@@ -137,25 +139,35 @@ def suggested_next_step(call_id: int, letter_path: str = None) -> dict:
 ```
 """
 
-    participants_str = ', '.join(participants) if participants else 'None'
+    contacts_str = ', '.join(contacts) if contacts else 'None'
+
+    user_notes_section = ""
+    if call.get('user_notes'):
+        user_notes_section = f"""
+
+# My Notes
+
+{call['user_notes']}
+"""
 
     analysis_prompt = f"""# Call Summary
 
-**Client:** {call['client_name']}
+**Org:** {call['org_name']}
 **Project:** {call['project_name'] or 'None'}
 **Date:** {call['call_date']}
-**Participants:** {participants_str}
+**Contacts:** {contacts_str}
 
 {call['summary']}
+{user_notes_section}
 {quotes_section}
 # Related Context (from agentic search)
 
 {chr(10).join([f"- [{r['call_date']}] {r['text']}..." for r in agentic_search_results[:5]])}
 
-# Client History
+# Org History
 
-- Total calls: {len(client_context['calls'])}
-- Total chunks: {client_context['all_chunks_count']}
+- Total calls: {len(org_context['calls'])}
+- Total chunks: {org_context['all_chunks_count']}
 
 # Peterson Framework Principles
 
@@ -190,9 +202,9 @@ Using Peterson's Power Messaging framework, provide:
         "letter": letter_content,
         "agentic_search_results": agentic_search_results,
         "client_context": {
-            "client": dict(client_context['client']),
-            "total_calls": len(client_context['calls']),
-            "total_chunks": client_context['all_chunks_count']
+            "org": dict(org_context['org']),
+            "total_calls": len(org_context['calls']),
+            "total_chunks": org_context['all_chunks_count']
         },
         "analysis_prompt": analysis_prompt
     }

@@ -1,11 +1,12 @@
 """Transcript preprocessing functions."""
 
+import json
 import re
 import csv
 from io import StringIO
 from pathlib import Path
 from openai import OpenAI
-from .config import LM_STUDIO_URL
+from .config import LM_STUDIO_URL, SUMMARY_MODEL
 
 MAX_LLM_BATCH = 15  # Stay within qwen2.5-coder-1.5b context window
 
@@ -58,6 +59,10 @@ def detect_and_extract(file_path: str) -> tuple[str, str]:
         except ValueError:
             fmt = 'plaintext'
         return text, fmt
+
+    if path.suffix.lower() == '.json':
+        raw = path.read_text(errors='replace')
+        return raw, 'json'
 
     # Level 2: Text content detection
     raw = path.read_text(errors='replace')
@@ -136,7 +141,7 @@ etc."""
 
         try:
             response = client.chat.completions.create(
-                model="qwen2.5-coder-1.5b-instruct-mlx",
+                model=SUMMARY_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=len(texts) * 10,
                 temperature=0
@@ -187,7 +192,16 @@ etc."""
     borderline_items = []
     all_rows = []
 
-    if fmt == 'csv':
+    if fmt == 'json':
+        # JSON array of {speaker, text} objects (no timestamps)
+        entries = json.loads(raw_text)
+        for entry in entries:
+            speaker = entry.get("speaker", "Unknown").strip()
+            text = entry.get("text", "").strip()
+            if speaker and text:
+                participants.add(speaker)
+                all_rows.append({"speaker": speaker, "text": text})
+    elif fmt == 'csv':
         # Parse CSV - Dialpad format: "timestamp","speaker","text"
         reader = csv.reader(StringIO(raw_text))
         for row in reader:

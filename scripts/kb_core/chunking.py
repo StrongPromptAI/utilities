@@ -82,25 +82,44 @@ def chunk_by_sections(text: str, min_chunk_size: int = 50) -> list[str]:
     return chunks
 
 
-def chunk_transcript(text: str, target_chunk_size: int = TRANSCRIPT_TARGET_CHUNK_SIZE) -> list[dict]:
-    """Chunk a preprocessed transcript by speaker turns.
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences, handling common abbreviations."""
+    # Split on sentence-ending punctuation followed by space + uppercase or newline
+    parts = re.split(r'(?<=[.!?])\s+(?=[A-Z\n])', text)
+    # Also split on newlines within turns
+    sentences = []
+    for part in parts:
+        for line in part.split("\n"):
+            s = line.strip()
+            if s:
+                sentences.append(s)
+    return sentences
 
-    Groups speaker turns into chunks of approximately target_chunk_size characters,
-    never splitting mid-turn. Extracts speaker from [Name] prefix.
+
+def chunk_transcript(
+    text: str,
+    min_chunk_size: int = 500,
+    max_chunk_size: int = 700,
+) -> list[dict]:
+    """Semantic chunking of a preprocessed transcript.
+
+    Splits on sentence boundaries within speaker turns, targeting 500-700 chars.
+    Never cuts mid-sentence. Preserves speaker attribution per chunk.
 
     Args:
         text: Preprocessed transcript (output of preprocess_transcript)
-        target_chunk_size: Target chunk size in characters
+        min_chunk_size: Minimum chunk size before accepting a break
+        max_chunk_size: Maximum chunk size — flush at next sentence boundary
 
     Returns:
-        List of dicts: [{"speaker": "Name or None", "speakers": ["all", "speakers"], "text": "content"}, ...]
+        List of dicts: [{"speaker": str|None, "text": str}, ...]
     """
     # Split on double newlines (speaker turn boundaries)
     turns = [t.strip() for t in text.split("\n\n") if t.strip()]
 
     if not turns:
         if text.strip():
-            return [{"speaker": None, "speakers": [], "text": text.strip()}]
+            return [{"speaker": None, "text": text.strip()}]
         return []
 
     # Parse each turn to extract speaker
@@ -110,39 +129,44 @@ def chunk_transcript(text: str, target_chunk_size: int = TRANSCRIPT_TARGET_CHUNK
             return {"speaker": match.group(1), "text": match.group(2).strip()}
         return {"speaker": None, "text": turn}
 
-    parsed_turns = [parse_turn(t) for t in turns]
+    # Build a flat list of (speaker, sentence) pairs
+    segments: list[tuple[str | None, str]] = []
+    for turn in turns:
+        parsed = parse_turn(turn)
+        for sentence in _split_sentences(parsed["text"]):
+            segments.append((parsed["speaker"], sentence))
 
+    if not segments:
+        return []
+
+    # Group sentences into chunks respecting size bounds
     chunks = []
-    current_chunk_turns = []
+    current_sentences: list[str] = []
+    current_speakers: list[str] = []
     current_size = 0
 
-    for turn in parsed_turns:
-        turn_size = len(turn["text"])
+    for speaker, sentence in segments:
+        sentence_size = len(sentence)
 
-        # If adding this turn exceeds target and we have content, flush
-        if current_size + turn_size > target_chunk_size and current_chunk_turns:
-            # Combine turns into one chunk
-            speakers = [t["speaker"] for t in current_chunk_turns if t["speaker"]]
-            combined_text = "\n\n".join([t["text"] for t in current_chunk_turns])
-            chunks.append({
-                "speaker": speakers[0] if speakers else None,  # Primary speaker
-                "speakers": list(dict.fromkeys(speakers)),  # Unique speakers, preserving order
-                "text": combined_text
-            })
-            current_chunk_turns = []
+        # If adding this sentence would exceed max and we have enough content, flush
+        if current_size + sentence_size > max_chunk_size and current_size >= min_chunk_size:
+            chunk_text = " ".join(current_sentences)
+            # Primary speaker = most frequent in this chunk
+            primary = max(set(current_speakers), key=current_speakers.count) if current_speakers else None
+            chunks.append({"speaker": primary, "text": chunk_text})
+            current_sentences = []
+            current_speakers = []
             current_size = 0
 
-        current_chunk_turns.append(turn)
-        current_size += turn_size + 2  # +2 for \n\n
+        current_sentences.append(sentence)
+        if speaker:
+            current_speakers.append(speaker)
+        current_size += sentence_size + 1  # +1 for space join
 
     # Flush remaining
-    if current_chunk_turns:
-        speakers = [t["speaker"] for t in current_chunk_turns if t["speaker"]]
-        combined_text = "\n\n".join([t["text"] for t in current_chunk_turns])
-        chunks.append({
-            "speaker": speakers[0] if speakers else None,
-            "speakers": list(dict.fromkeys(speakers)),
-            "text": combined_text
-        })
+    if current_sentences:
+        chunk_text = " ".join(current_sentences)
+        primary = max(set(current_speakers), key=current_speakers.count) if current_speakers else None
+        chunks.append({"speaker": primary, "text": chunk_text})
 
     return chunks

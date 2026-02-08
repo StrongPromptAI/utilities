@@ -5,9 +5,55 @@ related chunks. Supports per-call clustering, cross-call clustering,
 and search result expansion via cluster membership.
 """
 
+from collections import Counter
+
 import numpy as np
 from sklearn.cluster import AgglomerativeClustering
 from .db import get_db
+
+# Stop words for cluster labeling — standard + transcript filler
+_STOP = frozenset(
+    "i me my we our you your he she it they them their its a an the and but or "
+    "so if in on at to for of is am are was were be been being have has had do "
+    "does did will would shall should can could may might must not no nor that "
+    "this these those what which who whom how when where why all any each every "
+    "some much many more most other such than too very just also about after "
+    "before between from into through during with without again further then "
+    "once here there up down out off over under above below like well really "
+    "going gonna kind mean maybe sort like yeah right okay sure well actually "
+    "thing things people said say says know think believe guess stuff basically "
+    "literally probably definitely certainly perhaps obviously certainly clearly "
+    "pretty much anyway though however still already even ever never always "
+    "want need make made way getting come came went goes take took look looking "
+    "tell told talk talking asking asked give gave done doing trying tried "
+    "good great nice fine okay cool awesome interesting different little "
+    "whole bunch couple able point part question answer something anything "
+    "nothing everything else another first last next back long "
+    "start started keep kept feel felt seems seemed work working worked "
+    "really truly honestly frankly simply exactly happen happened "
+    "chris kevin john jeff sara bawa".split()
+)
+
+
+def cluster_label(chunks: list[dict], max_words: int = 3) -> str:
+    """Generate a short descriptive label from chunk texts using top keywords.
+
+    Filters filler/stop words aggressively and requires min 4 chars.
+    Uses document frequency (how many chunks contain the word) rather than
+    raw count, so words that appear across chunks rank higher.
+    """
+    doc_freq: Counter[str] = Counter()
+    for ch in chunks:
+        words = ch.get("text", "").lower().split()
+        seen: set[str] = set()
+        for w in words:
+            cleaned = w.strip(".,;:!?\"'()-/[]{}#@$%^&*_+=~`<>|\\")
+            if len(cleaned) > 3 and cleaned not in _STOP and cleaned.isalpha() and cleaned not in seen:
+                seen.add(cleaned)
+                doc_freq[cleaned] += 1
+
+    top = [w for w, _ in doc_freq.most_common(max_words)]
+    return " / ".join(top) if top else "unnamed"
 
 
 def _fetch_embeddings(call_id: int = None) -> list[dict]:
@@ -24,7 +70,7 @@ def _fetch_embeddings(call_id: int = None) -> list[dict]:
             if call_id:
                 cur.execute(
                     """SELECT c.id, c.call_id, c.chunk_idx, c.embedding::text
-                       FROM chunks c
+                       FROM call_chunks c
                        WHERE c.call_id = %s AND c.embedding IS NOT NULL
                        ORDER BY c.chunk_idx""",
                     (call_id,),
@@ -32,7 +78,7 @@ def _fetch_embeddings(call_id: int = None) -> list[dict]:
             else:
                 cur.execute(
                     """SELECT c.id, c.call_id, c.chunk_idx, c.embedding::text
-                       FROM chunks c
+                       FROM call_chunks c
                        WHERE c.embedding IS NOT NULL
                        ORDER BY c.call_id, c.chunk_idx"""
                 )
@@ -113,7 +159,7 @@ def store_clusters(call_id: int = None, distance_threshold: float = 0.3) -> dict
             # Clear existing assignments for scope
             if call_id:
                 cur.execute(
-                    "DELETE FROM chunk_clusters WHERE chunk_id IN (SELECT id FROM chunks WHERE call_id = %s)",
+                    "DELETE FROM chunk_clusters WHERE chunk_id IN (SELECT id FROM call_chunks WHERE call_id = %s)",
                     (call_id,),
                 )
             else:
@@ -155,7 +201,7 @@ def get_cluster_details(call_id: int = None, min_size: int = 2) -> list[dict]:
             cur.execute(
                 f"""SELECT cc.cluster_id, count(*) as size
                     FROM chunk_clusters cc
-                    JOIN chunks c ON cc.chunk_id = c.id
+                    JOIN call_chunks c ON cc.chunk_id = c.id
                     WHERE 1=1 {scope_sql}
                     GROUP BY cc.cluster_id
                     HAVING count(*) >= %s
@@ -170,9 +216,9 @@ def get_cluster_details(call_id: int = None, min_size: int = 2) -> list[dict]:
                     f"""SELECT c.id, c.call_id, c.text, c.speaker,
                                cl.name as client_name, ca.call_date
                         FROM chunk_clusters cc
-                        JOIN chunks c ON cc.chunk_id = c.id
+                        JOIN call_chunks c ON cc.chunk_id = c.id
                         JOIN calls ca ON c.call_id = ca.id
-                        JOIN clients cl ON ca.client_id = cl.id
+                        JOIN orgs cl ON ca.org_id = cl.id
                         WHERE cc.cluster_id = %s {scope_sql}
                         ORDER BY ca.call_date, c.chunk_idx""",
                     (cr["cluster_id"],) + params,
@@ -226,9 +272,9 @@ def expand_by_cluster(chunk_ids: list[int], exclude_ids: list[int] = None) -> li
                 f"""SELECT cc.cluster_id, c.id, c.call_id, c.text, c.speaker,
                            cl.name as client_name, ca.call_date, ca.summary
                     FROM chunk_clusters cc
-                    JOIN chunks c ON cc.chunk_id = c.id
+                    JOIN call_chunks c ON cc.chunk_id = c.id
                     JOIN calls ca ON c.call_id = ca.id
-                    JOIN clients cl ON ca.client_id = cl.id
+                    JOIN orgs cl ON ca.org_id = cl.id
                     WHERE cc.cluster_id IN ({cl_placeholders})
                       AND c.id NOT IN ({ex_placeholders})
                     ORDER BY ca.call_date DESC, c.chunk_idx""",

@@ -16,18 +16,20 @@ The KB Dashboard is a read-only React + FastAPI app that surfaces decisions, tas
 
 When the user says "show tasks", "dashboard", or wants to view tasks/decisions/calls:
 
+Port assignments: see `~/repo_docs/PORT_REGISTRY.md` (backend 8006, frontend 3006)
+
 1. Check if both servers are running:
-   - API: `curl -s http://localhost:8100/health` (expect `{"status":"healthy"}`)
-   - Frontend: `curl -s -o /dev/null -w "%{http_code}" http://localhost:5176/` (expect `200`)
+   - API: `curl -s http://localhost:8006/health` (expect `{"service":"kb-dashboard"}`)
+   - Frontend: `curl -s -o /dev/null -w "%{http_code}" http://localhost:3006/` (expect `200`)
 2. If API is down, start it:
    ```bash
-   cd ~/repos/utilities && uv run uvicorn dashboard.api.main:app --port 8100 --reload &
+   cd ~/repos/utilities && uv run uvicorn dashboard.api.main:app --port 8006 --reload &
    ```
 3. If frontend is down, tell the user to run in a separate terminal:
    ```
    cd ~/repos/utilities/dashboard/frontend && npm run dev
    ```
-4. Provide the URL: http://localhost:5176
+4. Provide the URL: http://localhost:3006
 5. Tell user to select the "development" project to see their task list
 
 ### Adding a task

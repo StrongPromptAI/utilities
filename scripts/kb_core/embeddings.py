@@ -1,20 +1,13 @@
-"""Embedding generation via sentence-transformers (local) or TEI (production)."""
+"""Embedding generation via nomic-onnx-embed ONNX package.
 
-import os
-from functools import lru_cache
+Model ID sourced from kb_config singleton via config.py.
+"""
 
 from .config import EMBED_MODEL
-
-
-@lru_cache(maxsize=1)
-def _get_model():
-    """Load sentence-transformers model once, cache across calls."""
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer(EMBED_MODEL, trust_remote_code=True)
+from nomic_onnx_embed.embed import _embed
 
 
 def get_embedding(text: str) -> list[float]:
-    """Generate embedding using sentence-transformers locally."""
-    model = _get_model()
-    embedding = model.encode(text, normalize_embeddings=True)
-    return embedding.tolist()
+    """Generate embedding for a single text (sync)."""
+    result = _embed([text], model_id=EMBED_MODEL)
+    return result[0].tolist()

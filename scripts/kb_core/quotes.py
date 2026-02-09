@@ -4,6 +4,7 @@ import json
 from openai import OpenAI
 from .db import get_db
 from .config import LM_STUDIO_URL, SUMMARY_MODEL, BATCH_SIZE
+from .crud.calls import get_call_context
 from .crud.chunks import get_call_chunks
 from .crud.quotes import insert_candidate_quotes, clear_candidate_quotes
 
@@ -110,7 +111,7 @@ def extract_call_quotes(
         return {"error": f"No chunks found for call {call_id}"}
 
     # Get call context for better extraction
-    call_context = _get_call_context(call_id)
+    call_context = get_call_context(call_id)
 
     if clear_existing:
         cleared = clear_candidate_quotes(call_id)
@@ -330,28 +331,6 @@ def _get_user_notes(call_id: int) -> str | None:
             cur.execute("SELECT user_notes FROM calls WHERE id = %s", (call_id,))
             row = cur.fetchone()
             return row["user_notes"] if row and row.get("user_notes") else None
-
-
-def _get_call_context(call_id: int) -> str:
-    """Get brief context about a call for quote extraction."""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT c.call_date, o.name as org, p.name as project
-                   FROM calls c
-                   JOIN orgs o ON c.org_id = o.id
-                   LEFT JOIN projects p ON c.project_id = p.id
-                   WHERE c.id = %s""",
-                (call_id,)
-            )
-            row = cur.fetchone()
-            if row:
-                parts = [f"Call with {row['org']}"]
-                if row.get("project"):
-                    parts.append(f"re: {row['project']}")
-                parts.append(f"on {row['call_date']}")
-                return " ".join(parts)
-            return ""
 
 
 def draft_letter(

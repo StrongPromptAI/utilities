@@ -7,6 +7,45 @@ from .contacts import get_call_contacts
 from .chunks import get_call_chunks, get_call_batch_summaries
 
 
+def get_call_context(call_id: int) -> str:
+    """Get brief context about a call for LLM prompts, including contacts and user notes."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT c.call_date, c.user_notes, o.name as org, p.name as project
+                   FROM calls c
+                   JOIN orgs o ON c.org_id = o.id
+                   LEFT JOIN projects p ON c.project_id = p.id
+                   WHERE c.id = %s""",
+                (call_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                parts = [f"Call with {row['org']}"]
+                if row.get("project"):
+                    parts.append(f"re: {row['project']}")
+                # Get contacts via call_contacts junction
+                cur.execute(
+                    """SELECT ct.name FROM contacts ct
+                       JOIN call_contacts cc ON cc.contact_id = ct.id
+                       WHERE cc.call_id = %s ORDER BY ct.name""",
+                    (call_id,),
+                )
+                contact_names = [r['name'] for r in cur.fetchall()]
+                if contact_names:
+                    parts.append(f"participants: {', '.join(contact_names)}")
+                parts.append(f"on {row['call_date']}")
+
+                context = " ".join(parts)
+
+                # Append user notes if present
+                if row.get("user_notes"):
+                    context += f"\n\nUser notes: {row['user_notes']}"
+
+                return context
+            return ""
+
+
 def get_call_by_source_file(source_file: str) -> Optional[dict]:
     """Check if a call with this source file already exists.
 

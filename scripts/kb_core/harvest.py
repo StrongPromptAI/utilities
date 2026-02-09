@@ -4,6 +4,7 @@ import json
 from openai import OpenAI
 from .db import get_db
 from .config import LM_STUDIO_URL, SUMMARY_MODEL, BATCH_SIZE
+from .crud.calls import get_call_context
 from .crud.chunks import get_call_chunks, get_call_batch_summaries, generate_call_batch_summaries
 from .crud.decisions import insert_candidate_decisions, clear_candidate_decisions
 from .crud.questions import insert_candidate_questions, clear_candidate_questions
@@ -270,8 +271,10 @@ def harvest_call(
     project_id: int,
     show_progress: bool = True,
     clear_existing: bool = True,
+    include_quotes: bool = True,
+    rank_top_n: int = 10,
 ) -> dict:
-    """Harvest decisions, open questions, and action items from a call.
+    """Harvest decisions, open questions, action items, and quotes from a call.
 
     Uses batch summaries if available. Falls back to call summary
     for calls without transcripts (e.g., cell phone calls with manual recaps).
@@ -281,9 +284,12 @@ def harvest_call(
         project_id: Project to associate findings with
         show_progress: Print progress
         clear_existing: Clear existing candidates before extraction
+        include_quotes: Also extract and rank verbatim quotes
+        rank_top_n: How many top quotes to rank (if include_quotes)
 
     Returns:
-        {"call_id", "decisions_extracted", "questions_extracted", "actions_extracted"}
+        {"call_id", "decisions_extracted", "questions_extracted", "actions_extracted",
+         "quotes_extracted", "quotes_ranked"}
     """
     # Ensure batch summaries exist
     summaries = get_call_batch_summaries(call_id)
@@ -324,7 +330,7 @@ def harvest_call(
             print(f"  Harvesting from {len(summaries)} batch summaries...")
 
     # Get call context (includes user_notes)
-    call_context = _get_call_context(call_id)
+    call_context = get_call_context(call_id)
 
     # Load stakeholder types from PROJECT.md
     project_name = _get_project_name(project_id)
@@ -349,11 +355,31 @@ def harvest_call(
     q_count = insert_candidate_questions(project_id, call_id, result["open_questions"])
     a_count = insert_candidate_actions(project_id, call_id, result["action_items"])
 
+    # Quote extraction + ranking
+    quotes_extracted = 0
+    quotes_ranked = []
+    if include_quotes:
+        from .quotes import extract_call_quotes, rank_quotes
+
+        if show_progress:
+            print("  Extracting quotes from transcript chunks...")
+        q_result = extract_call_quotes(
+            call_id, show_progress=show_progress, clear_existing=clear_existing
+        )
+        if "error" not in q_result:
+            quotes_extracted = q_result["quotes_extracted"]
+            if quotes_extracted > 0 and show_progress:
+                print("  Ranking quotes by project relevance...")
+            if quotes_extracted > 0:
+                quotes_ranked = rank_quotes(call_id, top_n=rank_top_n, show_progress=show_progress)
+
     return {
         "call_id": call_id,
         "decisions_extracted": d_count,
         "questions_extracted": q_count,
         "actions_extracted": a_count,
+        "quotes_extracted": quotes_extracted,
+        "quotes_ranked": quotes_ranked,
     }
 
 
@@ -388,40 +414,3 @@ def _get_project_name(project_id: int) -> str | None:
             return row["name"] if row else None
 
 
-def _get_call_context(call_id: int) -> str:
-    """Get brief context about a call for harvest prompts, including user notes."""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT c.call_date, c.user_notes, o.name as org, p.name as project
-                   FROM calls c
-                   JOIN orgs o ON c.org_id = o.id
-                   LEFT JOIN projects p ON c.project_id = p.id
-                   WHERE c.id = %s""",
-                (call_id,),
-            )
-            row = cur.fetchone()
-            if row:
-                parts = [f"Call with {row['org']}"]
-                if row.get("project"):
-                    parts.append(f"re: {row['project']}")
-                # Get contacts via call_contacts junction
-                cur.execute(
-                    """SELECT ct.name FROM contacts ct
-                       JOIN call_contacts cc ON cc.contact_id = ct.id
-                       WHERE cc.call_id = %s ORDER BY ct.name""",
-                    (call_id,),
-                )
-                contact_names = [r['name'] for r in cur.fetchall()]
-                if contact_names:
-                    parts.append(f"participants: {', '.join(contact_names)}")
-                parts.append(f"on {row['call_date']}")
-
-                context = " ".join(parts)
-
-                # Append user notes if present
-                if row.get("user_notes"):
-                    context += f"\n\nUser notes: {row['user_notes']}"
-
-                return context
-            return ""

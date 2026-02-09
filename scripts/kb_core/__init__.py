@@ -71,6 +71,7 @@ from .crud.calls import (
     update_user_notes,
     list_calls,
     get_call_detail,
+    get_call_context,
 )
 
 # CRUD - Actions
@@ -229,6 +230,7 @@ __all__ = [
     "update_user_notes",
     "list_calls",
     "get_call_detail",
+    "get_call_context",
     # Actions
     "create_action",
     "list_actions",

@@ -67,7 +67,7 @@ export function TasksPanel({ projectId }: { projectId: number | null }) {
             <div key={assignee} className="task-group">
               <div className="task-group-header">{assignee}</div>
               {byAssignee.get(assignee)!.map((item) => (
-                <div key={item.id} className={`task-card ${item.decision_id ? "has-decision" : ""} ${item.prompt_file ? "has-prompt" : ""}`}>
+                <div key={item.id} className={`task-card ${item.question_id ? "has-decision" : ""} ${item.prompt_file ? "has-prompt" : ""}`}>
                   <CopyButton text={`[Task ${item.id}] ${item.title}${item.assigned_to ? ` @${item.assigned_to}` : ""}`} />
                   <Link to={`/tasks/${item.id}`} target="_blank" className="task-content">
                     <div className="task-title">
@@ -77,11 +77,11 @@ export function TasksPanel({ projectId }: { projectId: number | null }) {
                     {item.description && (
                       <div className="task-desc">{item.description}</div>
                     )}
-                    {item.decision_id && (
+                    {item.question_id && (
                       <div className="task-decision-link">
-                        Review: {item.decision_topic}
-                        <span className={`kanban-tag ${item.decision_status === "open" ? "draft" : ""}`}>
-                          {item.decision_status === "open" ? "draft" : item.decision_status}
+                        Review: {item.question_topic}
+                        <span className={`kanban-tag ${item.question_status === "open" ? "draft" : ""}`}>
+                          {item.question_status === "open" ? "draft" : item.question_status}
                         </span>
                       </div>
                     )}

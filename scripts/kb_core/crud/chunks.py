@@ -57,7 +57,7 @@ def summarize_chunk_batch(chunks: list[dict]) -> str:
         chunks: List of chunk dicts with 'text' field
 
     Returns:
-        Summary string (2-3 sentences)
+        Summary string (3-5 sentences)
     """
     combined = "\n\n".join([c["text"] for c in chunks])
 
@@ -66,14 +66,20 @@ def summarize_chunk_batch(chunks: list[dict]) -> str:
         model=SUMMARY_MODEL,
         messages=[{
             "role": "user",
-            "content": f"""Summarize this business call segment in 2-3 sentences. Focus on key decisions, action items, and important context. Be concise.
+            "content": f"""Summarize this business call segment in 3-5 sentences. Capture:
+- Key decisions, action items, and important context
+- Who drove the conversation and who was passive
+- Agreement vs tension — note hedging, confidence, or pushback
+- Any concerns raised (even subtle ones)
+
+Keep it as natural prose (no bullet points or headers). Be concise but preserve the conversation's tone.
 
 TRANSCRIPT:
 {combined}
 
 SUMMARY:"""
         }],
-        max_tokens=200,
+        max_tokens=400,
         temperature=0.3
     )
     return response.choices[0].message.content.strip()
@@ -120,6 +126,9 @@ def generate_call_batch_summaries(call_id: int, batch_size: int = BATCH_SIZE, sh
             conn.commit()
 
         batches_created += 1
+
+    if show_progress:
+        print(f"\n  Next: \"Harvest call {call_id}\" · \"Show me the summaries for call {call_id}\"")
 
     return {
         "call_id": call_id,

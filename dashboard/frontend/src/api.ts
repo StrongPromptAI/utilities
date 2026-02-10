@@ -1,6 +1,5 @@
 import type {
   Project,
-  Decision,
   OpenQuestion,
   ActionItem,
   Call,
@@ -20,12 +19,7 @@ async function get<T>(url: string): Promise<T> {
 export const api = {
   projects: () => get<Project[]>("/api/projects"),
 
-  decisions: (projectId: number, status?: string) => {
-    const params = status ? `?status=${status}` : "";
-    return get<Decision[]>(`/api/projects/${projectId}/decisions${params}`);
-  },
-  decision: (id: number) => get<Decision>(`/api/decisions/${id}`),
-
+  /** Unified questions endpoint (includes decisions as status=decided) */
   questions: (projectId: number, status?: string) => {
     const params = status ? `?status=${status}` : "";
     return get<OpenQuestion[]>(`/api/projects/${projectId}/questions${params}`);

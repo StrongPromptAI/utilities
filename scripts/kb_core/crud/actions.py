@@ -10,7 +10,7 @@ def create_action(
     description: str = None,
     assigned_contact_id: int = None,
     source_call_id: int = None,
-    decision_id: int = None,
+    question_id: int = None,
 ) -> int:
     """Insert an action item. Returns ID."""
     with get_db() as conn:
@@ -18,11 +18,11 @@ def create_action(
             cur.execute(
                 """INSERT INTO action_items
                    (project_id, title, description, assigned_contact_id,
-                    source_call_id, decision_id)
+                    source_call_id, question_id)
                    VALUES (%s, %s, %s, %s, %s, %s)
                    RETURNING id""",
                 (project_id, title, description, assigned_contact_id,
-                 source_call_id, decision_id),
+                 source_call_id, question_id),
             )
             conn.commit()
             return cur.fetchone()["id"]
@@ -31,10 +31,10 @@ def create_action(
 def list_actions(project_id: int, status: str = None) -> list[dict]:
     """List action items for a project, optionally filtered by status."""
     query = """
-        SELECT a.*, d.topic as decision_topic, d.status as decision_status,
+        SELECT a.*, q.topic as question_topic, q.status as question_status,
                c.name as assigned_name
         FROM action_items a
-        LEFT JOIN decisions d ON a.decision_id = d.id
+        LEFT JOIN questions q ON a.question_id = q.id
         LEFT JOIN contacts c ON a.assigned_contact_id = c.id
         WHERE a.project_id = %s
     """
@@ -51,14 +51,14 @@ def list_actions(project_id: int, status: str = None) -> list[dict]:
 
 
 def get_action(action_id: int) -> Optional[dict]:
-    """Get a single action item by ID with decision and contact context."""
+    """Get a single action item by ID with question and contact context."""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT a.*, d.topic as decision_topic, d.status as decision_status,
+                """SELECT a.*, q.topic as question_topic, q.status as question_status,
                           c.name as assigned_name
                    FROM action_items a
-                   LEFT JOIN decisions d ON a.decision_id = d.id
+                   LEFT JOIN questions q ON a.question_id = q.id
                    LEFT JOIN contacts c ON a.assigned_contact_id = c.id
                    WHERE a.id = %s""",
                 (action_id,),

@@ -37,6 +37,29 @@ _config = _load_singleton()
 LM_STUDIO_URL = _config["llm_url"]
 SUMMARY_MODEL = _config["llm_model"]
 
+# LLM context length (set via LM Studio SDK at pipeline start)
+LLM_CONTEXT_LENGTH = 32768
+
 # Embedding (sentence-transformers, local)
 EMBED_MODEL = _config["embed_model"]
 EMBED_BACKEND = _config["embed_backend"]
+
+
+def ensure_model():
+    """Ensure LM Studio has the model loaded with correct context length.
+
+    Call once at pipeline start (harvest, harvest-review), not per LLM call.
+    Idempotent — skips if model already loaded with sufficient context.
+    """
+    import lmstudio as lms
+
+    loaded = lms.list_loaded_models("llm")
+    for m in loaded:
+        if SUMMARY_MODEL in str(m):
+            ctx = m.get_context_length()
+            if ctx >= LLM_CONTEXT_LENGTH:
+                return  # Already good
+            print(f"  Model loaded with {ctx} context, need {LLM_CONTEXT_LENGTH}. Reloading...")
+            break
+
+    lms.llm(SUMMARY_MODEL, config={"contextLength": LLM_CONTEXT_LENGTH})

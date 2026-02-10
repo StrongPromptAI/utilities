@@ -45,6 +45,12 @@ export function QuestionDetail() {
             <dd>{q.resolution}</dd>
           </>
         )}
+        {q.decided_by && q.decided_by.length > 0 && (
+          <>
+            <dt>Decided by</dt>
+            <dd>{q.decided_by.map((c) => c.name).join(", ")}</dd>
+          </>
+        )}
         <dt>Created</dt>
         <dd>{q.created_at}</dd>
       </dl>

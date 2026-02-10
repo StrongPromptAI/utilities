@@ -5,18 +5,6 @@ export interface Project {
   created_at: string;
 }
 
-export interface Decision {
-  id: number;
-  project_id: number;
-  topic: string;
-  summary: string;
-  status: string;
-  source_call_ids: number[] | null;
-  decided_by: string[] | null;
-  created_at: string;
-  updated_at: string | null;
-}
-
 export interface OpenQuestion {
   id: number;
   project_id: number;
@@ -24,12 +12,18 @@ export interface OpenQuestion {
   question: string;
   context: string | null;
   owner: string | null;
+  owner_name: string | null;
   status: string;
   resolution: string | null;
   source_call_id: number | null;
+  decided_by: { id: number; name: string }[] | null;
+  stakeholder_type: string | null;
   created_at: string;
   updated_at: string | null;
 }
+
+/** Backward compat alias */
+export type Decision = OpenQuestion;
 
 export interface ActionItem {
   id: number;
@@ -39,9 +33,9 @@ export interface ActionItem {
   assigned_to: string | null;
   status: string;
   source_call_ids: number[] | null;
-  decision_id: number | null;
-  decision_topic: string | null;
-  decision_status: string | null;
+  question_id: number | null;
+  question_topic: string | null;
+  question_status: string | null;
   prompt_file: string | null;
   created_at: string;
   completed_at: string | null;

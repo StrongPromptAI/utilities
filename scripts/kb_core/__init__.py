@@ -18,6 +18,8 @@ from .config import (
     DEFAULT_DAYS_BACK,
     DECAY_RATE,
     QUOTES_PER_BATCH,
+    LLM_CONTEXT_LENGTH,
+    ensure_model,
 )
 
 # Core utilities
@@ -143,12 +145,14 @@ from .crud.decisions import (
     reject_decision,
 )
 
-# CRUD - Questions
+# CRUD - Questions (unified: includes decisions)
 from .crud.questions import (
     create_open_question,
     get_open_question,
     list_questions as list_open_questions,
     resolve_question,
+    decide_question,
+    get_decided_questions,
     clear_candidate_questions,
     insert_candidate_questions,
     get_candidate_questions,
@@ -160,6 +164,7 @@ from .harvest import (
     harvest_from_summaries,
     harvest_call,
     deduplicate_harvest,
+    build_harvest_review,
 )
 
 # Synthesis
@@ -194,6 +199,8 @@ __all__ = [
     "DEFAULT_DAYS_BACK",
     "DECAY_RATE",
     "QUOTES_PER_BATCH",
+    "LLM_CONTEXT_LENGTH",
+    "ensure_model",
     # Core
     "get_db",
     "get_embedding",
@@ -280,11 +287,13 @@ __all__ = [
     "get_candidate_decisions",
     "confirm_decision",
     "reject_decision",
-    # Questions
+    # Questions (unified: includes decisions)
     "create_open_question",
     "get_open_question",
     "list_open_questions",
     "resolve_question",
+    "decide_question",
+    "get_decided_questions",
     "clear_candidate_questions",
     "insert_candidate_questions",
     "get_candidate_questions",
@@ -293,6 +302,7 @@ __all__ = [
     "harvest_from_summaries",
     "harvest_call",
     "deduplicate_harvest",
+    "build_harvest_review",
     # Synthesis
     "synthesize_call",
     "synthesize_project",

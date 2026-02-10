@@ -12,7 +12,6 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 
 from scripts.kb_core.crud.projects import list_projects
-from scripts.kb_core.crud.decisions import list_decisions, get_decision
 from scripts.kb_core.crud.questions import list_questions, get_open_question
 from scripts.kb_core.crud.actions import list_actions, get_action, get_action_prompt_file
 from scripts.kb_core.crud.calls import list_calls, get_call_detail
@@ -59,22 +58,7 @@ def api_list_projects():
     return _serialize(list_projects())
 
 
-# --- Decisions ---
-
-@router.get("/projects/{project_id}/decisions")
-def api_list_decisions(project_id: int, status: Optional[str] = None):
-    return _serialize(list_decisions(project_id, status=status))
-
-
-@router.get("/decisions/{decision_id}")
-def api_get_decision(decision_id: int):
-    row = get_decision(decision_id)
-    if not row:
-        raise HTTPException(404, "Decision not found")
-    return _serialize_one(row)
-
-
-# --- Open Questions ---
+# --- Questions (unified: includes decisions) ---
 
 @router.get("/projects/{project_id}/questions")
 def api_list_questions(project_id: int, status: Optional[str] = None):
@@ -86,6 +70,24 @@ def api_get_question(question_id: int):
     row = get_open_question(question_id)
     if not row:
         raise HTTPException(404, "Question not found")
+    return _serialize_one(row)
+
+
+# --- Decisions (backward compat → questions) ---
+
+@router.get("/projects/{project_id}/decisions")
+def api_list_decisions(project_id: int, status: Optional[str] = None):
+    """Backward compat: returns decided questions."""
+    mapped = {"confirmed": "decided"}.get(status, status) if status else None
+    return _serialize(list_questions(project_id, status=mapped))
+
+
+@router.get("/decisions/{decision_id}")
+def api_get_decision(decision_id: int):
+    """Backward compat: returns question by ID."""
+    row = get_open_question(decision_id)
+    if not row:
+        raise HTTPException(404, "Decision not found")
     return _serialize_one(row)
 
 

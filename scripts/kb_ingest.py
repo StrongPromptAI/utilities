@@ -130,6 +130,7 @@ def ingest(
     count = insert_chunks(call_id, chunks)
 
     print(f"Ingested: call {call_id}, {count} chunks, {result['filtered_count']} + {result['llm_filtered_count']} fillers removed")
+    print(f"\n  Next: \"Generate summaries for call {call_id}\" · \"Generate summaries and harvest call {call_id}\"")
     return {
         "call_id": call_id,
         "org_id": org_id,

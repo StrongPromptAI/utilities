@@ -77,13 +77,13 @@ export function TaskDetail() {
         </section>
       )}
 
-      {item.decision_id && (
+      {item.question_id && (
         <section>
-          <h2>Linked Decision</h2>
-          <Link to={`/decisions/${item.decision_id}`} target="_blank">
-            {item.decision_topic ?? `Decision ${item.decision_id}`}
-            <span className={`kanban-tag ${item.decision_status === "open" ? "draft" : ""}`} style={{ marginLeft: "0.5rem" }}>
-              {item.decision_status === "open" ? "draft" : item.decision_status}
+          <h2>Linked Question</h2>
+          <Link to={`/questions/${item.question_id}`} target="_blank">
+            {item.question_topic ?? `Question ${item.question_id}`}
+            <span className={`kanban-tag ${item.question_status === "open" ? "draft" : ""}`} style={{ marginLeft: "0.5rem" }}>
+              {item.question_status === "open" ? "draft" : item.question_status}
             </span>
           </Link>
         </section>

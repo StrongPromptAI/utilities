@@ -1,50 +1,71 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../api";
-import type { Decision } from "../types";
+import type { OpenQuestion } from "../types";
 import { CopyButton } from "../components/CopyButton";
 
+/** Backward compat: /decisions/:id redirects to question view */
 export function DecisionDetail() {
   const { id } = useParams();
-  const [decision, setDecision] = useState<Decision | null>(null);
+  const [item, setItem] = useState<OpenQuestion | null>(null);
 
   useEffect(() => {
-    if (id) api.decision(Number(id)).then(setDecision);
+    if (id) api.question(Number(id)).then(setItem);
   }, [id]);
 
-  if (!decision) return <div className="detail-page">Loading...</div>;
+  if (!item) return <div className="detail-page">Loading...</div>;
+
+  const label = item.status === "decided" ? "Decision" : "Question";
 
   return (
     <div className="detail-page">
       <h1>
-        Decision #{decision.id}
-        <CopyButton text={`[Decision ${decision.id}] ${decision.topic}: ${decision.summary}`} />
+        {label} #{item.id}
+        <CopyButton text={`[Q${item.id}] ${item.topic}: ${item.resolution || item.question}`} />
       </h1>
       <dl>
         <dt>Topic</dt>
-        <dd>{decision.topic}</dd>
+        <dd>{item.topic}</dd>
         <dt>Status</dt>
-        <dd><span className={`status-badge ${decision.status}`}>{decision.status}</span></dd>
-        <dt>Summary</dt>
-        <dd>{decision.summary}</dd>
-        {decision.decided_by && decision.decided_by.length > 0 && (
+        <dd><span className={`status-badge ${item.status}`}>{item.status}</span></dd>
+        <dt>Question</dt>
+        <dd>{item.question}</dd>
+        {item.resolution && (
           <>
-            <dt>Decided by</dt>
-            <dd>{decision.decided_by.join(", ")}</dd>
+            <dt>Resolution</dt>
+            <dd>{item.resolution}</dd>
           </>
         )}
-        {decision.source_call_ids && decision.source_call_ids.length > 0 && (
+        {item.context && (
           <>
-            <dt>Source calls</dt>
-            <dd>{decision.source_call_ids.join(", ")}</dd>
+            <dt>Context</dt>
+            <dd>{item.context}</dd>
+          </>
+        )}
+        {item.decided_by && item.decided_by.length > 0 && (
+          <>
+            <dt>Decided by</dt>
+            <dd>{item.decided_by.map((c) => c.name).join(", ")}</dd>
+          </>
+        )}
+        {item.owner_name && (
+          <>
+            <dt>Owner</dt>
+            <dd>{item.owner_name}</dd>
+          </>
+        )}
+        {item.source_call_id && (
+          <>
+            <dt>Source call</dt>
+            <dd>{item.source_call_id}</dd>
           </>
         )}
         <dt>Created</dt>
-        <dd>{decision.created_at}</dd>
-        {decision.updated_at && (
+        <dd>{item.created_at}</dd>
+        {item.updated_at && (
           <>
             <dt>Updated</dt>
-            <dd>{decision.updated_at}</dd>
+            <dd>{item.updated_at}</dd>
           </>
         )}
       </dl>

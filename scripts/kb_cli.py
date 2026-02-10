@@ -21,8 +21,8 @@ from scripts.kb_core import (
     bulk_reject_quotes,
     draft_letter,
     harvest_call,
+    build_harvest_review,
     list_decisions,
-    get_candidate_decisions,
     get_decision,
     confirm_decision,
     reject_decision,
@@ -670,18 +670,16 @@ def harvest(call_id, project, review):
                 sys.exit(1)
 
             click.secho(
-                f"\n  Found {result['decisions_extracted']} decisions, "
-                f"{result['questions_extracted']} questions, "
+                f"\n  Found {result['questions_extracted']} questions/decisions, "
                 f"{result['actions_extracted']} action items\n",
                 fg="cyan",
             )
 
         # Display candidates for review
-        decisions = get_candidate_decisions(project_id, call_id)
         questions = get_candidate_questions(project_id, call_id)
         actions = get_candidate_actions(project_id, call_id)
 
-        if not decisions and not questions and not actions:
+        if not questions and not actions:
             click.secho("No candidates to review.", fg="yellow")
             return
 
@@ -689,35 +687,26 @@ def harvest(call_id, project, review):
         num_map = {}
         idx = 1
 
-        # Display decisions
-        if decisions:
-            click.secho("DECISIONS:", fg="blue", bold=True)
-            click.echo()
-            for d in decisions:
-                num_map[idx] = ("decision", d["id"])
-                status_color = "green" if d["status"] == "confirmed" else "yellow"
-                click.secho(f"[{idx}] ", fg="cyan", nl=False)
-                click.secho(f"({d['status']}) ", fg=status_color, nl=False)
-                click.secho(d["topic"], fg="white", bold=True)
-                click.secho(f"    {d['summary']}", fg="white")
-                if d.get("decided_by"):
-                    names = ", ".join(c["name"] for c in d["decided_by"])
-                    click.secho(f"    Decided by: {names}", dim=True)
-                click.echo()
-                idx += 1
-
-        # Display questions
+        # Display questions/decisions (unified)
         if questions:
-            click.secho("OPEN QUESTIONS:", fg="blue", bold=True)
+            click.secho("QUESTIONS & DECISIONS:", fg="blue", bold=True)
             click.echo()
             for q in questions:
                 num_map[idx] = ("question", q["id"])
+                status = q.get("status", "open")
+                status_color = "green" if status == "decided" else "yellow"
                 click.secho(f"[{idx}] ", fg="cyan", nl=False)
+                click.secho(f"({status}) ", fg=status_color, nl=False)
                 click.secho(q["topic"], fg="white", bold=True)
                 click.secho(f"    {q['question']}", fg="white")
+                if q.get("resolution"):
+                    click.secho(f"    Resolution: {q['resolution']}", fg="green")
                 if q.get("context"):
                     click.secho(f"    Why: {q['context']}", dim=True)
-                if q.get("owner_name"):
+                if q.get("decided_by"):
+                    names = ", ".join(c["name"] for c in q["decided_by"])
+                    click.secho(f"    Decided by: {names}", dim=True)
+                if q.get("owner_name") and status == "open":
                     click.secho(f"    Owner: {q['owner_name']}", fg="magenta")
                 click.echo()
                 idx += 1
@@ -780,33 +769,79 @@ def harvest(call_id, project, review):
                 click.secho("  Enter numbers, or 'all'/'none'/'done'/'quit'", fg="red")
 
         # Apply approvals/rejections
-        d_approved = q_approved = a_approved = 0
+        from scripts.kb_core.crud.questions import decide_question
+
+        q_approved = a_approved = 0
         for num, (item_type, db_id) in num_map.items():
             if num in approved:
-                if item_type == "decision":
-                    confirm_decision(db_id)
-                    d_approved += 1
-                elif item_type == "question":
-                    pass  # open questions stay open (approved = keep)
+                if item_type == "question":
+                    # For decided items, confirm the decision; for open, keep as-is
                     q_approved += 1
                 elif item_type == "action":
                     confirm_action(db_id)
                     a_approved += 1
             else:
-                if item_type == "decision":
-                    reject_decision(db_id)
-                elif item_type == "question":
+                if item_type == "question":
                     abandon_question(db_id)
                 elif item_type == "action":
                     reject_action(db_id)
 
         click.secho(
-            f"\nConfirmed {d_approved} decisions, kept {q_approved} questions, kept {a_approved} actions",
+            f"\nKept {q_approved} questions/decisions, kept {a_approved} actions",
             fg="green", bold=True,
         )
 
         click.echo()
         click.secho(f"Tip: Run 'kb synthesize {project}' to update stakeholder docs", dim=True)
+
+    except Exception as e:
+        click.secho(f"Error: {e}", fg="red")
+        sys.exit(1)
+
+
+@cli.command(name="harvest-review")
+@click.argument("call_id", type=int)
+@click.option("--project", "-p", required=True, help="Project name")
+def harvest_review(call_id, project):
+    """Build a harvest review artifact for Claude Code (Opus) analysis."""
+    try:
+        from scripts.kb_core.crud.projects import get_project
+
+        proj = get_project(project)
+        if not proj:
+            click.secho(f"Project not found: {project}", fg="red")
+            click.secho("Available projects:", dim=True)
+            from scripts.kb_core import list_projects
+            for p in list_projects():
+                click.secho(f"  * {p['name']}", dim=True)
+            sys.exit(1)
+
+        project_id = proj["id"]
+
+        click.secho(f"\nBuilding harvest review for call {call_id}...", fg="blue")
+        result = build_harvest_review(call_id, project_id)
+
+        if "error" in result:
+            click.secho(result["error"], fg="red")
+            sys.exit(1)
+
+        # Write review prompt to /tmp/
+        out_path = f"/tmp/kb-harvest-review-{call_id}.md"
+        with open(out_path, "w") as f:
+            f.write(result["review_prompt"])
+
+        click.secho(f"\n  Review artifact written to: {out_path}", fg="green", bold=True)
+        click.secho(
+            f"  Questions/Decisions: {len(result['questions'])} | "
+            f"Actions: {len(result['actions'])} | "
+            f"Quotes: {len(result['quotes'])}",
+            dim=True,
+        )
+        click.echo()
+        click.secho(
+            f"  Next: Open Claude Code and say 'review harvest for call {call_id}'",
+            dim=True,
+        )
 
     except Exception as e:
         click.secho(f"Error: {e}", fg="red")
@@ -839,18 +874,19 @@ def decisions(project, status):
             click.secho(f"  Status: {status}", dim=True)
         click.echo()
 
-        status_colors = {"open": "yellow", "confirmed": "green", "superseded": "red"}
+        status_colors = {"open": "yellow", "decided": "green", "confirmed": "green", "abandoned": "red"}
 
         for d in items:
             color = status_colors.get(d["status"], "white")
             click.secho(f"[{d['id']}] ", fg="cyan", nl=False)
             click.secho(f"({d['status']}) ", fg=color, nl=False)
             click.secho(d["topic"], fg="white", bold=True)
-            click.secho(f"    {d['summary']}", fg="white")
+            click.secho(f"    {d.get('summary') or d.get('question', '')}", fg="white")
             if d.get("decided_by"):
-                click.secho(f"    Decided by: {', '.join(d['decided_by'])}", dim=True)
-            if d.get("source_call_ids"):
-                click.secho(f"    Source calls: {d['source_call_ids']}", dim=True)
+                names = ", ".join(c["name"] if isinstance(c, dict) else c for c in d["decided_by"])
+                click.secho(f"    Decided by: {names}", dim=True)
+            if d.get("source_call_id"):
+                click.secho(f"    Source call: {d['source_call_id']}", dim=True)
             click.echo()
 
     except Exception as e:
@@ -910,8 +946,7 @@ def questions(project, status):
 @cli.command()
 @click.argument("question_id", type=int)
 @click.option("--resolution", "-r", required=True, help="The answer/resolution")
-@click.option("--decision", "-d", type=int, help="Link to decision ID")
-def resolve(question_id, resolution, decision):
+def resolve(question_id, resolution):
     """Mark an open question as answered."""
     try:
         from scripts.kb_core.crud.questions import get_open_question
@@ -925,11 +960,9 @@ def resolve(question_id, resolution, decision):
             click.secho(f"Question {question_id} is already '{q['status']}'", fg="yellow")
             return
 
-        resolve_question(question_id, resolution, decision_id=decision)
+        resolve_question(question_id, resolution)
         click.secho(f"Resolved question {question_id}: {q['topic']}", fg="green", bold=True)
         click.secho(f"  Resolution: {resolution}", dim=True)
-        if decision:
-            click.secho(f"  Linked to decision: {decision}", dim=True)
 
     except Exception as e:
         click.secho(f"Error: {e}", fg="red")
@@ -952,9 +985,9 @@ def update_decision_cmd(decision_id, status, summary):
             click.secho(f"[{d['id']}] ({d['status']}) {d['topic']}", fg="cyan", bold=True)
             click.secho(f"    {d['summary']}", fg="white")
             if d.get("decided_by"):
-                click.secho(f"    Decided by: {', '.join(d['decided_by'])}", dim=True)
-            if d.get("source_call_ids"):
-                click.secho(f"    Source calls: {d['source_call_ids']}", dim=True)
+                click.secho(f"    Decided by: {', '.join(c['name'] if isinstance(c, dict) else c for c in d['decided_by'])}", dim=True)
+            if d.get("source_call_id"):
+                click.secho(f"    Source call: {d['source_call_id']}", dim=True)
             click.echo()
             click.secho("Use --status and/or --summary to update", dim=True)
             return

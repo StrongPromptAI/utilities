@@ -78,16 +78,18 @@ def _get_harvested_items(project_id: int, call_id: int) -> str:
         with conn.cursor() as cur:
             items = []
 
+            # Decided questions (was: confirmed decisions)
             cur.execute(
-                """SELECT topic, summary, stakeholder_type FROM decisions
+                """SELECT topic, resolution, stakeholder_type FROM questions
                    WHERE project_id = %s AND source_call_id = %s
-                         AND status = 'confirmed'""",
+                         AND status = 'decided'""",
                 (project_id, call_id),
             )
             for d in cur.fetchall():
                 st = f" [{d['stakeholder_type']}]" if d.get("stakeholder_type") else ""
-                items.append(f"DECISION{st}: {d['topic']} — {d['summary']}")
+                items.append(f"DECISION{st}: {d['topic']} — {d['resolution']}")
 
+            # Open questions
             cur.execute(
                 """SELECT topic, question, stakeholder_type FROM questions
                    WHERE project_id = %s AND source_call_id = %s

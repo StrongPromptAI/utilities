@@ -644,7 +644,8 @@ def draft_letter_cmd(call_id, instructions, no_quotes, output, stdout):
 @click.argument("call_id", type=int)
 @click.option("--project", "-p", required=True, help="Project name")
 @click.option("--review", is_flag=True, help="Review existing candidates only (skip extraction)")
-def harvest(call_id, project, review):
+@click.option("--thoughts", "-t", help="Your analysis/feedback on the call (grounds extraction in your perspective)")
+def harvest(call_id, project, review, thoughts):
     """Extract decisions, open questions, and action items from a call."""
     try:
         from scripts.kb_core.crud.projects import get_project
@@ -663,7 +664,25 @@ def harvest(call_id, project, review):
         # Extract (unless --review)
         if not review:
             click.secho(f"\nHarvesting from call {call_id} for project '{project}'...", fg="blue")
-            result = harvest_call(call_id, project_id)
+
+            user_thoughts = ""
+            # If thoughts provided via flag, use them
+            if thoughts:
+                user_thoughts = thoughts.strip()
+                click.secho(f"✓ Using provided feedback ({len(user_thoughts)} chars)", fg="green", dim=True)
+            # Otherwise, try to prompt for thoughts (only in interactive mode)
+            elif sys.stdin.isatty():
+                click.secho("\nWhat are your thoughts on this call?", fg="cyan", dim=True)
+                click.secho("(Press Ctrl+D when done, or Ctrl+C to skip)", dim=True)
+                try:
+                    user_thoughts = click.edit(text="")
+                    if user_thoughts:
+                        user_thoughts = user_thoughts.strip()
+                        click.secho(f"✓ Captured {len(user_thoughts)} chars of feedback", fg="green", dim=True)
+                except (click.Abort, KeyboardInterrupt):
+                    user_thoughts = ""
+
+            result = harvest_call(call_id, project_id, user_thoughts=user_thoughts)
 
             if "error" in result:
                 click.secho(result["error"], fg="red")
@@ -1232,6 +1251,89 @@ def synthesize(project, call_id, stakeholder_type, dry_run):
             click.secho(f"   Applied {len(approved)} additions to {file_path}", fg="green", bold=True)
             click.echo()
 
+    except Exception as e:
+        click.secho(f"Error: {e}", fg="red")
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument("audio_file")
+@click.option("--org-id", type=int, help="Organization ID (required for ingest)")
+@click.option("--date", "call_date", help="Call date YYYY-MM-DD (required for ingest)")
+@click.option("--project-id", type=int, help="Project ID")
+@click.option("--contact-ids", help="Comma-separated contact IDs")
+@click.option("--summary", help="Brief summary")
+@click.option("--source-type", default="podcast", type=click.Choice(["call_transcript", "podcast", "verbal_recap", "research"]))
+@click.option("--model", default="mlx-community/whisper-large-v3-turbo", help="MLX Whisper model")
+@click.option("--transcript-only", is_flag=True, help="Transcribe only, don't ingest")
+def transcribe(audio_file, org_id, call_date, project_id, contact_ids, summary, source_type, model, transcript_only):
+    """Transcribe audio and optionally ingest into knowledge base.
+
+    \b
+    Examples:
+      kb transcribe episode.mp3 --transcript-only
+      kb transcribe episode.mp3 --org-id 29 --date 2026-02-13 --project-id 16
+    """
+    from datetime import date as date_type
+    from scripts.kb_core.transcribe import transcribe_audio
+    from scripts.kb_ingest import ingest
+
+    try:
+        # Step 1: Transcribe
+        click.secho(f"Transcribing {audio_file}...", fg="blue")
+        result = transcribe_audio(audio_file, model=model)
+        click.secho(
+            f"  {result['segments']} segments, {result['duration_min']} min, {result['chars']} chars",
+            fg="cyan",
+        )
+        click.secho(f"  JSON: {result['json_path']}", fg="green")
+
+        if transcript_only:
+            click.secho("\nDone (transcript only).", fg="green", bold=True)
+            return
+
+        # Step 2: Validate ingest args
+        if not org_id:
+            click.secho("Error: --org-id required for ingest", fg="red")
+            sys.exit(1)
+        if not call_date:
+            click.secho("Error: --date required for ingest", fg="red")
+            sys.exit(1)
+
+        # Step 3: Ingest
+        click.secho(f"\nIngesting {result['json_path']}...", fg="blue")
+
+        parsed_contacts = None
+        if contact_ids:
+            parsed_contacts = [int(x.strip()) for x in contact_ids.split(",")]
+
+        ingest_result = ingest(
+            file_path=result["json_path"],
+            org_id=org_id,
+            call_date=date_type.fromisoformat(call_date),
+            contact_ids=parsed_contacts,
+            source_type=source_type,
+            summary=summary,
+            project_id=project_id,
+        )
+
+        if "error" in ingest_result and ingest_result["error"] != "duplicate":
+            click.secho(f"Ingest error: {ingest_result['error']}", fg="red")
+            sys.exit(1)
+
+        if ingest_result.get("error") == "duplicate":
+            click.secho(f"Already ingested as call {ingest_result['call_id']}", fg="yellow")
+        else:
+            click.secho(
+                f"\nDone: call {ingest_result['call_id']}, "
+                f"{ingest_result['chunks_indexed']} chunks indexed",
+                fg="green",
+                bold=True,
+            )
+
+    except FileNotFoundError as e:
+        click.secho(f"Error: {e}", fg="red")
+        sys.exit(1)
     except Exception as e:
         click.secho(f"Error: {e}", fg="red")
         sys.exit(1)

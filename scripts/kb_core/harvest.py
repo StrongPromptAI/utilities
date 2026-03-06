@@ -49,6 +49,7 @@ def harvest_from_summaries(
     summaries_text: str,
     call_context: str = "",
     stakeholder_types: list[str] = None,
+    user_thoughts: str = "",
 ) -> dict:
     """Extract questions/decisions and action items from batch summaries using LLM.
 
@@ -58,11 +59,16 @@ def harvest_from_summaries(
         summaries_text: Concatenated batch summaries for the call
         call_context: Brief context (client, project, date, user notes)
         stakeholder_types: Valid stakeholder types to assign to each item
+        user_thoughts: Your analysis/feedback on the call (grounds extraction in your perspective)
 
     Returns:
         {"questions": [...], "action_items": [...]}
     """
     context_line = f"\nCall context: {call_context}\n" if call_context else ""
+
+    user_thoughts_line = ""
+    if user_thoughts:
+        user_thoughts_line = f"\nYour thoughts on this call:\n{user_thoughts}\n"
 
     stakeholder_instruction = ""
     if stakeholder_types:
@@ -85,7 +91,7 @@ def harvest_from_summaries(
    - Tasks explicitly assigned to someone
    - Follow-ups mentioned ("we need to...", "someone should...")
    - Items that require action before the next meeting
-{stakeholder_instruction}{context_line}
+{stakeholder_instruction}{context_line}{user_thoughts_line}
 CALL SUMMARIES:
 {summaries_text}
 
@@ -256,6 +262,7 @@ def harvest_call(
     clear_existing: bool = True,
     include_quotes: bool = True,
     rank_top_n: int = 10,
+    user_thoughts: str = "",
 ) -> dict:
     """Harvest questions/decisions, action items, and quotes from a call.
 
@@ -269,6 +276,7 @@ def harvest_call(
         clear_existing: Clear existing candidates before extraction
         include_quotes: Also extract and rank verbatim quotes
         rank_top_n: How many top quotes to rank (if include_quotes)
+        user_thoughts: Your analysis/feedback on the call (grounds extraction in your perspective)
 
     Returns:
         {"call_id", "questions_extracted", "actions_extracted",
@@ -324,7 +332,7 @@ def harvest_call(
         print(f"  Stakeholder types: {', '.join(stakeholder_types)}")
 
     # Extract
-    result = harvest_from_summaries(summaries_text, call_context, stakeholder_types=stakeholder_types)
+    result = harvest_from_summaries(summaries_text, call_context, stakeholder_types=stakeholder_types, user_thoughts=user_thoughts)
 
     # Deduplicate
     result["questions"] = deduplicate_harvest(result["questions"], key="topic")

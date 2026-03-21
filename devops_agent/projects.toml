@@ -1,0 +1,92 @@
+schema_version = 1
+
+# Tier 1 — Active development, deploy first
+
+[hj-assistant]
+display_name = "iTheraputix"
+railway_project_id = "292927ad-1ef5-494b-ad0d-b8bebb20b7f5"
+production_env_id = "c28c799a-6aa3-43b1-82b0-e255f4fc68bb"
+staging_env_id = "d5a2b9a0-1343-473c-b9c0-6d221d6fcc93"
+repo = "itheraputix"
+has_staging = true
+tier = 1
+services = ["api", "frontend", "proxy", "landing"]
+health_service_id = "4cb84db3-7403-4a12-8d65-4e09acff633a"
+health_url = "https://hjassist-api.up.railway.app/health"
+
+[fullauto]
+display_name = "FullAuto"
+railway_project_id = "3cd637dc-02cd-476f-94b3-4165dd0479d5"
+production_env_id = "4a67e2db-b6d5-4855-9d49-3e10958724a5"
+repo = "fullauto"
+has_staging = false
+tier = 1
+services = ["api", "frontend", "proxy"]
+health_service_id = "b849dfe4-e5ba-4c37-8e93-d44f1036a9e9"
+
+[dan4senator]
+display_name = "Dan4Senator"
+railway_project_id = "bbfa840c-5b6e-44da-9fd6-76cb18c7fccf"
+production_env_id = "c3b6fd75-f334-4a46-ae43-fd7fb004693e"
+staging_env_id = "4c7a3bcb-e835-414f-a67a-e5684a289daf"
+repo = "dan4senator"
+has_staging = true
+tier = 1
+services = ["backend", "frontend", "landing", "ai-insights-hub", "caddy-proxy"]
+health_service_id = "d6496662-59ed-4e8d-ba70-9c8216ba28f4"
+
+[kb]
+display_name = "KB (Utilities)"
+railway_project_id = "a3677be5-5392-473e-b609-f23b7c06b78c"
+production_env_id = "3317309b-8f0c-43f4-9d8a-73b1c9fecf9c"
+repo = "utilities"
+has_staging = false
+tier = 1
+services = ["hj-roadmap"]
+health_service_id = "5d97ef67-1434-487a-9069-df8b98a0dd95"
+
+# Tier 2 — Active but less frequent
+
+[strong-website]
+display_name = "StrongPrompt Website"
+railway_project_id = "f4451750-12a8-4cff-9bc8-1796a9c15508"
+production_env_id = "844d5562-ac1d-4a22-b249-986be610a0a5"
+repo = "strongprompt_mainwebsite"
+has_staging = false
+tier = 2
+services = ["backend", "frontend"]
+health_service_id = "0c81eb77-a1d6-4b9e-9b3a-cea3a5f10989"
+
+[faithful-youth]
+display_name = "Burntfork Retreat"
+railway_project_id = "9aa0592c-594a-465c-9f11-2a3a6b87e324"
+production_env_id = "832b42cc-31ab-4605-86f6-aafa0303143f"
+staging_env_id = "c06f1045-e1f9-402f-8150-a18eee557177"
+repo = "burntfork-retreat-showcase"
+has_staging = true
+tier = 2
+services = ["backend", "frontend"]
+health_service_id = "36b8f3ff-2ded-43fb-bff9-a632ee8e22fe"
+
+# Tier 3 — Low priority / archive candidates
+
+[scalpers-redemption]
+display_name = "Mainstreak"
+railway_project_id = "906abbdf-4cec-4562-ba3b-e738fb39e290"
+production_env_id = "389c4719-ac08-4d8f-bfbf-b3587b58a3a7"
+staging_env_id = "e9146de2-3f4a-4c86-a562-cdeb867f1750"
+repo = "mainstreak"
+has_staging = true
+tier = 3
+services = ["scalp-redemption"]
+health_service_id = "319d6892-f833-4e05-8576-c876dd823f01"
+
+[brighton-tested]
+display_name = "Numbskull"
+railway_project_id = "6e98857b-8491-4c8a-b6ff-860861c53774"
+production_env_id = "c1a509eb-00d6-424a-a9f4-8e10ff2ab0ff"
+repo = "numbskull"
+has_staging = false
+tier = 3
+services = ["numbskull-order-capture"]
+health_service_id = "231669e0-986c-4baa-af6f-8f4067d1beb9"

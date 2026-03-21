@@ -41,6 +41,9 @@ from scripts.kb_core import (
     synthesize_call,
     apply_additions,
     _build_seed_template,
+    ensure_model,
+    generate_call_batch_summaries,
+    get_call_batch_summaries,
 )
 
 
@@ -298,28 +301,110 @@ def list_calls(client):
 
 @cli.command(name="add-notes")
 @click.argument("call_id", type=int)
-@click.argument("notes")
+@click.argument("notes", required=False)
 @click.option("--append", "-a", is_flag=True, help="Append to existing notes instead of replacing")
 def add_notes(call_id, notes, append):
     """Add or update personal notes on a call."""
     try:
+        from scripts.kb_core.db import get_db
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT user_notes FROM calls WHERE id = %s", (call_id,))
+                row = cur.fetchone()
+                if not row:
+                    click.secho(f"Call {call_id} not found", fg="red")
+                    sys.exit(1)
+                existing = row["user_notes"] or ""
+
+        if notes is None:
+            if not sys.stdin.isatty():
+                click.secho("Notes argument required in non-interactive mode", fg="red")
+                click.secho("Usage: kb add-notes <call_id> \"your notes here\"", fg="yellow")
+                sys.exit(1)
+            if existing:
+                click.secho(f"Existing notes for call {call_id}:", fg="blue")
+                click.echo(existing)
+                click.echo()
+            notes = click.edit(existing or "")
+            if notes is None:
+                click.secho("Aborted (editor closed without saving)", fg="yellow")
+                return
+            notes = notes.strip()
+
         if append:
-            from scripts.kb_core.db import get_db
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT user_notes FROM calls WHERE id = %s", (call_id,))
-                    row = cur.fetchone()
-                    if not row:
-                        click.secho(f"Call {call_id} not found", fg="red")
-                        sys.exit(1)
-                    existing = row["user_notes"] or ""
-                    notes = f"{existing}\n{notes}".strip()
+            notes = f"{existing}\n{notes}".strip()
 
         if update_user_notes(call_id, notes):
             click.secho(f"Notes updated for call {call_id}", fg="green")
         else:
             click.secho(f"Call {call_id} not found", fg="red")
             sys.exit(1)
+    except Exception as e:
+        click.secho(f"Error: {e}", fg="red")
+        sys.exit(1)
+
+
+@cli.command(name="summarize")
+@click.argument("call_id", type=int)
+def summarize(call_id):
+    """(Re)generate batch summaries for a call via LLM."""
+    try:
+        click.secho(f"Loading model...", fg="blue")
+        ensure_model()
+
+        click.secho(f"Generating summaries for call {call_id}...", fg="blue")
+        result = generate_call_batch_summaries(call_id)
+
+        if "error" in result:
+            click.secho(result["error"], fg="yellow")
+            return
+
+        click.secho(f"\n{result['batches_created']} batch summaries generated ({result['chunks_processed']} chunks):\n", fg="green")
+
+        summaries = get_call_batch_summaries(call_id)
+        for s in summaries:
+            click.secho(f"  Batch {s['batch_idx']} (chunks {s['start_chunk_idx']}-{s['end_chunk_idx']}):", fg="cyan")
+            click.echo(f"    {s['summary']}\n")
+
+    except Exception as e:
+        click.secho(f"Error: {e}", fg="red")
+        sys.exit(1)
+
+
+@cli.command(name="show-summaries")
+@click.argument("call_id", type=int)
+def show_summaries(call_id):
+    """Show existing batch summaries and notes status for a call."""
+    try:
+        from scripts.kb_core.db import get_db
+
+        # Get notes status
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT user_notes FROM calls WHERE id = %s", (call_id,))
+                row = cur.fetchone()
+                if not row:
+                    click.secho(f"Call {call_id} not found", fg="red")
+                    sys.exit(1)
+                user_notes = row["user_notes"]
+
+        if user_notes:
+            click.secho(f"\nUser notes:", fg="blue", bold=True)
+            click.echo(f"  {user_notes}\n")
+        else:
+            click.secho(f"\nNo user notes set\n", fg="yellow")
+
+        summaries = get_call_batch_summaries(call_id)
+
+        if not summaries:
+            click.secho("No batch summaries found", fg="yellow")
+            return
+
+        click.secho(f"{len(summaries)} batch summaries:\n", fg="green")
+        for s in summaries:
+            click.secho(f"  Batch {s['batch_idx']} (chunks {s['start_chunk_idx']}-{s['end_chunk_idx']}):", fg="cyan")
+            click.echo(f"    {s['summary']}\n")
+
     except Exception as e:
         click.secho(f"Error: {e}", fg="red")
         sys.exit(1)

@@ -176,6 +176,9 @@ from .synthesis import (
     _build_seed_template,
 )
 
+# Transcription
+from .transcribe import transcribe_audio
+
 # Clustering
 from .clustering import (
     compute_clusters,
@@ -309,6 +312,8 @@ __all__ = [
     "type_to_slug",
     "apply_additions",
     "_build_seed_template",
+    # Transcription
+    "transcribe_audio",
     # Clustering
     "compute_clusters",
     "store_clusters",

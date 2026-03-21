@@ -8,10 +8,37 @@ import type {
   ClientContext,
   SearchResult,
   ClusterDetail,
+  RoadmapItem,
 } from "./types";
 
 async function get<T>(url: string): Promise<T> {
   const res = await fetch(url);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+async function post<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+async function patch<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+async function del<T>(url: string): Promise<T> {
+  const res = await fetch(url, { method: "DELETE" });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
@@ -60,4 +87,30 @@ export const api = {
     if (callId) params.set("call_id", String(callId));
     return get<ClusterDetail[]>(`/api/clusters?${params}`);
   },
+
+  roadmapItems: (projectId: number, spoke?: string) => {
+    const params = new URLSearchParams({ project_id: String(projectId) });
+    if (spoke) params.set("spoke", spoke);
+    return get<RoadmapItem[]>(`/api/roadmap?${params}`);
+  },
+  createRoadmapItem: (data: {
+    project_id: number;
+    title: string;
+    description?: string;
+    spoke: string;
+    round: number;
+    status?: string;
+  }) => post<{ id: number }>("/api/roadmap", data),
+  updateRoadmapItem: (id: number, data: Partial<Pick<RoadmapItem, "title" | "description" | "spoke" | "round" | "status">>) =>
+    patch<{ ok: boolean }>(`/api/roadmap/${id}`, data),
+  deleteRoadmapItem: (id: number) => del<{ ok: boolean }>(`/api/roadmap/${id}`),
+
+  docs: () => get<{ path: string; label: string }[]>("/api/docs"),
+  doc: (path: string) => get<{ path: string; content: string }>(`/api/docs/${path}`),
+  saveDoc: (path: string, content: string) =>
+    fetch(`/api/docs/${path}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    }).then((r) => r.json()),
 };

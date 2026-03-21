@@ -20,16 +20,20 @@ def insert_chunks(call_id: int, chunks: list, show_progress: bool = True) -> int
             if isinstance(chunk, dict):
                 text = chunk["text"]
                 speaker = chunk.get("speaker")
+                start_time = chunk.get("start_time")
+                end_time = chunk.get("end_time")
             else:
                 text = chunk
                 speaker = None
+                start_time = None
+                end_time = None
 
             embedding = get_embedding(text)
             with conn.cursor() as cur:
                 cur.execute(
-                    """INSERT INTO call_chunks(call_id, chunk_idx, text, speaker, embedding)
-                       VALUES (%s, %s, %s, %s, %s)""",
-                    (call_id, idx, text, speaker, embedding)
+                    """INSERT INTO call_chunks(call_id, chunk_idx, text, speaker, start_time, end_time, embedding)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (call_id, idx, text, speaker, start_time, end_time, embedding)
                 )
             if show_progress and (idx + 1) % 20 == 0:
                 print(f"  Embedded {idx + 1}/{len(chunks)} chunks...")
@@ -50,23 +54,35 @@ def get_call_chunks(call_id: int) -> list[dict]:
 
 # --- Batch Summaries ---
 
-def summarize_chunk_batch(chunks: list[dict]) -> str:
+def summarize_chunk_batch(chunks: list[dict], user_notes: str = None) -> str:
     """Summarize a batch of chunks using local LLM.
 
     Args:
         chunks: List of chunk dicts with 'text' field
+        user_notes: Optional owner briefing — prioritizes detail on flagged topics
 
     Returns:
         Summary string (3-5 sentences)
     """
     combined = "\n\n".join([c["text"] for c in chunks])
 
+    briefing = ""
+    if user_notes:
+        briefing = f"""The call owner provided this briefing on what mattered most:
+---
+{user_notes}
+---
+Pay special attention to segments related to these topics — capture more detail there.
+For other segments, summarize normally but more briefly.
+
+"""
+
     client = OpenAI(base_url=LM_STUDIO_URL, api_key="not-needed")
     response = client.chat.completions.create(
         model=SUMMARY_MODEL,
         messages=[{
             "role": "user",
-            "content": f"""Summarize this business call segment in 3-5 sentences. Capture:
+            "content": f"""{briefing}Summarize this business call segment in 3-5 sentences. Capture:
 - Key decisions, action items, and important context
 - Who drove the conversation and who was passive
 - Agreement vs tension — note hedging, confidence, or pushback
@@ -89,7 +105,8 @@ def generate_call_batch_summaries(call_id: int, batch_size: int = BATCH_SIZE, sh
     """Generate batch summaries for all chunks in a call.
 
     Processes chunks in batches of batch_size, summarizes each batch,
-    and stores in chunk_batch_summaries table.
+    and stores in chunk_batch_summaries table. If the call has user_notes,
+    they are injected into each batch prompt as a prioritization lens.
 
     Returns:
         {"call_id": int, "batches_created": int, "chunks_processed": int}
@@ -97,6 +114,17 @@ def generate_call_batch_summaries(call_id: int, batch_size: int = BATCH_SIZE, sh
     chunks = get_call_chunks(call_id)
     if not chunks:
         return {"error": f"No chunks found for call {call_id}"}
+
+    # Fetch user_notes for guided summarization
+    user_notes = None
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_notes FROM calls WHERE id = %s", (call_id,))
+            row = cur.fetchone()
+            if row and row["user_notes"]:
+                user_notes = row["user_notes"]
+                if show_progress:
+                    print(f"  Using owner briefing to guide summaries")
 
     # Clear existing summaries for this call
     with get_db() as conn:
@@ -113,7 +141,7 @@ def generate_call_batch_summaries(call_id: int, batch_size: int = BATCH_SIZE, sh
         if show_progress:
             print(f"  Summarizing batch {batch_idx} (chunks {start_idx}-{end_idx})...")
 
-        summary = summarize_chunk_batch(batch_chunks)
+        summary = summarize_chunk_batch(batch_chunks, user_notes=user_notes)
 
         with get_db() as conn:
             with conn.cursor() as cur:

@@ -107,7 +107,7 @@ def ingest(
     if source_type == 'meeting_notes':
         chunks = chunk_by_sections(result['text'])
     else:
-        chunks = chunk_transcript(result['text'])
+        chunks = chunk_transcript(result['text'], turns=result.get('turns'))
 
     print(f"  Chunks: {len(chunks)}")
 
@@ -155,7 +155,7 @@ def main():
     ingest_parser.add_argument("--contact-ids", help="Comma-separated contact IDs")
     ingest_parser.add_argument("--project-id", type=int, help="Project ID")
     ingest_parser.add_argument("--summary", help="Brief summary")
-    ingest_parser.add_argument("--source-type", default="call_transcript", choices=["call_transcript", "podcast", "verbal_recap"])
+    ingest_parser.add_argument("--source-type", default="call_transcript", choices=["call_transcript", "podcast", "verbal_recap", "research"])
 
     args = parser.parse_args()
 

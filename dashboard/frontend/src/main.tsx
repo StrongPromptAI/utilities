@@ -7,11 +7,12 @@ import { QuestionDetail } from "./pages/QuestionDetail";
 import { CallDetail } from "./pages/CallDetail";
 import { ClientDetail } from "./pages/ClientDetail";
 import { TaskDetail } from "./pages/TaskDetail";
-import "./App.css";
+import { DocViewer } from "./pages/DocViewer";
+import "./index.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <BrowserRouter>
+    <BrowserRouter basename="/dashboard">
       <Routes>
         <Route path="/" element={<App />} />
         <Route path="/decisions/:id" element={<DecisionDetail />} />
@@ -19,6 +20,7 @@ createRoot(document.getElementById("root")!).render(
         <Route path="/calls/:id" element={<CallDetail />} />
         <Route path="/clients/:name" element={<ClientDetail />} />
         <Route path="/tasks/:id" element={<TaskDetail />} />
+        <Route path="/docs/*" element={<DocViewer />} />
       </Routes>
     </BrowserRouter>
   </StrictMode>,

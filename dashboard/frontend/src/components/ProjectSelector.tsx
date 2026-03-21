@@ -8,12 +8,13 @@ interface Props {
 
 export function ProjectSelector({ projects, selected, onChange }: Props) {
   return (
-    <div className="project-selector">
-      <label htmlFor="project-select">Project:</label>
+    <div className="flex items-center gap-2">
+      <label htmlFor="project-select" className="text-muted text-sm">Project:</label>
       <select
         id="project-select"
         value={selected ?? ""}
         onChange={(e) => onChange(e.target.value ? Number(e.target.value) : null)}
+        className="bg-surface text-body border border-border-input rounded px-3 py-1.5 text-sm"
       >
         <option value="">All projects</option>
         {projects.map((p) => (

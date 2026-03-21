@@ -11,14 +11,22 @@ export function CopyButton({ text, label }: { text: string; label?: string }) {
 
   if (label) {
     return (
-      <button className="copy-prompt-btn" onClick={handleCopy} title="Copy to clipboard">
+      <button
+        className="bg-btn text-white rounded px-3 py-1 text-sm cursor-pointer hover:bg-btn-hover"
+        onClick={handleCopy}
+        title="Copy to clipboard"
+      >
         {copied ? "\u2713 Copied" : label}
       </button>
     );
   }
 
   return (
-    <button className="copy-btn" onClick={handleCopy} title="Copy to clipboard">
+    <button
+      className="bg-transparent border-none cursor-pointer text-sm p-0.5 opacity-50 hover:opacity-100 shrink-0"
+      onClick={handleCopy}
+      title="Copy to clipboard"
+    >
       {copied ? "\u2713" : "\uD83D\uDCCB"}
     </button>
   );

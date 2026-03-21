@@ -1,0 +1,154 @@
+@import "tailwindcss";
+
+/*
+ * Semantic theme tokens for KB Dashboard.
+ *
+ * Pattern: Define colors in @theme as Tailwind utilities (bg-surface, text-heading, etc.)
+ * Override per [data-theme] selector for switchable themes.
+ * Components use semantic names only — never raw hex.
+ *
+ * Tailwind v4 auto-generates utilities from @theme variables.
+ * e.g. --color-surface → bg-surface, text-surface, border-surface
+ */
+
+@theme {
+  /* Surfaces (background layers, darkest → lightest) */
+  --color-base: var(--t-base);
+  --color-surface: var(--t-surface);
+  --color-surface-raised: var(--t-surface-raised);
+  --color-surface-card: var(--t-surface-card);
+  --color-border: var(--t-border);
+  --color-border-input: var(--t-border-input);
+
+  /* Text */
+  --color-heading: var(--t-heading);
+  --color-body: var(--t-body);
+  --color-muted: var(--t-muted);
+  --color-faint: var(--t-faint);
+
+  /* Accent */
+  --color-accent: var(--t-accent);
+  --color-accent-hover: var(--t-accent-hover);
+  --color-btn: var(--t-btn);
+  --color-btn-hover: var(--t-btn-hover);
+
+  /* Semantic status */
+  --color-status-green: var(--t-status-green);
+  --color-status-green-bg: var(--t-status-green-bg);
+  --color-status-yellow: var(--t-status-yellow);
+  --color-status-yellow-bg: var(--t-status-yellow-bg);
+  --color-status-orange: var(--t-status-orange);
+  --color-status-orange-bg: var(--t-status-orange-bg);
+  --color-status-red: var(--t-status-red);
+  --color-status-red-bg: var(--t-status-red-bg);
+  --color-status-purple: var(--t-status-purple);
+
+  /* Font */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+/* ═══════════════════════════════════════════
+   Default theme: Midnight (existing dark UI)
+   ═══════════════════════════════════════════ */
+:root {
+  --t-base: #0f1117;
+  --t-surface: #1a1d27;
+  --t-surface-raised: #1e2130;
+  --t-surface-card: #22252f;
+  --t-border: #2a2d35;
+  --t-border-input: #3a3d45;
+
+  --t-heading: #ffffff;
+  --t-body: #e0e0e0;
+  --t-muted: #999999;
+  --t-faint: #666666;
+
+  --t-accent: #6cb4ee;
+  --t-accent-hover: #8cc4f4;
+  --t-btn: #3a5a8a;
+  --t-btn-hover: #4a6a9a;
+
+  --t-status-green: #5cb85c;
+  --t-status-green-bg: #1a2a1e;
+  --t-status-yellow: #e8b94a;
+  --t-status-yellow-bg: #2a2518;
+  --t-status-orange: #e8944a;
+  --t-status-orange-bg: #3a2a1a;
+  --t-status-red: #c87a7a;
+  --t-status-red-bg: #3a2a2a;
+  --t-status-purple: #9b59b6;
+}
+
+/* ═══════════════════════════════════════════
+   Daylight theme
+   ═══════════════════════════════════════════ */
+[data-theme="daylight"] {
+  --t-base: #f5f6f8;
+  --t-surface: #ffffff;
+  --t-surface-raised: #f0f1f4;
+  --t-surface-card: #ffffff;
+  --t-border: #dfe1e6;
+  --t-border-input: #c1c7d0;
+
+  --t-heading: #172b4d;
+  --t-body: #344563;
+  --t-muted: #6b778c;
+  --t-faint: #a5adba;
+
+  --t-accent: #2563eb;
+  --t-accent-hover: #1d4ed8;
+  --t-btn: #2563eb;
+  --t-btn-hover: #1d4ed8;
+
+  --t-status-green: #22863a;
+  --t-status-green-bg: #dcfce7;
+  --t-status-yellow: #b45309;
+  --t-status-yellow-bg: #fef3c7;
+  --t-status-orange: #c2410c;
+  --t-status-orange-bg: #ffedd5;
+  --t-status-red: #dc2626;
+  --t-status-red-bg: #fee2e2;
+  --t-status-purple: #7c3aed;
+}
+
+/* ═══════════════════════════════════════════
+   Base reset
+   ═══════════════════════════════════════════ */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-base);
+  color: var(--color-body);
+  line-height: 1.5;
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+/* Markdown prose styling */
+.prose-kb h1 { font-size: 1.75rem; font-weight: 700; color: var(--color-heading); margin: 1.5rem 0 0.75rem; }
+.prose-kb h2 { font-size: 1.35rem; font-weight: 600; color: var(--color-heading); margin: 1.25rem 0 0.5rem; border-bottom: 1px solid var(--color-border); padding-bottom: 0.3rem; }
+.prose-kb h3 { font-size: 1.1rem; font-weight: 600; color: var(--color-heading); margin: 1rem 0 0.4rem; }
+.prose-kb p { margin: 0.5rem 0; line-height: 1.7; }
+.prose-kb ul, .prose-kb ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+.prose-kb li { margin: 0.25rem 0; }
+.prose-kb blockquote { border-left: 3px solid var(--color-accent); padding: 0.5rem 1rem; margin: 0.75rem 0; color: var(--color-muted); background: var(--color-surface-raised); border-radius: 0 4px 4px 0; }
+.prose-kb code { background: var(--color-surface-raised); padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.85em; }
+.prose-kb pre { background: var(--color-base); border: 1px solid var(--color-border); border-radius: 4px; padding: 0.75rem 1rem; overflow-x: auto; margin: 0.75rem 0; }
+.prose-kb pre code { background: none; padding: 0; }
+.prose-kb strong { color: var(--color-heading); }
+.prose-kb a { color: var(--color-accent); }
+.prose-kb hr { border: none; border-top: 1px solid var(--color-border); margin: 1.5rem 0; }
+.prose-kb table { border-collapse: collapse; width: 100%; margin: 0.75rem 0; }
+.prose-kb th, .prose-kb td { border: 1px solid var(--color-border); padding: 0.4rem 0.75rem; text-align: left; }
+.prose-kb th { background: var(--color-surface-raised); font-weight: 600; color: var(--color-heading); }

@@ -193,14 +193,19 @@ etc."""
     all_rows = []
 
     if fmt == 'json':
-        # JSON array of {speaker, text} objects (no timestamps)
+        # JSON array of {speaker, text} objects, optionally with {start, end} timestamps
         entries = json.loads(raw_text)
         for entry in entries:
             speaker = entry.get("speaker", "Unknown").strip()
             text = entry.get("text", "").strip()
             if speaker and text:
                 participants.add(speaker)
-                all_rows.append({"speaker": speaker, "text": text})
+                row = {"speaker": speaker, "text": text}
+                if "start" in entry:
+                    row["start"] = float(entry["start"])
+                if "end" in entry:
+                    row["end"] = float(entry["end"])
+                all_rows.append(row)
     elif fmt == 'csv':
         # Parse CSV - Dialpad format: "timestamp","speaker","text"
         reader = csv.reader(StringIO(raw_text))
@@ -275,10 +280,15 @@ etc."""
             else:
                 all_rows[i]["_status"] = "keep"
 
-    # Collect kept rows
+    # Collect kept rows (preserve timestamps when present)
     for row in all_rows:
         if row.get("_status") == "keep":
-            lines.append({"speaker": row["speaker"], "text": row["text"]})
+            kept = {"speaker": row["speaker"], "text": row["text"]}
+            if "start" in row:
+                kept["start"] = row["start"]
+            if "end" in row:
+                kept["end"] = row["end"]
+            lines.append(kept)
 
     if not lines:
         return {"text": raw_text, "participants": [], "turn_count": 0, "filtered_count": filtered_count, "llm_filtered_count": llm_filtered_count, "format": fmt}
@@ -288,25 +298,41 @@ etc."""
         merged = []
         current_speaker = None
         current_texts = []
+        current_start = None
+        current_end = None
 
         for line in lines:
             if line["speaker"] == current_speaker:
                 current_texts.append(line["text"])
+                if "end" in line:
+                    current_end = line["end"]
             else:
                 if current_speaker and current_texts:
-                    merged.append({
+                    turn = {
                         "speaker": current_speaker,
-                        "text": " ".join(current_texts)
-                    })
+                        "text": " ".join(current_texts),
+                    }
+                    if current_start is not None:
+                        turn["start"] = current_start
+                    if current_end is not None:
+                        turn["end"] = current_end
+                    merged.append(turn)
                 current_speaker = line["speaker"]
                 current_texts = [line["text"]]
+                current_start = line.get("start")
+                current_end = line.get("end")
 
         # Don't forget last turn
         if current_speaker and current_texts:
-            merged.append({
+            turn = {
                 "speaker": current_speaker,
-                "text": " ".join(current_texts)
-            })
+                "text": " ".join(current_texts),
+            }
+            if current_start is not None:
+                turn["start"] = current_start
+            if current_end is not None:
+                turn["end"] = current_end
+            merged.append(turn)
 
         lines = merged
 
@@ -317,9 +343,10 @@ etc."""
 
     return {
         "text": "\n\n".join(formatted_lines),
+        "turns": lines,
         "participants": sorted(list(participants)),
         "turn_count": len(lines),
         "filtered_count": filtered_count,
         "llm_filtered_count": llm_filtered_count,
-        "format": fmt
+        "format": fmt,
     }

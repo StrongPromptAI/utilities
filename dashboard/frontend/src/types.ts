@@ -109,6 +109,18 @@ export interface SearchResult {
   cluster_id?: number;
 }
 
+export interface RoadmapItem {
+  id: number;
+  project_id: number;
+  title: string;
+  description: string | null;
+  spoke: 'doctor' | 'patient' | 'dme' | 'pt';
+  round: 20 | 40 | 60 | 80 | 100;
+  status: 'planned' | 'building' | 'done';
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ClusterDetail {
   cluster_id: number;
   label: string;

@@ -674,3 +674,260 @@ a.task-content:hover .task-title {
   max-height: 600px;
   overflow-y: auto;
 }
+
+/* Roadmap Board */
+.roadmap {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.roadmap-spoke-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.roadmap-spoke-tabs .pill {
+  font-size: 0.85rem;
+  padding: 0.3rem 1rem;
+  border-radius: 16px;
+}
+
+.roadmap-round {
+  background: #1a1d27;
+  border: 1px solid #2a2d35;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+}
+
+.roadmap-round-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #fff;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #2a2d35;
+}
+
+.roadmap-round-count {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 0.05rem 0.5rem;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  color: #aaa;
+}
+
+.roadmap-lanes {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.75rem;
+  min-height: 40px;
+}
+
+.roadmap-lane {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.roadmap-lane-header {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.25rem 0.5rem;
+  border-radius: 3px;
+  margin-bottom: 0.25rem;
+}
+
+.roadmap-lane-header.planned {
+  color: #6cb4ee;
+  background: #1a2a3a;
+}
+
+.roadmap-lane-header.building {
+  color: #e8b94a;
+  background: #2a2518;
+}
+
+.roadmap-lane-header.done {
+  color: #5cb85c;
+  background: #1a2a1e;
+}
+
+/* Roadmap Card */
+.roadmap-card {
+  background: #22252f;
+  border: 1px solid #2a2d35;
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.roadmap-card:hover {
+  border-color: #4a4d55;
+}
+
+.roadmap-card.planned {
+  border-left: 3px solid #6cb4ee;
+}
+
+.roadmap-card.building {
+  border-left: 3px solid #e8b94a;
+}
+
+.roadmap-card.done {
+  border-left: 3px solid #5cb85c;
+  opacity: 0.7;
+}
+
+.roadmap-card.editing {
+  border-left: 3px solid #9b59b6;
+  cursor: default;
+}
+
+.roadmap-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.roadmap-card-header strong {
+  font-size: 0.85rem;
+  color: #e0e0e0;
+}
+
+.roadmap-card-desc {
+  font-size: 0.78rem;
+  color: #999;
+  margin-top: 0.2rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.roadmap-status-badge {
+  font-size: 0.6rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  border: none;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+}
+
+.roadmap-status-badge.planned {
+  background: #1a2a3a;
+  color: #6cb4ee;
+}
+
+.roadmap-status-badge.building {
+  background: #2a2518;
+  color: #e8b94a;
+}
+
+.roadmap-status-badge.done {
+  background: #1a2a1e;
+  color: #5cb85c;
+}
+
+/* Roadmap edit form */
+.roadmap-edit-input {
+  width: 100%;
+  background: #0f1117;
+  color: #e0e0e0;
+  border: 1px solid #3a3d45;
+  border-radius: 4px;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85rem;
+  margin-bottom: 0.4rem;
+}
+
+.roadmap-edit-textarea {
+  width: 100%;
+  background: #0f1117;
+  color: #e0e0e0;
+  border: 1px solid #3a3d45;
+  border-radius: 4px;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.8rem;
+  resize: vertical;
+  margin-bottom: 0.4rem;
+}
+
+.roadmap-edit-row {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.roadmap-edit-row select {
+  background: #1a1d27;
+  color: #e0e0e0;
+  border: 1px solid #3a3d45;
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.8rem;
+}
+
+.roadmap-btn {
+  border: none;
+  border-radius: 4px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.roadmap-btn.save {
+  background: #3a5a8a;
+  color: #fff;
+}
+
+.roadmap-btn.cancel {
+  background: #2a2d35;
+  color: #aaa;
+}
+
+.roadmap-btn.delete {
+  background: #4a2020;
+  color: #e88;
+  margin-left: auto;
+}
+
+.roadmap-add-btn {
+  background: none;
+  border: 1px dashed #3a3d45;
+  border-radius: 4px;
+  color: #666;
+  padding: 0.3rem 0.8rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  margin-top: 0.5rem;
+  width: 100%;
+}
+
+.roadmap-add-btn:hover {
+  border-color: #6cb4ee;
+  color: #6cb4ee;
+}
+
+.roadmap-add-form {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+
+.roadmap-add-form .roadmap-edit-input {
+  margin-bottom: 0;
+  flex: 1;
+}

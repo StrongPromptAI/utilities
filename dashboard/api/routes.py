@@ -1,4 +1,4 @@
-"""All GET endpoints for the KB Dashboard.
+"""KB Dashboard API endpoints.
 
 Thin wrapper over kb_core CRUD — no inline SQL here.
 """
@@ -10,12 +10,18 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 
+from .storage import list_docs, read_doc, write_doc
 from scripts.kb_core.crud.projects import list_projects
 from scripts.kb_core.crud.questions import list_questions, get_open_question
 from scripts.kb_core.crud.actions import list_actions, get_action, get_action_prompt_file
 from scripts.kb_core.crud.calls import list_calls, get_call_detail
 from scripts.kb_core.crud.org import list_org
+from scripts.kb_core.crud.roadmap import (
+    create_roadmap_item, list_roadmap_items, get_roadmap_item,
+    update_roadmap_item, delete_roadmap_item,
+)
 from scripts.kb_core.crud.contacts import list_contacts
 from scripts.kb_core.search import semantic_search, get_org_context
 from scripts.kb_core.clustering import get_cluster_details, expand_by_cluster, cluster_label
@@ -200,3 +206,99 @@ def api_list_clusters(
         c["label"] = cluster_label(c["chunks"])
         c["chunks"] = _serialize(c["chunks"])
     return results
+
+
+# --- Roadmap ---
+
+class RoadmapCreate(BaseModel):
+    project_id: int
+    title: str
+    description: str | None = None
+    spoke: str
+    round: int
+    status: str = "planned"
+
+
+class RoadmapUpdate(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    spoke: str | None = None
+    round: int | None = None
+    status: str | None = None
+
+
+@router.get("/roadmap")
+def api_list_roadmap(
+    project_id: int = Query(...),
+    spoke: Optional[str] = None,
+    round: Optional[int] = None,
+    status: Optional[str] = None,
+):
+    return _serialize(list_roadmap_items(project_id, spoke=spoke, round=round, status=status))
+
+
+@router.get("/roadmap/{item_id}")
+def api_get_roadmap(item_id: int):
+    row = get_roadmap_item(item_id)
+    if not row:
+        raise HTTPException(404, "Roadmap item not found")
+    return _serialize_one(row)
+
+
+@router.post("/roadmap", status_code=201)
+def api_create_roadmap(body: RoadmapCreate):
+    item_id = create_roadmap_item(
+        project_id=body.project_id,
+        title=body.title,
+        description=body.description,
+        spoke=body.spoke,
+        round=body.round,
+        status=body.status,
+    )
+    return {"id": item_id}
+
+
+@router.patch("/roadmap/{item_id}")
+def api_update_roadmap(item_id: int, body: RoadmapUpdate):
+    fields = body.model_dump(exclude_none=True)
+    if not fields:
+        raise HTTPException(400, "No fields to update")
+    ok = update_roadmap_item(item_id, **fields)
+    if not ok:
+        raise HTTPException(404, "Roadmap item not found")
+    return {"ok": True}
+
+
+@router.delete("/roadmap/{item_id}")
+def api_delete_roadmap(item_id: int):
+    ok = delete_roadmap_item(item_id)
+    if not ok:
+        raise HTTPException(404, "Roadmap item not found")
+    return {"ok": True}
+
+
+# --- Docs (stakeholder markdown) ---
+
+class DocUpdate(BaseModel):
+    content: str
+
+
+@router.get("/docs")
+def api_list_docs():
+    return list_docs()
+
+
+@router.get("/docs/{path:path}")
+def api_get_doc(path: str):
+    content = read_doc(path)
+    if content is None:
+        raise HTTPException(404, "Document not found")
+    return {"path": path, "content": content}
+
+
+@router.put("/docs/{path:path}")
+def api_put_doc(path: str, body: DocUpdate):
+    ok = write_doc(path, body.content)
+    if not ok:
+        raise HTTPException(501, "Storage backend not configured")
+    return {"ok": True}

@@ -2,12 +2,9 @@ import { useEffect, useState } from "react";
 import { api } from "./api";
 import type { Project } from "./types";
 import { ProjectSelector } from "./components/ProjectSelector";
-import { DecisionsPanel } from "./components/DecisionsPanel";
-import { TasksPanel } from "./components/TasksPanel";
-import { RecentCallsPanel } from "./components/RecentCallsPanel";
-import { SearchPanel } from "./components/SearchPanel";
-import { ClustersPanel } from "./components/ClustersPanel";
-import { ClientsPanel } from "./components/ClientsPanel";
+import { RoadmapBoard } from "./components/RoadmapBoard";
+import { ThemeSwitcher } from "./components/ThemeSwitcher";
+import { DocsNav } from "./components/DocsNav";
 
 export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -18,18 +15,17 @@ export function App() {
   }, []);
 
   return (
-    <div className="dashboard">
-      <header className="dashboard-header">
-        <h1>KB Dashboard</h1>
+    <div className="max-w-[1400px] mx-auto p-4">
+      <header className="flex items-center gap-8 mb-6 pb-4 border-b border-border">
+        <h1 className="text-xl font-semibold text-heading">KB Dashboard</h1>
         <ProjectSelector projects={projects} selected={projectId} onChange={setProjectId} />
+        <div className="ml-auto flex items-center gap-2">
+          <DocsNav />
+          <ThemeSwitcher />
+        </div>
       </header>
 
-      <DecisionsPanel projectId={projectId} />
-      <TasksPanel projectId={projectId} />
-      <RecentCallsPanel projectId={projectId} />
-      <SearchPanel />
-      <ClustersPanel />
-      <ClientsPanel />
+      <RoadmapBoard projectId={projectId} />
     </div>
   );
 }

@@ -3,9 +3,10 @@
 LLM/embedding config lives in kb_config singleton table.
 Static tuning parameters stay here.
 """
+import os
 
 # Database
-DB_URL = "postgresql://postgres:55@localhost:5433/knowledge_base"
+DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:55@localhost:5433/knowledge_base")
 
 # Chunking
 DEFAULT_CHUNK_SIZE = 512
@@ -21,28 +22,31 @@ DECAY_RATE = 0.95  # Per-day decay factor
 QUOTES_PER_BATCH = 5  # Target quotes per batch extraction
 
 
-def _load_singleton() -> dict:
-    """Load kb_config singleton row. Cached after first call."""
+def _load_singleton() -> dict | None:
+    """Load kb_config singleton row. Returns None if DB unavailable."""
     import psycopg
     from psycopg.rows import dict_row
-    with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM kb_config WHERE id = 1")
-            return dict(cur.fetchone())
+    try:
+        with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM kb_config WHERE id = 1")
+                return dict(cur.fetchone())
+    except psycopg.OperationalError:
+        return None
 
 
 _config = _load_singleton()
 
-# LM Studio (for LLM inference)
-LM_STUDIO_URL = _config["llm_url"]
-SUMMARY_MODEL = _config["llm_model"]
+# LM Studio (for LLM inference) — only available with local DB + LM Studio
+LM_STUDIO_URL = _config["llm_url"] if _config else ""
+SUMMARY_MODEL = _config["llm_model"] if _config else ""
 
 # LLM context length (set via LM Studio SDK at pipeline start)
 LLM_CONTEXT_LENGTH = 32768
 
 # Embedding (sentence-transformers, local)
-EMBED_MODEL = _config["embed_model"]
-EMBED_BACKEND = _config["embed_backend"]
+EMBED_MODEL = _config["embed_model"] if _config else "nomic-ai/nomic-embed-text-v1.5"
+EMBED_BACKEND = _config["embed_backend"] if _config else "onnx"
 
 
 def ensure_model():

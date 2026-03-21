@@ -22,21 +22,25 @@ RAILWAY_GRAPHQL = "https://backboard.railway.com/graphql/v2"
 _HEADERS_BASE = {"Content-Type": "application/json", "User-Agent": "curl/8.0"}
 
 
-def _gql(query: str, token: str | None = None) -> dict:
+def _gql(query: str, variables: dict | None = None, token: str | None = None) -> dict:
     """Execute a GraphQL query against Railway. Returns the data dict.
 
     Inspects both HTTP status and GraphQL errors field.
+    Uses GraphQL variables when provided (safer than string interpolation).
     Raises RailwayAPIError on failure.
     """
     if token is None:
         token = get_config().railway_token
 
     headers = {**_HEADERS_BASE, "Authorization": f"Bearer {token}"}
+    payload: dict = {"query": query}
+    if variables:
+        payload["variables"] = variables
 
     def _do_request() -> httpx.Response:
         return httpx.post(
             RAILWAY_GRAPHQL,
-            json={"query": query},
+            json=payload,
             headers=headers,
             timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0),
         )
@@ -108,6 +112,123 @@ def discover_projects() -> RailwayResult:
     finally:
         logger.info(
             "discover_projects duration_ms=%.0f", (time.monotonic() - t0) * 1000
+        )
+
+
+def get_deployments(
+    project_name: str,
+    service_id: str | None = None,
+    environment_id: str | None = None,
+    limit: int = 5,
+) -> RailwayResult:
+    """Get recent deployments for a project's service.
+
+    Returns list of deployments with id, status, createdAt.
+    Uses the project's health_service_id and production_env_id by default.
+    """
+    t0 = time.monotonic()
+    try:
+        proj = get_project(project_name)
+    except Exception as e:
+        return RailwayResult(ok=False, code=ErrorCode.CONFIG_ERROR, message=str(e))
+
+    sid = service_id or proj.health_service_id
+    eid = environment_id or proj.production_env_id
+    if not sid:
+        return RailwayResult(
+            ok=False,
+            code=ErrorCode.CONFIG_ERROR,
+            message=f"No service ID configured for {project_name}",
+            project=project_name,
+        )
+
+    query = """
+    query Deployments($projectId: String!, $environmentId: String!, $serviceId: String!, $limit: Int!) {
+        deployments(first: $limit, input: {
+            projectId: $projectId,
+            environmentId: $environmentId,
+            serviceId: $serviceId
+        }) {
+            edges { node { id status createdAt } }
+        }
+    }
+    """
+    variables = {
+        "projectId": proj.railway_project_id,
+        "environmentId": eid,
+        "serviceId": sid,
+        "limit": limit,
+    }
+
+    try:
+        data = _gql(query, variables)
+        deployments = []
+        for edge in data.get("deployments", {}).get("edges", []):
+            node = edge["node"]
+            deployments.append({
+                "id": node["id"],
+                "status": node["status"],
+                "created_at": node["createdAt"],
+            })
+
+        return RailwayResult(
+            ok=True,
+            code=ErrorCode.OK,
+            message=f"{proj.display_name}: {len(deployments)} deployments found",
+            project=project_name,
+            service=sid,
+            environment="production",
+            details={"deployments": deployments},
+        )
+    except RailwayAPIError as e:
+        return RailwayResult(
+            ok=False, code=e.code, message=str(e), project=project_name
+        )
+    finally:
+        logger.info(
+            "get_deployments project=%s limit=%d duration_ms=%.0f",
+            project_name,
+            limit,
+            (time.monotonic() - t0) * 1000,
+        )
+
+
+def execute_rollback_mutation(deployment_id: str) -> RailwayResult:
+    """Execute deploymentRollback GraphQL mutation.
+
+    Uses GraphQL variables (not string interpolation) per Codex review.
+    The deployment_id is the target deployment to roll back TO.
+    """
+    t0 = time.monotonic()
+    query = """
+    mutation Rollback($id: String!) {
+        deploymentRollback(id: $id) { id status }
+    }
+    """
+
+    try:
+        data = _gql(query, {"id": deployment_id})
+        result_data = data.get("deploymentRollback", {})
+        return RailwayResult(
+            ok=True,
+            code=ErrorCode.OK,
+            message=f"Rollback initiated: {result_data.get('status', 'UNKNOWN')}",
+            details={
+                "rollback_deployment_id": result_data.get("id", ""),
+                "rollback_status": result_data.get("status", ""),
+            },
+        )
+    except RailwayAPIError as e:
+        return RailwayResult(
+            ok=False,
+            code=e.code,
+            message=f"Rollback mutation failed: {e}",
+        )
+    finally:
+        logger.info(
+            "execute_rollback_mutation deployment_id=%s duration_ms=%.0f",
+            deployment_id,
+            (time.monotonic() - t0) * 1000,
         )
 
 

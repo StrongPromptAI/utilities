@@ -22,3 +22,6 @@ __pycache__/
 *.egg-info/
 .venv/
 *.so
+
+# DevOps agent runtime data
+devops_agent/audit.jsonl

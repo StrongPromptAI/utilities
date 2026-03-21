@@ -53,3 +53,20 @@ class NotifyResult(OperationResult):
 
     message_id: str = ""
     recipient: str = ""
+
+
+class AnalyzeResult(OperationResult):
+    """Result from an OpenRouter LLM call."""
+
+    model: str = ""
+    response_text: str = ""
+    cost: float | None = None
+
+
+class ValidationResult(OperationResult):
+    """Result from validate_deploy with stage tracking."""
+
+    stages: list[dict[str, Any]] = []
+    rollback_triggered: bool = False
+    rollback_succeeded: bool | None = None
+    notification_sent: bool = False

@@ -15,6 +15,9 @@ class ErrorCode(str, Enum):
     NETWORK_ERROR = "network_error"
     GRAPHQL_ERROR = "graphql_error"
     SMTP_ERROR = "smtp_error"
+    ROLLBACK_ERROR = "rollback_error"
+    NO_ROLLBACK_TARGET = "no_rollback_target"
+    LLM_ERROR = "llm_error"
 
 
 # CLI exit codes — deterministic for cron/automation

@@ -32,6 +32,7 @@ from .logging_setup import setup_logging
 from .models import OperationResult
 from .notify import send_email
 from .railway import discover_projects, get_deployment_status
+from .rollback import rollback_with_notification, validate_deploy
 
 # Map error codes to CLI exit codes
 _EXIT_MAP = {
@@ -44,6 +45,9 @@ _EXIT_MAP = {
     ErrorCode.GRAPHQL_ERROR: EXIT_PROVIDER_UNAVAILABLE,
     ErrorCode.SMTP_ERROR: EXIT_PROVIDER_UNAVAILABLE,
     ErrorCode.APP_UNHEALTHY: EXIT_HEALTH_FAILED,
+    ErrorCode.ROLLBACK_ERROR: EXIT_GENERAL,
+    ErrorCode.NO_ROLLBACK_TARGET: EXIT_GENERAL,
+    ErrorCode.LLM_ERROR: EXIT_PROVIDER_UNAVAILABLE,
 }
 
 
@@ -158,5 +162,55 @@ def discover_cmd(ctx: click.Context) -> None:
     """Discover all projects in the Railway workspace via GraphQL."""
     as_json = ctx.obj["json"]
     result = discover_projects()
+    _output(result, as_json=as_json)
+    sys.exit(_exit_code(result))
+
+
+@cli.command("rollback")
+@click.argument("project")
+@click.option("--reason", default="Manual rollback", help="Reason for rollback")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without executing")
+@click.option("--force", is_flag=True, help="Override 7-day rollback age limit")
+@click.option("--use-llm", is_flag=True, help="Use OpenRouter for email body drafting")
+@click.pass_context
+def rollback_cmd(
+    ctx: click.Context,
+    project: str,
+    reason: str,
+    dry_run: bool,
+    force: bool,
+    use_llm: bool,
+) -> None:
+    """Roll back a project's deployment to the previous successful version."""
+    as_json = ctx.obj["json"]
+    result = rollback_with_notification(
+        project,
+        reason,
+        use_llm=use_llm,
+        dry_run=dry_run,
+        force=force,
+    )
+    _output(result, as_json=as_json)
+    sys.exit(_exit_code(result))
+
+
+@cli.command("validate-deploy")
+@click.argument("project")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without executing")
+@click.option("--use-llm", is_flag=True, help="Use OpenRouter for email body drafting")
+@click.pass_context
+def validate_deploy_cmd(
+    ctx: click.Context,
+    project: str,
+    dry_run: bool,
+    use_llm: bool,
+) -> None:
+    """Validate a deployment: health check, rollback on failure, notify on success."""
+    as_json = ctx.obj["json"]
+    result = validate_deploy(
+        project,
+        use_llm=use_llm,
+        dry_run=dry_run,
+    )
     _output(result, as_json=as_json)
     sys.exit(_exit_code(result))

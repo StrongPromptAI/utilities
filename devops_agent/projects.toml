@@ -14,6 +14,19 @@ services = ["api", "frontend", "proxy", "landing"]
 health_service_id = "4cb84db3-7403-4a12-8d65-4e09acff633a"
 health_url = "https://hjassist-api.up.railway.app/health"
 
+[[hj-assistant.smoke_tests]]
+name = "api-health"
+url = "https://hjassist-api.up.railway.app/health"
+expected_status = 200
+json_path = "status"
+json_value = "ok"
+
+[[hj-assistant.smoke_tests]]
+name = "landing-alive"
+url = "https://pop.clinic"
+expected_status = 200
+expected_body_contains = "POP"
+
 [fullauto]
 display_name = "FullAuto"
 railway_project_id = "3cd637dc-02cd-476f-94b3-4165dd0479d5"
@@ -44,6 +57,16 @@ has_staging = false
 tier = 1
 services = ["hj-roadmap"]
 health_service_id = "5d97ef67-1434-487a-9069-df8b98a0dd95"
+
+[[kb.smoke_tests]]
+name = "roadmap-alive"
+url = "https://hj-roadmap-production.up.railway.app/"
+expected_status = 200
+
+[[kb.smoke_tests]]
+name = "roadmap-doctor"
+url = "https://hj-roadmap-production.up.railway.app/doctor/"
+expected_status = 200
 
 # Tier 2 — Active but less frequent
 

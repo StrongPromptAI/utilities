@@ -33,6 +33,7 @@ from .models import OperationResult
 from .notify import send_email
 from .railway import discover_projects, get_deployment_status
 from .rollback import rollback_with_notification, validate_deploy
+from .smoke import run_smoke_tests
 
 # Map error codes to CLI exit codes
 _EXIT_MAP = {
@@ -198,19 +199,38 @@ def rollback_cmd(
 @click.argument("project")
 @click.option("--dry-run", is_flag=True, help="Show what would happen without executing")
 @click.option("--use-llm", is_flag=True, help="Use OpenRouter for email body drafting")
+@click.option(
+    "--smoke-mode",
+    type=click.Choice(["observe", "enforce"]),
+    default="observe",
+    help="observe: log smoke failures without rollback; enforce: treat as deploy failure",
+)
 @click.pass_context
 def validate_deploy_cmd(
     ctx: click.Context,
     project: str,
     dry_run: bool,
     use_llm: bool,
+    smoke_mode: str,
 ) -> None:
-    """Validate a deployment: health check, rollback on failure, notify on success."""
+    """Validate a deployment: health check, smoke tests, rollback on failure, notify on success."""
     as_json = ctx.obj["json"]
     result = validate_deploy(
         project,
         use_llm=use_llm,
         dry_run=dry_run,
+        smoke_mode=smoke_mode,
     )
+    _output(result, as_json=as_json)
+    sys.exit(_exit_code(result))
+
+
+@cli.command("smoke")
+@click.argument("project")
+@click.pass_context
+def smoke_cmd(ctx: click.Context, project: str) -> None:
+    """Run smoke tests for a project's configured endpoints."""
+    as_json = ctx.obj["json"]
+    result = run_smoke_tests(project)
     _output(result, as_json=as_json)
     sys.exit(_exit_code(result))

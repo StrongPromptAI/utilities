@@ -35,6 +35,7 @@ class ProjectConfig(BaseModel):
     health_timeout: int = 10
     health_expected_status: int = 200
     health_headers: dict[str, str] = {}
+    smoke_tests: list[dict] = []
 
 
 class AgentConfig(BaseModel):

@@ -24,6 +24,7 @@ from .health import check_health
 from .models import HealthResult, OperationResult, RailwayResult, ValidationResult
 from .notify import send_email
 from .railway import execute_rollback_mutation, get_deployments
+from .smoke import run_smoke_tests
 from .templates import deploy_success_email, rollback_email, rollback_failed_email
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,12 @@ def _parse_deployment_time(created_at: str) -> datetime:
     return datetime.fromisoformat(created_at.replace("Z", "+00:00"))
 
 
+# Railway keeps exactly 1 SUCCESS deployment per service. All prior deployments
+# become REMOVED. Rollback via deploymentRollback(id) works on REMOVED deployments
+# (verified live 2026-03-21 on hj-assistant landing staging).
+ROLLBACK_ELIGIBLE = {"SUCCESS", "REMOVED"}
+
+
 def find_rollback_target(
     project_name: str,
     *,
@@ -50,12 +57,15 @@ def find_rollback_target(
 
     Safety filters:
     - Same project + environment + service (via get_deployments)
-    - Terminal SUCCESS status only
+    - Status in ROLLBACK_ELIGIBLE (SUCCESS or REMOVED) — Railway marks prior
+      deployments as REMOVED but rollback still works on them
     - Timestamp strictly before current deployment
     - Within max_age_days (override with force=True)
     - id != current deployment id
+
+    Preference order: SUCCESS > REMOVED (defensive).
     """
-    deployments_result = get_deployments(project_name, limit=10)
+    deployments_result = get_deployments(project_name, limit=20)
     if not deployments_result.ok:
         return deployments_result
 
@@ -78,12 +88,16 @@ def find_rollback_target(
         if dep["id"] == current_id:
             continue
 
-        # Only terminal SUCCESS
-        if dep["status"] != "SUCCESS":
+        # Only rollback-eligible statuses
+        if dep["status"] not in ROLLBACK_ELIGIBLE:
             continue
 
         # Check age
-        dep_time = _parse_deployment_time(dep["created_at"])
+        try:
+            dep_time = _parse_deployment_time(dep["created_at"])
+        except (ValueError, KeyError):
+            logger.warning("Skipping deployment %s: unparseable timestamp", dep["id"])
+            continue
         age_days = (now - dep_time).days
         if age_days > max_age_days and not force:
             logger.info(
@@ -107,8 +121,10 @@ def find_rollback_target(
             project=project_name,
         )
 
-    # Best candidate: most recent SUCCESS before current
-    best = candidates[0]  # Already sorted by recency from Railway API
+    # Prefer SUCCESS over REMOVED, then most recent first
+    _status_priority = {"SUCCESS": 0, "REMOVED": 1}
+    candidates.sort(key=lambda c: (_status_priority.get(c["status"], 9), -c["_parsed_time"].timestamp()))
+    best = candidates[0]
     return RailwayResult(
         ok=True,
         code=ErrorCode.OK,
@@ -366,16 +382,22 @@ def validate_deploy(
     *,
     use_llm: bool = False,
     dry_run: bool = False,
+    smoke_mode: str = "observe",
 ) -> ValidationResult:
     """Post-deploy validation with stage tracking.
 
     Stages:
     1. detect  — get current deployment status
     2. health  — run health check
-    3. decide  — pass or fail
-    4a. rollback — if fail: find target → execute → verify → notify
-    4b. notify  — if pass: send deploy success email
-    5. audit   — log all stages to JSONL
+    3. smoke   — run smoke tests (observe or enforce mode)
+    4. decide  — pass or fail based on health + smoke
+    5a. rollback — if fail: find target → execute → verify → notify
+    5b. notify  — if pass: send deploy success email
+    6. audit   — log all stages to JSONL
+
+    smoke_mode:
+      "observe" — smoke failures are logged but don't trigger rollback
+      "enforce" — smoke failures trigger rollback (same as health failure)
     """
     op_id = _operation_id()
     stages: list[dict] = []
@@ -419,9 +441,8 @@ def validate_deploy(
         "duration_ms": round((time.monotonic() - t0) * 1000),
     })
 
-    # Stage 3: Decide
+    # Health FAILED → rollback (always enforced)
     if not health_result.ok:
-        # Health FAILED → rollback
         logger.warning(
             "Health check failed for %s: %s — triggering rollback",
             project_name,
@@ -468,7 +489,78 @@ def validate_deploy(
             else False,
         )
 
-    # Health PASSED → send success notification
+    # Stage 3: Smoke tests
+    t0 = time.monotonic()
+    smoke_result = run_smoke_tests(project_name)
+    stages.append({
+        "stage": "smoke",
+        "status": "ok" if smoke_result.ok else "failed",
+        "error_code": smoke_result.code.value,
+        "duration_ms": round((time.monotonic() - t0) * 1000),
+        "smoke_mode": smoke_mode,
+        "tests_passed": smoke_result.tests_passed,
+        "tests_failed": smoke_result.tests_failed,
+        "tests_total": smoke_result.tests_total,
+    })
+
+    # Smoke FAILED in enforce mode → rollback
+    if not smoke_result.ok and smoke_mode == "enforce":
+        logger.warning(
+            "Smoke tests failed for %s in enforce mode — triggering rollback",
+            project_name,
+        )
+
+        t0 = time.monotonic()
+        rollback_result = rollback_with_notification(
+            project_name,
+            reason=f"Post-deploy smoke tests failed: {smoke_result.message}",
+            failed_health=health_result,
+            use_llm=use_llm,
+            dry_run=dry_run,
+        )
+        stages.append({
+            "stage": "rollback",
+            "status": "ok" if rollback_result.ok else "failed",
+            "error_code": rollback_result.code.value,
+            "duration_ms": round((time.monotonic() - t0) * 1000),
+        })
+
+        log_operation(
+            operation="validate_deploy",
+            project=project_name,
+            stages=stages,
+            final_status="rollback_triggered",
+            operation_id=op_id,
+            details={
+                "deployment_id": current_id,
+                "health_ok": True,
+                "smoke_ok": False,
+                "smoke_mode": smoke_mode,
+                "rollback_ok": rollback_result.ok,
+            },
+        )
+
+        return ValidationResult(
+            ok=False,
+            code=ErrorCode.APP_UNHEALTHY,
+            message=f"Smoke tests failed (enforce mode), rollback {'executed' if not dry_run else 'would execute'}",
+            stages=stages,
+            rollback_triggered=True,
+            rollback_succeeded=rollback_result.ok if not dry_run else None,
+            notification_sent=rollback_result.details.get("notification_sent", False)
+            if rollback_result.details
+            else False,
+        )
+
+    # Smoke FAILED in observe mode → log but continue
+    if not smoke_result.ok and smoke_mode == "observe":
+        logger.warning(
+            "Smoke tests failed for %s (observe mode — no rollback): %s",
+            project_name,
+            smoke_result.message,
+        )
+
+    # Health PASSED (+ smoke passed or observe mode) → send success notification
     t0 = time.monotonic()
     health_evidence = {
         "url": health_result.url,
@@ -517,6 +609,8 @@ def validate_deploy(
         details={
             "deployment_id": current_id,
             "health_ok": True,
+            "smoke_ok": smoke_result.ok,
+            "smoke_mode": smoke_mode,
             "notification_sent": notify_ok,
         },
     )
@@ -524,7 +618,8 @@ def validate_deploy(
     return ValidationResult(
         ok=True,
         code=ErrorCode.OK,
-        message=f"Deploy healthy: {proj.display_name}",
+        message=f"Deploy healthy: {proj.display_name}"
+        + ("" if smoke_result.ok else f" (smoke: {smoke_result.tests_failed} failed, observe mode)"),
         stages=stages,
         rollback_triggered=False,
         notification_sent=notify_ok,

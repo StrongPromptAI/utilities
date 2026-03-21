@@ -202,20 +202,20 @@ def execute_rollback_mutation(deployment_id: str) -> RailwayResult:
     t0 = time.monotonic()
     query = """
     mutation Rollback($id: String!) {
-        deploymentRollback(id: $id) { id status }
+        deploymentRollback(id: $id)
     }
     """
 
     try:
         data = _gql(query, {"id": deployment_id})
-        result_data = data.get("deploymentRollback", {})
+        success = data.get("deploymentRollback", False)
         return RailwayResult(
-            ok=True,
-            code=ErrorCode.OK,
-            message=f"Rollback initiated: {result_data.get('status', 'UNKNOWN')}",
+            ok=success,
+            code=ErrorCode.OK if success else ErrorCode.ROLLBACK_ERROR,
+            message=f"Rollback {'accepted' if success else 'rejected'} by Railway",
             details={
-                "rollback_deployment_id": result_data.get("id", ""),
-                "rollback_status": result_data.get("status", ""),
+                "target_deployment_id": deployment_id,
+                "railway_accepted": success,
             },
         )
     except RailwayAPIError as e:
@@ -252,16 +252,25 @@ def get_deployment_status(project_name: str) -> RailwayResult:
             project=project_name,
         )
 
-    query = (
-        'query { deployments(first: 3, input: { '
-        f'projectId: "{proj.railway_project_id}", '
-        f'environmentId: "{proj.production_env_id}", '
-        f'serviceId: "{proj.health_service_id}" '
-        '}) { edges { node { id status createdAt } } } }'
-    )
+    query = """
+    query DeploymentStatus($projectId: String!, $environmentId: String!, $serviceId: String!) {
+        deployments(first: 3, input: {
+            projectId: $projectId,
+            environmentId: $environmentId,
+            serviceId: $serviceId
+        }) {
+            edges { node { id status createdAt } }
+        }
+    }
+    """
+    variables = {
+        "projectId": proj.railway_project_id,
+        "environmentId": proj.production_env_id,
+        "serviceId": proj.health_service_id,
+    }
 
     try:
-        data = _gql(query)
+        data = _gql(query, variables)
         deployments = []
         for edge in data.get("deployments", {}).get("edges", []):
             node = edge["node"]

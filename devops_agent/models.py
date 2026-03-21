@@ -70,3 +70,43 @@ class ValidationResult(OperationResult):
     rollback_triggered: bool = False
     rollback_succeeded: bool | None = None
     notification_sent: bool = False
+
+
+class SmokeTest(BaseModel):
+    """Single smoke test definition from projects.toml.
+
+    Covers both functional health checks and security posture checks
+    in a single per-project test list.
+    """
+
+    name: str
+    url: str
+    method: str = "GET"
+    expected_status: int = 200
+    expected_body_contains: str | None = None
+    json_path: str | None = None
+    json_value: str | None = None
+    expected_header: str | None = None
+    expected_header_contains: str | None = None
+    headers: dict[str, str] = {}
+    timeout: float = 10.0
+
+
+class SmokeTestResult(BaseModel):
+    """Result of a single smoke test execution."""
+
+    name: str
+    url: str
+    passed: bool
+    status_code: int | None = None
+    latency_ms: float | None = None
+    error: str | None = None
+
+
+class SmokeResult(OperationResult):
+    """Result from running all smoke tests for a project."""
+
+    tests_passed: int = 0
+    tests_failed: int = 0
+    tests_total: int = 0
+    test_results: list[SmokeTestResult] = []

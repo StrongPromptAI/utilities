@@ -96,7 +96,7 @@ React + Tailwind v4 + FastAPI. Main view: **Roadmap Kanban**. API supports read 
 ## Railway
 
 **Deploy method:** `railway up` (static site exception — see `railway-patterns.md` § Static Site Exception)
-**API token:** `~/.railway/config.json` → `user.apiToken` (workspace-scoped)
+**API keys:** `~/.config/keys.json` → `railway` (see global CLAUDE.md)
 **Patterns:** `@~/repo_docs/skills/devops/railway-patterns.md`
 
 | Key | Value |

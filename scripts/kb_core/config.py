@@ -3,10 +3,46 @@
 LLM/embedding config lives in kb_config singleton table.
 Static tuning parameters stay here.
 """
+import json
 import os
+import subprocess
 
-# Database
-DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:55@localhost:5433/knowledge_base")
+# Railway IDs for KB project (from CLAUDE.md)
+_KB_PROJECT_ID = "a3677be5-5392-473e-b609-f23b7c06b78c"
+_KB_ENV_ID = "3317309b-8f0c-43f4-9d8a-73b1c9fecf9c"
+_KB_POSTGRES_SERVICE_ID = "ae33aa6f-3890-4af7-aec6-13904be1c242"
+
+
+def _get_railway_db_url() -> str:
+    """Fetch DATABASE_PUBLIC_URL from Railway GraphQL API."""
+    keys_path = os.path.expanduser("~/.config/keys.json")
+    token = json.load(open(keys_path))["railway"]
+    query = (
+        '{"query":"query { variables(projectId: \\"'
+        + _KB_PROJECT_ID
+        + '\\", environmentId: \\"'
+        + _KB_ENV_ID
+        + '\\", serviceId: \\"'
+        + _KB_POSTGRES_SERVICE_ID
+        + '\\") }"}'
+    )
+    result = subprocess.run(
+        [
+            "curl", "-s", "-X", "POST",
+            "https://backboard.railway.com/graphql/v2",
+            "-H", f"Authorization: Bearer {token}",
+            "-H", "Content-Type: application/json",
+            "-d", query,
+        ],
+        capture_output=True, text=True, timeout=10,
+    )
+    data = json.loads(result.stdout)
+    return data["data"]["variables"]["DATABASE_PUBLIC_URL"]
+
+
+# Database — Railway Postgres (KB project)
+# KB_DATABASE_URL overrides for testing/local dev
+DB_URL = os.environ.get("KB_DATABASE_URL") or _get_railway_db_url()
 
 # Chunking
 DEFAULT_CHUNK_SIZE = 512

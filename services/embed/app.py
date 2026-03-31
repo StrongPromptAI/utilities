@@ -3,7 +3,6 @@ Embed service — nomic-embed-text-v1.5 ONNX embeddings.
 
 Shared service deployed per-project for PHI isolation.
 Source: utilities/services/embed/
-Uses: utilities/packages/embed/ (core ONNX logic)
 
 Endpoints:
   GET  /health   — 200 ready, 503 loading, 500 error
@@ -28,9 +27,8 @@ def _warmup() -> None:
     """Load model and run one inference to confirm it works."""
     global _ready, _load_error
     try:
-        from nomic_onnx_embed.embed import _get_session, _embed
+        from nomic_embed import _get_session, _embed
         _get_session()
-        # Warm-up inference — health won't report ready until this succeeds
         result = _embed(["warmup"])
         assert result.shape[1] == 768, f"Expected 768-dim, got {result.shape[1]}"
         _ready = True
@@ -73,7 +71,7 @@ async def embed(req: EmbedRequest):
     if not texts:
         raise HTTPException(400, "inputs is required")
 
-    from nomic_onnx_embed.embed import _embed
+    from nomic_embed import _embed
 
     try:
         loop = asyncio.get_event_loop()

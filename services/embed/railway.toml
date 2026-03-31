@@ -1,5 +1,6 @@
 [build]
-dockerfilePath = "services/embed/Dockerfile"
+dockerfilePath = "Dockerfile"
+watchPatterns = ["**"]
 
 [deploy]
 healthcheckPath = "/health"

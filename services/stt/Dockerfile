@@ -1,10 +1,10 @@
 # STT service — sherpa-onnx streaming Zipformer speech-to-text
-# Model weights downloaded at first boot to /app/models (persists on volume)
+# Model weights baked into image at build time
 FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY services/stt/requirements.txt .
+COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 # Pre-download model weights during build
@@ -17,7 +17,7 @@ snapshot_download( \
     local_dir_use_symlinks=False); \
 print('STT model cached')"
 
-COPY services/stt/app.py .
+COPY app.py .
 
 ENV PORT=8080
 ENV MODELS_DIR=/app/models

@@ -1,5 +1,6 @@
 [build]
-dockerfilePath = "services/stt/Dockerfile"
+dockerfilePath = "Dockerfile"
+watchPatterns = ["**"]
 
 [deploy]
 healthcheckPath = "/health"

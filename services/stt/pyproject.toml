@@ -1,0 +1,16 @@
+[project]
+name = "stt-service"
+version = "0.1.0"
+description = "Sherpa-ONNX streaming STT service"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn>=0.30.0",
+    "numpy>=1.24.0",
+    "sherpa-onnx>=1.10.0",
+    "huggingface-hub>=0.23.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

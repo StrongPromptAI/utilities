@@ -1,0 +1,17 @@
+[project]
+name = "embed-service"
+version = "0.1.0"
+description = "Nomic ONNX embedding service"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn>=0.30.0",
+    "nomic-onnx-embed",
+]
+
+[tool.uv.sources]
+nomic-onnx-embed = { path = "../../packages/embed" }
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

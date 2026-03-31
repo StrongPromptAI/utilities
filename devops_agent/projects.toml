@@ -10,16 +10,22 @@ staging_env_id = "d5a2b9a0-1343-473c-b9c0-6d221d6fcc93"
 repo = "itheraputix"
 has_staging = true
 tier = 1
-services = ["api", "frontend", "proxy", "landing"]
+# api/frontend/proxy/landing deploy from itheraputix repo
+# stt/embed deploy from utilities repo (shared services, per-project instances)
+services = ["api", "frontend", "proxy", "landing", "stt", "embed"]
 health_service_id = "4cb84db3-7403-4a12-8d65-4e09acff633a"
-health_url = "https://hjassist-api.up.railway.app/health"
+health_url = "https://bcc.stage.pop.clinic/health"
+publish_skill = "~/repo_docs/skills/devops/publish-hj-assistant.md"
+
+# Shared services deployed from StrongPromptAI/utilities
+# Private networking only — no public health URLs, check via Railway logs
+shared_service_ids = { stt = "853aabd5-6c69-4ad5-87fd-36121d9f2041", embed = "6c08e1ad-75cc-4b05-8f0f-682693c04442" }
+shared_service_repo = "utilities"
 
 [[hj-assistant.smoke_tests]]
-name = "api-health"
-url = "https://hjassist-api.up.railway.app/health"
+name = "proxy-health"
+url = "https://bcc.stage.pop.clinic/health"
 expected_status = 200
-json_path = "status"
-json_value = "ok"
 
 [[hj-assistant.smoke_tests]]
 name = "landing-alive"

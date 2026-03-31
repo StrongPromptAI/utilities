@@ -94,8 +94,11 @@ staging_env_id = "c06f1045-e1f9-402f-8150-a18eee557177"
 repo = "burntfork-retreat-showcase"
 has_staging = true
 tier = 2
-services = ["backend", "frontend"]
+services = ["backend", "frontend", "proxy", "interview", "stt", "embed"]
 health_service_id = "36b8f3ff-2ded-43fb-bff9-a632ee8e22fe"
+publish_skill = "~/repo_docs/skills/devops/publish-faithful-youth.md"
+shared_service_ids = { stt = "07cdc115-cbec-4f35-b8de-7b527830dde1", embed = "49253247-c9d3-4dcb-8a60-d832e9ab878a" }
+shared_service_repo = "utilities"
 
 # Tier 3 — Low priority / archive candidates
 

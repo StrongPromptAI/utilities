@@ -16,6 +16,7 @@ from .errors import ConfigError
 _CONFIG_DIR = Path(__file__).parent
 _PROJECTS_FILE = _CONFIG_DIR / "projects.toml"
 _RAILWAY_CONFIG = Path.home() / ".railway" / "config.json"
+_KEYS_FILE = Path.home() / ".config" / "keys.json"
 
 
 class ProjectConfig(BaseModel):
@@ -47,26 +48,41 @@ class AgentConfig(BaseModel):
 
 
 def _load_railway_token() -> str:
-    """Load Railway API token. Env var takes precedence over config file."""
+    """Load Railway API token.
+
+    Lookup order:
+      1. RAILWAY_API_TOKEN env var
+      2. ~/.config/keys.json → "railway"
+      3. ~/.railway/config.json → user.apiToken (legacy Railway CLI format)
+    """
     token = os.environ.get("RAILWAY_API_TOKEN")
     if token:
         return token
 
-    if not _RAILWAY_CONFIG.exists():
-        raise ConfigError(
-            f"Railway token not found. Set RAILWAY_API_TOKEN env var "
-            f"or ensure {_RAILWAY_CONFIG} exists."
-        )
+    if _KEYS_FILE.exists():
+        try:
+            data = json.loads(_KEYS_FILE.read_text())
+            token = data.get("railway")
+            if token:
+                return token
+        except (json.JSONDecodeError, KeyError):
+            pass
 
-    try:
-        data = json.loads(_RAILWAY_CONFIG.read_text())
-        token = data["user"]["apiToken"]
-    except (json.JSONDecodeError, KeyError) as e:
-        raise ConfigError(f"Failed to read Railway token from {_RAILWAY_CONFIG}: {e}")
+    if _RAILWAY_CONFIG.exists():
+        try:
+            data = json.loads(_RAILWAY_CONFIG.read_text())
+            token = data["user"]["apiToken"]
+            if token:
+                return token
+        except (json.JSONDecodeError, KeyError):
+            pass
 
-    if not token:
-        raise ConfigError("Railway apiToken is empty in config file.")
-    return token
+    raise ConfigError(
+        "Railway token not found. Provide it via:\n"
+        "  1. RAILWAY_API_TOKEN env var\n"
+        f"  2. {_KEYS_FILE} → {{\"railway\": \"<token>\"}}\n"
+        f"  3. {_RAILWAY_CONFIG} (Railway CLI config)"
+    )
 
 
 def _load_projects_toml() -> dict:

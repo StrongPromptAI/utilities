@@ -28,6 +28,12 @@ url = "https://bcc.stage.pop.clinic/health"
 expected_status = 200
 
 [[hj-assistant.smoke_tests]]
+name = "embed-health"
+url = "https://bcc.stage.pop.clinic/api/health/embed"
+expected_status = 200
+expected_body_contains = "ok"
+
+[[hj-assistant.smoke_tests]]
 name = "landing-alive"
 url = "https://pop.clinic"
 expected_status = 200

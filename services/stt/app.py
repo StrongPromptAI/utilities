@@ -124,7 +124,9 @@ async def transcribe(ws: WebSocket) -> None:
         return
 
     await ws.accept()
+    print(f"[stt] WebSocket accepted, creating stream...")
     stream = _stt.create_stream()
+    print(f"[stt] Stream created, entering receive loop")
     segment = 0
     t0 = time.perf_counter()
     last_text = ""
@@ -194,8 +196,11 @@ async def transcribe(ws: WebSocket) -> None:
                 t0 = time.perf_counter()
 
     except WebSocketDisconnect:
-        pass
+        print("[stt] Client disconnected")
     except Exception as exc:
+        import traceback
         print(f"[stt] Transcribe error ({type(exc).__name__}): {exc}")
+        traceback.print_exc()
     finally:
+        print("[stt] Cleaning up stream")
         del stream

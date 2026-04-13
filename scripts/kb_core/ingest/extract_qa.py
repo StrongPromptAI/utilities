@@ -58,9 +58,14 @@ EXTRACT_SCHEMA = {
                             "answer_verbatim": {"type": "string"},
                             "topic": {"type": "string"},
                             "answered": {"type": "boolean"},
+                            "delivery_stage": {
+                                "type": "string",
+                                "enum": ["pre_delivery", "post_delivery"],
+                            },
                         },
                         "required": ["question", "answer", "question_verbatim",
-                                     "answer_verbatim", "topic", "answered"],
+                                     "answer_verbatim", "topic", "answered",
+                                     "delivery_stage"],
                     },
                 },
             },
@@ -84,6 +89,13 @@ Extraction rules:
 
 Caller type: Identify who the caller is — patient, family_member, provider_office, \
 or insurance_rep. This goes in caller_type field of classification_evidence.
+
+Delivery stage: For each Q&A pair, classify as:
+- post_delivery: caller ALREADY HAS the equipment — asking about usage, returns, billing \
+after receipt, adjustments, invoices for received items, setup help.
+- pre_delivery: caller is asking BEFORE receiving equipment — ordering, availability, \
+catalog questions, pricing, insurance coverage, tracking, referral status.
+If ambiguous, lean toward pre_delivery unless clear evidence the caller already has the item.
 </role_and_constraints>
 
 <negative_examples>
@@ -114,6 +126,7 @@ qa_pairs array — each item:
   topic: delivery_timeline | order_status | equipment_setup | insurance_coverage | \
 referral_process | pickup_logistics | equipment_catalog | billing | call_routing | other
   answered: true if agent resolved it, false if transferred or couldn't answer
+  delivery_stage: pre_delivery | post_delivery
 
 Example of a good extraction:
   question: "How do I get the equipment my doctor ordered?"
@@ -122,6 +135,7 @@ Example of a good extraction:
   answer_verbatim: "We just received your orders and it is pending. I'm going to send this to the local rep and they will contact you upon delivery."
   topic: "referral_process"
   answered: true
+  delivery_stage: "pre_delivery"
 </output_contract>"""
 
 
@@ -254,11 +268,13 @@ def extract_qa_batch(
                     cur.execute(
                         """INSERT INTO ingest_qa
                            (ingest_source_id, project_id, question, answer,
-                            question_verbatim, answer_verbatim, topic, category, answered)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                            question_verbatim, answer_verbatim, topic, category,
+                            answered, delivery_stage)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                         (src["id"], project_id, qa["question"], qa["answer"],
                          qa["question_verbatim"], qa["answer_verbatim"],
-                         qa["topic"], src["category"], qa["answered"]),
+                         qa["topic"], src["category"], qa["answered"],
+                         qa.get("delivery_stage")),
                     )
             conn.commit()
 

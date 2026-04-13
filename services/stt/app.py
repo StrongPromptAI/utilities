@@ -15,20 +15,14 @@ import sys
 import time
 import asyncio
 import faulthandler
-
-faulthandler.enable()
-
-
-def _log(msg: str) -> None:
-    """Write to stderr (unbuffered) for reliable Railway logging."""
-    sys.stderr.write(f"{msg}\n")
-    sys.stderr.flush()
 from pathlib import Path
 
 import json as _json
 
 import numpy as np
 from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
+
+faulthandler.enable()
 
 app = FastAPI(title="stt")
 
@@ -41,6 +35,12 @@ os.environ.setdefault("HF_HOME", str(MODELS_DIR / "hf_cache"))
 _stt_ready: bool = False
 _load_error: str | None = None
 _stt = None
+
+
+def _log(msg: str) -> None:
+    """Write to stderr (unbuffered) for reliable Railway logging."""
+    sys.stderr.write(f"{msg}\n")
+    sys.stderr.flush()
 
 
 def _load_stt() -> None:
@@ -133,28 +133,15 @@ async def transcribe(ws: WebSocket) -> None:
         await ws.close(code=1013, reason="STT model loading")
         return
 
-    _log(f"[stt] About to accept WebSocket, _stt_ready={_stt_ready}, _stt={type(_stt)}")
     await ws.accept()
-    _log(f"[stt] WebSocket accepted, creating stream...")
-    try:
-        stream = _stt.create_stream()
-    except Exception as exc:
-        _log(f"[stt] create_stream FAILED: {type(exc).__name__}: {exc}")
-        await ws.close(code=1011, reason="Stream creation failed")
-        return
-    _log(f"[stt] Stream created OK, entering receive loop")
+    stream = _stt.create_stream()
     segment = 0
     t0 = time.perf_counter()
     last_text = ""
 
     try:
-        frame_count = 0
         while True:
             msg = await ws.receive()
-
-            if frame_count < 3:
-                _log(f"[stt] frame {frame_count}: type={msg.get('type')} keys={list(msg.keys())} text={repr(msg.get('text'))} bytes_len={len(msg['bytes']) if msg.get('bytes') else 0}")
-                frame_count += 1
 
             if msg["type"] == "websocket.disconnect":
                 break
@@ -212,11 +199,8 @@ async def transcribe(ws: WebSocket) -> None:
                 t0 = time.perf_counter()
 
     except WebSocketDisconnect:
-        _log("[stt] Client disconnected")
+        pass
     except Exception as exc:
-        import traceback
         _log(f"[stt] Transcribe error ({type(exc).__name__}): {exc}")
-        traceback.print_exc()
     finally:
-        _log("[stt] Cleaning up stream")
         del stream

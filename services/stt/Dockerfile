@@ -18,7 +18,6 @@ snapshot_download( \
 print('STT model cached')"
 
 COPY app.py .
-# Cache bust: 2026-04-13
 
 ENV PORT=8080
 ENV MODELS_DIR=/app/models

@@ -130,8 +130,13 @@ async def transcribe(ws: WebSocket) -> None:
     last_text = ""
 
     try:
+        frame_count = 0
         while True:
             msg = await ws.receive()
+
+            if frame_count < 3:
+                print(f"[stt] frame {frame_count}: type={msg.get('type')} keys={list(msg.keys())} text={repr(msg.get('text'))} bytes_len={len(msg['bytes']) if msg.get('bytes') else 0}")
+                frame_count += 1
 
             if msg["type"] == "websocket.disconnect":
                 break

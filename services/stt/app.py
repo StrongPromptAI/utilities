@@ -123,10 +123,16 @@ async def transcribe(ws: WebSocket) -> None:
         await ws.close(code=1013, reason="STT model loading")
         return
 
+    print(f"[stt] About to accept WebSocket, _stt_ready={_stt_ready}, _stt={type(_stt)}")
     await ws.accept()
     print(f"[stt] WebSocket accepted, creating stream...")
-    stream = _stt.create_stream()
-    print(f"[stt] Stream created, entering receive loop")
+    try:
+        stream = _stt.create_stream()
+    except Exception as exc:
+        print(f"[stt] create_stream FAILED: {type(exc).__name__}: {exc}")
+        await ws.close(code=1011, reason="Stream creation failed")
+        return
+    print(f"[stt] Stream created OK, entering receive loop")
     segment = 0
     t0 = time.perf_counter()
     last_text = ""

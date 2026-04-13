@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0f172a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <title>Status Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 1.5rem;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    h1 { font-size: 1.25rem; font-weight: 600; }
+    .meta {
+      font-size: 0.75rem;
+      color: #94a3b8;
+    }
+    .overall {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 1rem;
+      border-radius: 0.75rem;
+      margin-bottom: 1.5rem;
+      font-weight: 600;
+      font-size: 1.1rem;
+    }
+    .overall.ok { background: #14532d; color: #4ade80; }
+    .overall.fail { background: #7f1d1d; color: #f87171; }
+    .overall.loading { background: #1e293b; color: #94a3b8; }
+    .dot {
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot.ok { background: #4ade80; }
+    .dot.fail { background: #f87171; }
+    .dot.loading { background: #94a3b8; }
+    .tests {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .test-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.75rem 1rem;
+      border-radius: 0.5rem;
+      background: #1e293b;
+    }
+    .test-card .left {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .test-name { font-size: 0.9rem; }
+    .latency {
+      font-size: 0.75rem;
+      color: #94a3b8;
+      font-variant-numeric: tabular-nums;
+    }
+    .badge {
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 0.2rem 0.5rem;
+      border-radius: 0.25rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .badge.pass { background: #14532d; color: #4ade80; }
+    .badge.fail { background: #7f1d1d; color: #f87171; }
+    .footer {
+      margin-top: 2rem;
+      font-size: 0.7rem;
+      color: #475569;
+      text-align: center;
+    }
+    .error-msg {
+      padding: 1rem;
+      background: #1e293b;
+      border-radius: 0.75rem;
+      color: #94a3b8;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Status Dashboard</h1>
+    <div class="meta" id="timestamps"></div>
+  </header>
+  <div id="overall" class="overall loading">
+    <div class="dot loading"></div>
+    <span>Loading...</span>
+  </div>
+  <div id="tests" class="tests"></div>
+  <div class="footer" id="footer">Refreshes every 60s</div>
+
+  <script>
+    async function fetchStatus() {
+      const overall = document.getElementById('overall');
+      const testsEl = document.getElementById('tests');
+      const tsEl = document.getElementById('timestamps');
+
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        if (data.error) {
+          overall.className = 'overall loading';
+          overall.innerHTML = '<div class="dot loading"></div><span>No data — waiting for first smoke run</span>';
+          testsEl.innerHTML = '';
+          tsEl.textContent = '';
+          return;
+        }
+
+        // Overall banner
+        const cls = data.ok ? 'ok' : 'fail';
+        const label = data.ok
+          ? `All ${data.tests_total} tests passing`
+          : `${data.tests_total - data.tests_passed}/${data.tests_total} tests failing`;
+        overall.className = `overall ${cls}`;
+        overall.innerHTML = `<div class="dot ${cls}"></div><span>${data.project} — ${label}</span>`;
+
+        // Timestamps
+        const parts = [];
+        if (data.last_run) {
+          const d = new Date(data.last_run);
+          parts.push(`Last: ${d.toLocaleTimeString()}`);
+        }
+        if (data.next_run) {
+          const d = new Date(data.next_run);
+          parts.push(`Next: ${d.toLocaleTimeString()}`);
+        }
+        tsEl.textContent = parts.join(' · ');
+
+        // Test cards
+        testsEl.innerHTML = data.tests.map(t => `
+          <div class="test-card">
+            <div class="left">
+              <div class="dot ${t.status === 'pass' ? 'ok' : 'fail'}"></div>
+              <span class="test-name">${esc(t.name)}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.75rem">
+              <span class="latency">${t.latency_ms}ms</span>
+              <span class="badge ${t.status}">${t.status}</span>
+            </div>
+          </div>
+        `).join('');
+
+      } catch (e) {
+        overall.className = 'overall loading';
+        overall.innerHTML = '<div class="dot loading"></div><span>Unable to reach API</span>';
+        testsEl.innerHTML = '';
+      }
+    }
+
+    function esc(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    fetchStatus();
+    setInterval(fetchStatus, 60000);
+  </script>
+</body>
+</html>

@@ -11,8 +11,18 @@ Endpoints:
 
 import os
 import re
+import sys
 import time
 import asyncio
+import faulthandler
+
+faulthandler.enable()
+
+
+def _log(msg: str) -> None:
+    """Write to stderr (unbuffered) for reliable Railway logging."""
+    sys.stderr.write(f"{msg}\n")
+    sys.stderr.flush()
 from pathlib import Path
 
 import json as _json
@@ -45,7 +55,7 @@ def _load_stt() -> None:
         stt_dir = MODELS_DIR / "streaming-zipformer-en-2023-06-21"
 
         if not stt_dir.exists() or not (stt_dir / "encoder-epoch-99-avg-1.int8.onnx").exists():
-            print("[stt] Downloading streaming Zipformer model...")
+            _log("[stt] Downloading streaming Zipformer model...")
             snapshot_download(
                 repo_id="csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-21",
                 local_dir=str(stt_dir),
@@ -58,7 +68,7 @@ def _load_stt() -> None:
                 local_dir_use_symlinks=False,
             )
 
-        print("[stt] Loading sherpa-onnx OnlineRecognizer...")
+        _log("[stt] Loading sherpa-onnx OnlineRecognizer...")
         _stt = sherpa_onnx.OnlineRecognizer.from_transducer(
             encoder=str(stt_dir / "encoder-epoch-99-avg-1.int8.onnx"),
             decoder=str(stt_dir / "decoder-epoch-99-avg-1.int8.onnx"),
@@ -74,11 +84,11 @@ def _load_stt() -> None:
             decoding_method="greedy_search",
         )
         _stt_ready = True
-        print("[stt] Ready")
+        _log("[stt] Ready")
 
     except Exception as exc:
         _load_error = str(exc)
-        print(f"[stt] Load failed: {exc}")
+        _log(f"[stt] Load failed: {exc}")
 
 
 @app.on_event("startup")
@@ -123,16 +133,16 @@ async def transcribe(ws: WebSocket) -> None:
         await ws.close(code=1013, reason="STT model loading")
         return
 
-    print(f"[stt] About to accept WebSocket, _stt_ready={_stt_ready}, _stt={type(_stt)}")
+    _log(f"[stt] About to accept WebSocket, _stt_ready={_stt_ready}, _stt={type(_stt)}")
     await ws.accept()
-    print(f"[stt] WebSocket accepted, creating stream...")
+    _log(f"[stt] WebSocket accepted, creating stream...")
     try:
         stream = _stt.create_stream()
     except Exception as exc:
-        print(f"[stt] create_stream FAILED: {type(exc).__name__}: {exc}")
+        _log(f"[stt] create_stream FAILED: {type(exc).__name__}: {exc}")
         await ws.close(code=1011, reason="Stream creation failed")
         return
-    print(f"[stt] Stream created OK, entering receive loop")
+    _log(f"[stt] Stream created OK, entering receive loop")
     segment = 0
     t0 = time.perf_counter()
     last_text = ""
@@ -143,7 +153,7 @@ async def transcribe(ws: WebSocket) -> None:
             msg = await ws.receive()
 
             if frame_count < 3:
-                print(f"[stt] frame {frame_count}: type={msg.get('type')} keys={list(msg.keys())} text={repr(msg.get('text'))} bytes_len={len(msg['bytes']) if msg.get('bytes') else 0}")
+                _log(f"[stt] frame {frame_count}: type={msg.get('type')} keys={list(msg.keys())} text={repr(msg.get('text'))} bytes_len={len(msg['bytes']) if msg.get('bytes') else 0}")
                 frame_count += 1
 
             if msg["type"] == "websocket.disconnect":
@@ -202,11 +212,11 @@ async def transcribe(ws: WebSocket) -> None:
                 t0 = time.perf_counter()
 
     except WebSocketDisconnect:
-        print("[stt] Client disconnected")
+        _log("[stt] Client disconnected")
     except Exception as exc:
         import traceback
-        print(f"[stt] Transcribe error ({type(exc).__name__}): {exc}")
+        _log(f"[stt] Transcribe error ({type(exc).__name__}): {exc}")
         traceback.print_exc()
     finally:
-        print("[stt] Cleaning up stream")
+        _log("[stt] Cleaning up stream")
         del stream

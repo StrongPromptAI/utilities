@@ -180,20 +180,26 @@ def _email_form(client_id, redirect_uri, state, response_type, scope, error=""):
 </form></body></html>"""
 
 
-def _otp_form(session_id, error=""):
+def _otp_form(session_id, error="", restart_url=""):
     err = f'<p class="err">{error}</p>' if error else ""
+    restart = (
+        f'<p style="margin-top:16px;text-align:center">'
+        f'<a href="{restart_url}">Start over</a></p>'
+        if restart_url else ""
+    )
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Enter Code — OXP</title><style>{_CSS}
 input[name=code]{{font-size:28px;text-align:center;letter-spacing:10px}}
+a{{color:#2563eb}}
 </style></head><body>
 <h2>Enter your code</h2>
-<p>Check your email for the 6-digit sign-in code.</p>{err}
+<p>Check your email for the 6-digit sign-in code. It expires in 10 minutes.</p>{err}
 <form method="post" action="/otp">
   <input type="hidden" name="session_id" value="{session_id}">
   <input type="text" name="code" maxlength="6" placeholder="000000"
          required autofocus inputmode="numeric" pattern="[0-9]{{6}}">
   <button type="submit">Verify</button>
-</form></body></html>"""
+</form>{restart}</body></html>"""
 
 
 # ── Authorize ─────────────────────────────────────────────────────────────────
@@ -279,12 +285,28 @@ async def otp_post(
 ):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM oidc_sessions WHERE session_id=$1 AND expires_at > now()",
+            "SELECT * FROM oidc_sessions WHERE session_id=$1",
             session_id,
         )
-        if not row or row["otp"] != code.strip():
+        if not row:
+            # Session gone entirely — send back to a generic restart
             return HTMLResponse(
-                _otp_form(session_id, "Invalid or expired code — try again."),
+                _otp_form(session_id, "Session not found. Please start over.", restart_url="/"),
+                status_code=400,
+            )
+        if row["expires_at"].replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+            restart = (
+                f"/authorize?client_id={row['client_id']}"
+                f"&redirect_uri={row['redirect_uri']}"
+                f"&state={row['state'] or ''}&response_type=code"
+            )
+            return HTMLResponse(
+                _otp_form(session_id, "Code expired — request a new one.", restart_url=restart),
+                status_code=400,
+            )
+        if row["otp"] != code.strip():
+            return HTMLResponse(
+                _otp_form(session_id, "Incorrect code — try again."),
                 status_code=400,
             )
 

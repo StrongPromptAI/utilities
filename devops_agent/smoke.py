@@ -50,6 +50,7 @@ def _run_single_test(test: SmokeTest) -> SmokeTestResult:
                 "User-Agent": "devops-agent-smoke/1.0",
                 **test.headers,
             },
+            content=test.body.encode() if test.body else None,
             timeout=test.timeout,
             follow_redirects=True,
         )
@@ -95,6 +96,16 @@ def _run_single_test(test: SmokeTest) -> SmokeTestResult:
             errors.append(
                 f"Header {test.expected_header}: {header_val!r} missing {test.expected_header_contains!r}"
             )
+
+    # Check reject_header (negative assertion — header must NOT contain value)
+    if test.reject_header:
+        header_val = resp.headers.get(test.reject_header)
+        if header_val is not None and test.reject_header_contains:
+            if test.reject_header_contains in header_val:
+                errors.append(
+                    f"Header {test.reject_header} must NOT contain "
+                    f"{test.reject_header_contains!r}, but got: {header_val!r}"
+                )
 
     # Check JSON path
     if test.json_path is not None:

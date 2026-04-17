@@ -88,7 +88,10 @@ class SmokeTest(BaseModel):
     json_value: str | None = None
     expected_header: str | None = None
     expected_header_contains: str | None = None
+    reject_header: str | None = None
+    reject_header_contains: str | None = None
     headers: dict[str, str] = {}
+    body: str | None = None
     timeout: float = 10.0
 
 
@@ -110,3 +113,101 @@ class SmokeResult(OperationResult):
     tests_failed: int = 0
     tests_total: int = 0
     test_results: list[SmokeTestResult] = []
+
+
+# --- Regression test models ---
+
+
+class RegressionTestResult(BaseModel):
+    """Result of a single regression test."""
+
+    name: str
+    passed: bool
+    latency_ms: float | None = None
+    error: str | None = None
+    staging_only: bool = False
+
+
+class RegressionResult(OperationResult):
+    """Result from running regression tests for a project."""
+
+    project: str = ""
+    environment: str = "production"
+    tests_passed: int = 0
+    tests_failed: int = 0
+    tests_skipped: int = 0
+    tests_total: int = 0
+    test_results: list[RegressionTestResult] = []
+
+
+# --- Phase 4: Weekly Reliability Report models ---
+
+
+class ReportWindow(BaseModel):
+    """Explicit reporting period with UTC timestamps."""
+
+    start: datetime
+    end: datetime
+    days: int
+
+
+class ProjectHealthSnapshot(BaseModel):
+    """Health status of a single project at report time."""
+
+    project: str
+    tier: int = 1
+    health_ok: bool | None = None  # None = not checked (--no-live-checks)
+    health_latency_ms: float | None = None
+    health_error: str | None = None  # "unreachable", "timeout", etc.
+    smoke_passed: int = 0
+    smoke_failed: int = 0
+    smoke_total: int = 0
+    deployment_count: int = 0
+    current_status: str = "UNKNOWN"
+
+
+class AuditSummary(BaseModel):
+    """Aggregated audit trail data for the reporting period."""
+
+    total_operations: int = 0
+    validate_deploy_count: int = 0
+    rollback_count: int = 0
+    rollback_succeeded: int = 0
+    rollback_failed: int = 0
+    smoke_runs: int = 0
+    smoke_failures: int = 0
+    health_checks: int = 0
+    health_failures: int = 0
+    other_operations: int = 0
+    malformed_lines: int = 0
+
+
+class ReportDiagnostics(BaseModel):
+    """Report generation metadata."""
+
+    projects_checked: int = 0
+    projects_unreachable: int = 0
+    projects_timed_out: int = 0
+    data_sources: list[str] = []
+    warnings: list[str] = []
+    generation_time_ms: float = 0
+
+
+class ReportData(BaseModel):
+    """All data needed to generate the weekly report."""
+
+    window: ReportWindow
+    project_snapshots: list[ProjectHealthSnapshot] = []
+    audit_summary: AuditSummary = AuditSummary()
+    diagnostics: ReportDiagnostics = ReportDiagnostics()
+    audit_events: list[dict] = []
+
+
+class ReportResult(OperationResult):
+    """Result from generating the weekly report."""
+
+    report_markdown: str = ""
+    report_html: str = ""
+    period_days: int = 7
+    diagnostics: ReportDiagnostics = ReportDiagnostics()
+    email_sent: bool = False

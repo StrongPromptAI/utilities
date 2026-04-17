@@ -5,8 +5,9 @@ Shared service deployed per-project for PHI isolation.
 Source: utilities/services/embed/
 
 Endpoints:
-  GET  /health   — 200 ready, 503 loading, 500 error
-  POST /embed    — TEI-compatible: {"inputs": [str,...]} -> [[float,...],...]
+  GET  /health              — 200 ready, 503 loading, 500 error
+  POST /embed               — TEI-compatible: {"inputs": [str,...]} -> [[float,...],...]
+  POST /v1/embeddings       — OpenAI-compatible (for OpenWebUI RAG)
 
 No request body logging — inputs may contain patient text (PHI).
 """
@@ -61,6 +62,11 @@ class EmbedRequest(BaseModel):
     inputs: Union[str, list[str]]
 
 
+class OpenAIEmbedRequest(BaseModel):
+    input: Union[str, list[str]]
+    model: str = "nomic-embed-text-v1.5"
+
+
 @app.post("/embed")
 async def embed(req: EmbedRequest):
     """TEI-compatible batch embedding."""
@@ -79,3 +85,33 @@ async def embed(req: EmbedRequest):
         return result.tolist()
     except Exception as exc:
         raise HTTPException(500, str(exc))
+
+
+@app.post("/v1/embeddings")
+async def openai_embeddings(req: OpenAIEmbedRequest):
+    """OpenAI-compatible embeddings endpoint for OpenWebUI RAG."""
+    if not _ready:
+        raise HTTPException(503, "Embedding model loading")
+
+    texts = [req.input] if isinstance(req.input, str) else req.input
+    if not texts:
+        raise HTTPException(400, "input is required")
+
+    from nomic_embed import _embed
+
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: _embed(texts))
+        vectors = result.tolist()
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+    return {
+        "object": "list",
+        "model": req.model,
+        "data": [
+            {"object": "embedding", "index": i, "embedding": vec}
+            for i, vec in enumerate(vectors)
+        ],
+        "usage": {"prompt_tokens": 0, "total_tokens": 0},
+    }

@@ -40,8 +40,12 @@ cat > "$CONFIG_DIR/config.php" <<PHP
 );
 PHP
 
-chown www-data:www-data "$CONFIG_DIR/config.php"
+# Directory must be writable by www-data so occ upgrade can write to it.
+# mkdir -p runs as root; without chown the entrypoint's occ calls fail with
+# "Cannot write into config directory".
+chown -R www-data:www-data "$CONFIG_DIR"
+chmod 750 "$CONFIG_DIR"
 chmod 640 "$CONFIG_DIR/config.php"
-echo "[wrapper] config.php + version.php written"
+echo "[wrapper] config.php + version.php written, config dir owned by www-data"
 
 exec /entrypoint.sh "$@"

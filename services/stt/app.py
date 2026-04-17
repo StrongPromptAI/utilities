@@ -11,14 +11,18 @@ Endpoints:
 
 import os
 import re
+import sys
 import time
 import asyncio
+import faulthandler
 from pathlib import Path
 
 import json as _json
 
 import numpy as np
 from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
+
+faulthandler.enable()
 
 app = FastAPI(title="stt")
 
@@ -33,6 +37,12 @@ _load_error: str | None = None
 _stt = None
 
 
+def _log(msg: str) -> None:
+    """Write to stderr (unbuffered) for reliable Railway logging."""
+    sys.stderr.write(f"{msg}\n")
+    sys.stderr.flush()
+
+
 def _load_stt() -> None:
     global _stt_ready, _stt, _load_error
 
@@ -45,7 +55,7 @@ def _load_stt() -> None:
         stt_dir = MODELS_DIR / "streaming-zipformer-en-2023-06-21"
 
         if not stt_dir.exists() or not (stt_dir / "encoder-epoch-99-avg-1.int8.onnx").exists():
-            print("[stt] Downloading streaming Zipformer model...")
+            _log("[stt] Downloading streaming Zipformer model...")
             snapshot_download(
                 repo_id="csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-21",
                 local_dir=str(stt_dir),
@@ -58,7 +68,7 @@ def _load_stt() -> None:
                 local_dir_use_symlinks=False,
             )
 
-        print("[stt] Loading sherpa-onnx OnlineRecognizer...")
+        _log("[stt] Loading sherpa-onnx OnlineRecognizer...")
         _stt = sherpa_onnx.OnlineRecognizer.from_transducer(
             encoder=str(stt_dir / "encoder-epoch-99-avg-1.int8.onnx"),
             decoder=str(stt_dir / "decoder-epoch-99-avg-1.int8.onnx"),
@@ -74,11 +84,11 @@ def _load_stt() -> None:
             decoding_method="greedy_search",
         )
         _stt_ready = True
-        print("[stt] Ready")
+        _log("[stt] Ready")
 
     except Exception as exc:
         _load_error = str(exc)
-        print(f"[stt] Load failed: {exc}")
+        _log(f"[stt] Load failed: {exc}")
 
 
 @app.on_event("startup")
@@ -191,6 +201,6 @@ async def transcribe(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        print(f"[stt] Transcribe error ({type(exc).__name__}): {exc}")
+        _log(f"[stt] Transcribe error ({type(exc).__name__}): {exc}")
     finally:
         del stream

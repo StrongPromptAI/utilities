@@ -5,6 +5,11 @@ import sys
 import click
 from pathlib import Path
 
+
+def _flush():
+    """Force stdout flush — needed when output is piped to a file (background commands)."""
+    sys.stdout.flush()
+
 from scripts.kb_core import (
     semantic_search,
     list_org,
@@ -1422,6 +1427,589 @@ def transcribe(audio_file, org_id, call_date, project_id, contact_ids, summary, 
     except Exception as e:
         click.secho(f"Error: {e}", fg="red")
         sys.exit(1)
+
+
+# --- Ingest: source material analysis (separate from stakeholder pipeline) ---
+
+@click.group("ingest")
+def ingest_group():
+    """Source material analysis — load, classify, and mine raw transcriptions."""
+    pass
+
+cli.add_command(ingest_group)
+
+
+@ingest_group.command("load")
+@click.argument("path")
+@click.option("--type", "source_type", required=True, help="Source type: cs_call, interview, etc.")
+@click.option("--org", required=True, help="Organization name")
+@click.option("--project", required=True, help="Project name")
+def ingest_load(path, source_type, org, project):
+    """Bulk-load transcription files (.dote or .json) from a directory or single file."""
+    import json as json_mod
+    import re
+    from datetime import date as date_cls
+    from scripts.kb_core.crud.org import get_org
+    from scripts.kb_core.crud.projects import get_project
+    from scripts.kb_core.ingest.crud import (
+        create_ingest_source, get_ingest_source_by_file, insert_ingest_chunks,
+    )
+
+    org_row = get_org(org)
+    if not org_row:
+        click.secho(f"Org '{org}' not found. Use kb list-org to see options.", fg="red")
+        sys.exit(1)
+    project_row = get_project(project)
+    if not project_row:
+        click.secho(f"Project '{project}' not found.", fg="red")
+        sys.exit(1)
+
+    p = Path(path)
+    # Support both .json and .dote files
+    files = sorted(list(p.glob("*.json")) + list(p.glob("*.dote"))) if p.is_dir() else [p]
+    if not files:
+        click.secho(f"No .json or .dote files found in {path}", fg="red")
+        sys.exit(1)
+
+    click.secho(f"Loading {len(files)} {source_type} files for {org} / {project}", bold=True)
+
+    loaded, skipped, errors = 0, 0, 0
+    total_chunks = 0
+
+    for f in files:
+        # Dedup check
+        existing = get_ingest_source_by_file(str(f))
+        if existing:
+            skipped += 1
+            continue
+
+        try:
+            data = json_mod.loads(f.read_text())
+
+            # Detect format: .dote ({lines: [...]}) vs .json ([...])
+            if isinstance(data, dict) and "lines" in data:
+                # .dote format: {lines: [{speakerDesignation, text, startTime, endTime}]}
+                segments = data["lines"]
+                is_dote = True
+            elif isinstance(data, list):
+                segments = data
+                is_dote = False
+            else:
+                segments = [data]
+                is_dote = False
+
+            # Parse agent name from filename: [Agent Name]_ext-...
+            agent_name = None
+            name_match = re.match(r'\[([^\]]+)\]', f.name)
+            if name_match:
+                agent_name = name_match.group(1)
+
+            # Parse date from filename: ..._YYYYMMDD... pattern
+            source_date = None
+            date_match = re.search(r'_(\d{4})(\d{2})(\d{2})', f.name)
+            if date_match:
+                try:
+                    source_date = date_cls(
+                        int(date_match.group(1)),
+                        int(date_match.group(2)),
+                        int(date_match.group(3)),
+                    )
+                except ValueError:
+                    pass
+
+            # Build raw_text and chunks
+            # .dote: speakerDesignation, text, startTime, endTime
+            # .json: text, timestamp, (optional) speaker
+            raw_parts = []
+            chunks = []
+            for seg in segments:
+                text = seg.get("text", "").strip()
+                if not text:
+                    continue
+
+                # Speaker attribution
+                speaker = seg.get("speakerDesignation") or seg.get("speaker") or ""
+                if speaker:
+                    raw_parts.append(f"[{speaker}] {text}")
+                else:
+                    raw_parts.append(text)
+
+                # Timestamps: .dote uses startTime/endTime ("HH:MM:SS,mmm"), .json uses timestamp ("MM:SS-MM:SS")
+                ts_start, ts_end = None, None
+                if is_dote:
+                    ts_start = seg.get("startTime", "")
+                    ts_end = seg.get("endTime", "")
+                else:
+                    ts = seg.get("timestamp", "")
+                    if "-" in ts:
+                        parts = ts.split("-", 1)
+                        ts_start, ts_end = parts[0].strip(), parts[1].strip()
+                chunks.append({"text": text, "timestamp_start": ts_start, "timestamp_end": ts_end})
+
+            raw_text = "\n".join(raw_parts)
+
+            # Create source record
+            source_id = create_ingest_source(
+                org_id=org_row["id"],
+                project_id=project_row["id"],
+                source_type=source_type,
+                source_file=str(f),
+                source_date=source_date,
+                agent_name=agent_name,
+                raw_text=raw_text,
+                segment_count=len(segments),
+            )
+
+            # Embed and insert chunks
+            count = insert_ingest_chunks(source_id, chunks, show_progress=False)
+            total_chunks += count
+            loaded += 1
+            click.echo(f"  [{loaded}] {f.name}: {count} chunks")
+
+        except Exception as e:
+            click.secho(f"  ERROR {f.name}: {e}", fg="red")
+            errors += 1
+
+    click.secho(
+        f"\nLoaded {loaded} files, {total_chunks} chunks"
+        + (f", skipped {skipped} duplicates" if skipped else "")
+        + (f", {errors} errors" if errors else ""),
+        fg="green" if not errors else "yellow",
+        bold=True,
+    )
+
+
+@ingest_group.command("classify")
+@click.option("--project", required=True, help="Project name")
+@click.option("--type", "source_type", help="Filter by source type")
+@click.option("--limit", type=int, help="Classify only N sources")
+@click.option("--reclassify", is_flag=True, help="Re-classify already-classified sources")
+def ingest_classify(project, source_type, limit, reclassify):
+    """Classify ingest sources via LM Studio (equipment vs tracking vs insurance...)."""
+    from scripts.kb_core.crud.projects import get_project
+    from scripts.kb_core.ingest.classify import classify_batch
+
+    project_row = get_project(project)
+    if not project_row:
+        click.secho(f"Project '{project}' not found.", fg="red")
+        sys.exit(1)
+
+    click.secho(f"Classifying sources for {project}...", bold=True)
+    results = classify_batch(
+        project_id=project_row["id"],
+        source_type=source_type,
+        limit=limit,
+        reclassify=reclassify,
+    )
+
+    in_scope = sum(1 for r in results if r.get("in_scope"))
+    out_scope = sum(1 for r in results if not r.get("in_scope") and "error" not in r)
+    err = sum(1 for r in results if "error" in r)
+    click.secho(
+        f"\nClassified {len(results)}: {in_scope} in-scope, {out_scope} out-of-scope"
+        + (f", {err} errors" if err else ""),
+        fg="green", bold=True,
+    )
+
+
+@ingest_group.command("stats")
+@click.option("--project", required=True, help="Project name")
+@click.option("--type", "source_type", help="Filter by source type")
+def ingest_stats(project, source_type):
+    """Show category breakdown for ingest sources."""
+    from scripts.kb_core.crud.projects import get_project
+    from scripts.kb_core.ingest.crud import ingest_stats as get_stats
+
+    project_row = get_project(project)
+    if not project_row:
+        click.secho(f"Project '{project}' not found.", fg="red")
+        sys.exit(1)
+
+    stats = get_stats(project_id=project_row["id"], source_type=source_type)
+
+    click.secho(f"\nIngest Stats ({project})", bold=True)
+    click.secho(f"Total sources: {stats['total']}\n")
+
+    if stats["by_type"]:
+        click.secho("By source type:", underline=True)
+        for row in stats["by_type"]:
+            click.echo(f"  {row['source_type']}: {row['cnt']}")
+        click.echo()
+
+    if stats["categories"]:
+        click.secho("By category:", underline=True)
+        in_total, out_total, unclassified = 0, 0, 0
+        for row in stats["categories"]:
+            cat = row["category"] or "unclassified"
+            scope = "IN-SCOPE" if row["in_scope"] else "out"
+            if row["in_scope"]:
+                in_total += row["cnt"]
+            elif row["category"] is None:
+                unclassified += row["cnt"]
+            else:
+                out_total += row["cnt"]
+            click.echo(f"  {cat}: {row['cnt']} ({scope})")
+        click.echo()
+        click.secho(f"In-scope: {in_total} | Out-of-scope: {out_total} | Unclassified: {unclassified}")
+    else:
+        click.secho("No classifications yet. Run: kb ingest classify --project " + project, dim=True)
+
+
+@ingest_group.command("list")
+@click.option("--project", required=True, help="Project name")
+@click.option("--type", "source_type", help="Filter by source type")
+@click.option("--scope", type=click.Choice(["in", "out", "unclassified"]), help="Filter by scope")
+@click.option("--category", help="Filter by category")
+@click.option("--limit", default=50, help="Max results (default: 50)")
+def ingest_list(project, source_type, scope, category, limit):
+    """List ingest sources with filters."""
+    from scripts.kb_core.crud.projects import get_project
+    from scripts.kb_core.ingest.crud import list_ingest_sources
+
+    project_row = get_project(project)
+    if not project_row:
+        click.secho(f"Project '{project}' not found.", fg="red")
+        sys.exit(1)
+
+    sources = list_ingest_sources(
+        project_id=project_row["id"],
+        source_type=source_type,
+        scope=scope,
+        category=category,
+        limit=limit,
+    )
+
+    if not sources:
+        click.secho("No sources found matching filters.", fg="yellow")
+        return
+
+    click.secho(f"\n{'ID':>5}  {'Type':<10} {'Agent':<20} {'Date':<12} {'Category':<12} {'Scope':<6} {'Segs':>4}  Preview", bold=True)
+    click.secho("-" * 100)
+    for s in sources:
+        scope_label = "IN" if s["in_scope"] else ("OUT" if s["in_scope"] is not None else "?")
+        cat = s["category"] or "-"
+        agent = (s["agent_name"] or "-")[:20]
+        date_str = str(s["source_date"]) if s["source_date"] else "-"
+        preview = (s["raw_text"] or "")[:50].replace("\n", " ")
+        click.echo(f"{s['id']:>5}  {s['source_type']:<10} {agent:<20} {date_str:<12} {cat:<12} {scope_label:<6} {s['segment_count'] or 0:>4}  {preview}")
+
+
+@ingest_group.command("search")
+@click.argument("query")
+@click.option("--project", required=True, help="Project name")
+@click.option("--type", "source_type", help="Filter by source type")
+@click.option("--scope", type=click.Choice(["in", "out"]), help="Filter by scope")
+@click.option("--limit", "-l", default=10, help="Max results (default: 10)")
+def ingest_search(query, project, source_type, scope, limit):
+    """Semantic search across ingest chunks."""
+    from scripts.kb_core.crud.projects import get_project
+    from scripts.kb_core.embeddings import get_embedding
+    from scripts.kb_core.db import get_db
+
+    project_row = get_project(project)
+    if not project_row:
+        click.secho(f"Project '{project}' not found.", fg="red")
+        sys.exit(1)
+
+    query_embedding = get_embedding(query)
+
+    scope_clause = ""
+    params: list = [query_embedding, project_row["id"]]
+    if scope == "in":
+        scope_clause = "AND s.in_scope = true"
+    elif scope == "out":
+        scope_clause = "AND s.in_scope = false"
+    if source_type:
+        scope_clause += " AND s.source_type = %s"
+        params.append(source_type)
+
+    sql = f"""
+        SELECT ic.text, ic.timestamp_start, ic.timestamp_end,
+               s.id as source_id, s.agent_name, s.source_date, s.category, s.source_type,
+               1 - (ic.embedding <=> %s::vector) as similarity
+        FROM ingest_chunks ic
+        JOIN ingest_sources s ON ic.ingest_source_id = s.id
+        WHERE s.project_id = %s {scope_clause}
+        ORDER BY ic.embedding <=> %s::vector
+        LIMIT %s
+    """
+    params.extend([query_embedding, limit])
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            results = cur.fetchall()
+
+    if not results:
+        click.secho("No results found.", fg="yellow")
+        return
+
+    for r in results:
+        sim = f"{r['similarity']:.3f}"
+        ts = f"[{r['timestamp_start']}-{r['timestamp_end']}]" if r["timestamp_start"] else ""
+        cat = f" ({r['category']})" if r["category"] else ""
+        click.secho(f"\n  [{sim}] source {r['source_id']} — {r['agent_name'] or '?'} {r['source_date'] or ''}{cat} {ts}", fg="cyan")
+        click.echo(f"  {r['text'][:200]}")
+
+
+@ingest_group.command("questions")
+@click.option("--project", required=True, help="Project name")
+@click.option("--type", "source_type", help="Filter by source type")
+@click.option("--min-freq", default=2, help="Minimum sources per question cluster (default: 2)")
+@click.option("--threshold", default=0.35, type=float, help="Clustering distance threshold (default: 0.35, lower=tighter)")
+def ingest_questions(project, source_type, min_freq, threshold):
+    """Extract equipment question taxonomy from in-scope sources."""
+    from scripts.kb_core.crud.projects import get_project
+    from scripts.kb_core.ingest.questions import extract_question_taxonomy
+
+    project_row = get_project(project)
+    if not project_row:
+        click.secho(f"Project '{project}' not found.", fg="red")
+        sys.exit(1)
+
+    results = extract_question_taxonomy(
+        project_id=project_row["id"],
+        source_type=source_type,
+        min_freq=min_freq,
+        threshold=threshold,
+    )
+
+    if not results:
+        click.secho("No question clusters found. Need more in-scope sources?", fg="yellow")
+        return
+
+    click.secho(f"\nEquipment Question Taxonomy ({project})", bold=True)
+    click.secho("=" * 50)
+    for i, r in enumerate(results, 1):
+        click.secho(f'\n{i}. "{r["question"]}" ({r["frequency"]} sources, {r["chunk_count"]} chunks)', fg="green")
+        for ex in r["examples"]:
+            click.echo(f"   - source {ex['source_id']} ({ex['agent_name'] or '?'}, {ex['source_date'] or '?'})")
+
+
+@ingest_group.command("faq")
+@click.option("--project", required=True, help="Project name")
+@click.option("--min-freq", default=2, help="Minimum Q&A pairs per FAQ entry (default: 2)")
+@click.option("--export", "export_path", help="Export FAQ as JSON to this path")
+def ingest_faq(project, min_freq, export_path):
+    """Assemble FAQ from extracted Q&A pairs (patient + family only)."""
+    from scripts.kb_core.crud.projects import get_project
+    from scripts.kb_core.ingest.faq import assemble_faq
+
+    project_row = get_project(project)
+    if not project_row:
+        click.secho(f"Project '{project}' not found.", fg="red")
+        sys.exit(1)
+
+    faq = assemble_faq(
+        project_id=project_row["id"],
+        min_freq=min_freq,
+        export_path=export_path,
+    )
+
+    if not faq:
+        click.secho("No FAQ entries assembled.", fg="yellow")
+        return
+
+    click.secho(f"\nFAQ: {len(faq)} entries from {sum(f['frequency'] for f in faq)} Q&A pairs\n", bold=True)
+    for f in faq:
+        click.secho(f"{f['rank']}. \"{f['question']}\" ({f['frequency']} pairs, {f['unique_calls']} calls, conf={f['confidence']:.0%})", fg="green")
+        click.echo(f"   {f['answer']}")
+        click.secho(f"   Topics: {', '.join(f['topics'])}", dim=True)
+    _flush()
+
+
+@ingest_group.command("extract-qa")
+@click.option("--project", required=True, help="Project name")
+@click.option("--limit", type=int, help="Process only N sources")
+@click.option("--category", help="Filter by category")
+def ingest_extract_qa(project, limit, category):
+    """Extract classification evidence + Q&A pairs from transcripts."""
+    from scripts.kb_core.crud.projects import get_project
+    from scripts.kb_core.ingest.extract_qa import extract_qa_batch
+
+    project_row = get_project(project)
+    if not project_row:
+        click.secho(f"Project '{project}' not found.", fg="red")
+        sys.exit(1)
+
+    results = extract_qa_batch(
+        project_id=project_row["id"],
+        limit=limit,
+        category=category,
+    )
+
+    total_qa = sum(len(r.get("qa_pairs", [])) for r in results if "error" not in r)
+    errors = sum(1 for r in results if "error" in r)
+    click.secho(
+        f"\nDone: {len(results)} sources processed, {total_qa} Q&A pairs extracted"
+        + (f", {errors} errors" if errors else ""),
+        fg="green", bold=True,
+    )
+    _flush()
+
+
+@ingest_group.command("qa")
+@click.option("--project", required=True, help="Project name")
+@click.option("--category", help="Filter by category")
+@click.option("--topic", help="Filter by topic")
+@click.option("--unanswered", is_flag=True, help="Show only unanswered questions")
+@click.option("--source", "source_id", type=int, help="Show Q&A from a single source")
+@click.option("--limit", default=50, help="Max results (default: 50)")
+def ingest_qa_list(project, category, topic, unanswered, source_id, limit):
+    """List extracted Q&A pairs."""
+    from scripts.kb_core.crud.projects import get_project
+    from scripts.kb_core.db import get_db
+
+    project_row = get_project(project)
+    if not project_row:
+        click.secho(f"Project '{project}' not found.", fg="red")
+        sys.exit(1)
+
+    query = """
+        SELECT qa.*, s.agent_name, s.source_date
+        FROM ingest_qa qa
+        JOIN ingest_sources s ON qa.ingest_source_id = s.id
+        WHERE qa.project_id = %s
+    """
+    params = [project_row["id"]]
+    if category:
+        query += " AND qa.category = %s"
+        params.append(category)
+    if topic:
+        query += " AND qa.topic = %s"
+        params.append(topic)
+    if unanswered:
+        query += " AND qa.answered = false"
+    if source_id:
+        query += " AND qa.ingest_source_id = %s"
+        params.append(source_id)
+    query += " ORDER BY qa.id LIMIT %s"
+    params.append(limit)
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+    if not rows:
+        click.secho("No Q&A pairs found.", fg="yellow")
+        return
+
+    for r in rows:
+        answered = "answered" if r["answered"] else "UNANSWERED"
+        click.secho(f"\n[{r['topic']}] ({r['category']}, {answered}) — source {r['ingest_source_id']} ({r['agent_name']})", fg="cyan")
+        click.echo(f"  Q: {r['question']}")
+        click.echo(f"  A: {r['answer']}")
+        if r['question_verbatim']:
+            click.secho(f"  Verbatim Q: \"{r['question_verbatim']}\"", dim=True)
+
+
+@ingest_group.command("pretag")
+@click.option("--project", required=True, help="Project name")
+@click.option("--limit", type=int, help="Process only N sources")
+@click.option("--reprocess", is_flag=True, help="Reprocess already-tagged sources")
+def ingest_pretag(project, limit, reprocess):
+    """Phase 0: Speaker pre-tag (regex + LLM), PII scrub, and backend-required flag."""
+    from openai import OpenAI
+    from scripts.kb_core.crud.projects import get_project
+    from scripts.kb_core.ingest.pretag import pretag_and_scrub, classify_backend_required
+    from scripts.kb_core.db import get_db
+    from scripts.kb_core.config import LM_STUDIO_URL
+
+    project_row = get_project(project)
+    if not project_row:
+        click.secho(f"Project '{project}' not found.", fg="red")
+        sys.exit(1)
+
+    # Get sources — all or only untagged
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            if reprocess:
+                cur.execute(
+                    "SELECT id, raw_text, agent_name, category FROM ingest_sources WHERE project_id = %s ORDER BY id",
+                    (project_row["id"],),
+                )
+            else:
+                cur.execute(
+                    "SELECT id, raw_text, agent_name, category FROM ingest_sources WHERE project_id = %s AND tagged_text IS NULL ORDER BY id",
+                    (project_row["id"],),
+                )
+            sources = cur.fetchall()
+
+    if limit:
+        sources = sources[:limit]
+
+    if not sources:
+        click.secho("No sources to process.", fg="yellow")
+        return
+
+    client = OpenAI(base_url=LM_STUDIO_URL, api_key="not-needed")
+
+    click.secho(f"Phase 0: Pre-tagging {len(sources)} sources for {project}", bold=True)
+
+    # Step 1: Speaker tagging (regex + LLM refinement) + PII scrub
+    click.secho("\nStep 1: Speaker tagging (regex → LLM refinement → PII scrub)...", underline=True)
+    with get_db() as conn:
+        for i, src in enumerate(sources):
+            tagged = pretag_and_scrub(
+                src["raw_text"] or "", src["agent_name"] or "",
+                category=src.get("category"), client=client,
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE ingest_sources SET tagged_text = %s WHERE id = %s",
+                    (tagged, src["id"]),
+                )
+            click.echo(f"  [{i+1}/{len(sources)}] source {src['id']} ({src['agent_name']}): tagged")
+        conn.commit()
+    click.secho(f"  Tagged {len(sources)} sources", fg="green")
+
+    # Step 2: Backend-required classification (LLM, XML-structured)
+    click.secho("\nStep 2: Backend-required classification via LM Studio...", underline=True)
+
+    backend_true, backend_false, errors = 0, 0, 0
+    with get_db() as conn:
+        for i, src in enumerate(sources):
+            # Use tagged_text if available, fall back to raw_text
+            with conn.cursor() as cur:
+                cur.execute("SELECT tagged_text FROM ingest_sources WHERE id = %s", (src["id"],))
+                row = cur.fetchone()
+                text = row["tagged_text"] or src["raw_text"] or ""
+
+            result = classify_backend_required(
+                text, agent_name=src["agent_name"],
+                category=src.get("category"), client=client,
+            )
+
+            if result.get("backend_required") is None:
+                click.secho(f"  [{i+1}/{len(sources)}] source {src['id']}: ERROR - {result['reasoning']}", fg="red")
+                errors += 1
+                continue
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE ingest_sources SET backend_required = %s, backend_reasoning = %s WHERE id = %s",
+                    (result["backend_required"], result["reasoning"], src["id"]),
+                )
+
+            label = "BACKEND" if result["backend_required"] else "static"
+            click.echo(f"  [{i+1}/{len(sources)}] source {src['id']} ({src['agent_name']}): {label}")
+
+            if result["backend_required"]:
+                backend_true += 1
+            else:
+                backend_false += 1
+        conn.commit()
+
+    total = backend_true + backend_false
+    static_pct = f"{backend_false/total*100:.0f}%" if total else "?"
+    click.secho(
+        f"\nDone: {total} classified — {backend_false} static ({static_pct}), "
+        f"{backend_true} backend-required"
+        + (f", {errors} errors" if errors else ""),
+        fg="green", bold=True,
+    )
+    click.secho(f"\nPosition paper predicted ~65-70% static. Actual: {static_pct}", dim=True)
 
 
 if __name__ == "__main__":

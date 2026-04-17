@@ -1,15 +1,17 @@
 FROM nextcloud:apache
 
-# MPM fix must run as root (CMD), not in hooks (hooks run as www-data).
-# Railway re-enables mpm_event at container start, so build-time RUN doesn't work.
+# entrypoint-wrapper.sh runs as root BEFORE the nextcloud entrypoint.
+# It writes config.php (so the install check is skipped) and fixes MPM.
+# Hooks run AFTER the install check — too late for config.php or MPM.
+COPY entrypoint-wrapper.sh /entrypoint-wrapper.sh
+RUN chmod +x /entrypoint-wrapper.sh
 
 RUN mkdir -p /docker-entrypoint-hooks.d/before-starting
-COPY hooks/01-gen-config.sh /docker-entrypoint-hooks.d/before-starting/
 COPY hooks/02-oidc-async.sh /docker-entrypoint-hooks.d/before-starting/
 COPY oidc-setup.sh /oidc-setup.sh
 RUN chmod +x \
-    /docker-entrypoint-hooks.d/before-starting/01-gen-config.sh \
     /docker-entrypoint-hooks.d/before-starting/02-oidc-async.sh \
     /oidc-setup.sh
 
-CMD ["bash", "-c", "a2dismod mpm_event 2>/dev/null; a2enmod mpm_prefork && apache2-foreground"]
+ENTRYPOINT ["/entrypoint-wrapper.sh"]
+CMD ["apache2-foreground"]

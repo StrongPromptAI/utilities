@@ -1,19 +1,23 @@
 #!/bin/bash
-# Regenerate config.php + copy version.php from env vars on every startup.
-# Railway wipes the container filesystem on each redeploy. Without both files,
-# Nextcloud re-runs installation against an already-populated DB and fails.
-# version.php presence is what the entrypoint checks to determine "already installed".
+set -e
 
+# Fix MPM FIRST — requires root, must happen before Apache starts.
+# Railway re-enables mpm_event at container start; build-time RUN doesn't persist.
+a2dismod mpm_event 2>/dev/null || true
+a2enmod mpm_prefork
+echo "[wrapper] MPM: prefork enforced"
+
+# Write config.php BEFORE the nextcloud entrypoint runs its install check.
+# Hooks run AFTER the install check — too late to prevent re-installation.
 CONFIG_DIR="/var/www/html/config"
-CONFIG_FILE="$CONFIG_DIR/config.php"
 mkdir -p "$CONFIG_DIR"
 
-# version.php must exist to skip re-install
+# version.php presence tells the entrypoint "already installed"
 if [ ! -f "$CONFIG_DIR/version.php" ]; then
     cp /var/www/html/version.php "$CONFIG_DIR/version.php" 2>/dev/null || true
 fi
 
-cat > "$CONFIG_FILE" <<PHP
+cat > "$CONFIG_DIR/config.php" <<PHP
 <?php
 \$CONFIG = array(
   'instanceid'           => '${NEXTCLOUD_INSTANCE_ID}',
@@ -36,6 +40,8 @@ cat > "$CONFIG_FILE" <<PHP
 );
 PHP
 
-chown www-data:www-data "$CONFIG_FILE"
-chmod 640 "$CONFIG_FILE"
-echo "[gen-config] config.php + version.php written"
+chown www-data:www-data "$CONFIG_DIR/config.php"
+chmod 640 "$CONFIG_DIR/config.php"
+echo "[wrapper] config.php + version.php written"
+
+exec /entrypoint.sh "$@"

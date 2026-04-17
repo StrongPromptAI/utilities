@@ -7,13 +7,13 @@ CLIENT_ID="${OIDC_LOGIN_CLIENT_ID:-nextcloud}"
 CLIENT_SECRET="${OIDC_LOGIN_CLIENT_SECRET}"
 
 log() { echo "[oidc-setup] $*"; }
-OCC="sudo -u www-data $OCC"
+OCC="sudo -u www-data php /var/www/html/occ"
 
-# Wait for Nextcloud to be fully initialized (occ becomes usable)
+# Wait for Nextcloud to finish first-run install (up to 15 minutes)
 log "Waiting for Nextcloud to initialize..."
-for i in $(seq 1 60); do
+for i in $(seq 1 180); do
     if $OCC status --no-ansi 2>/dev/null | grep -q "installed: true"; then
-        log "Nextcloud is ready."
+        log "Nextcloud is ready (attempt $i)."
         break
     fi
     sleep 5

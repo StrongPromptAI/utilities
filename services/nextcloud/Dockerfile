@@ -1,17 +1,14 @@
 FROM nextcloud:apache
 
-# Railway loads both mpm_event and mpm_prefork simultaneously, crashing Apache.
-# Force prefork (required for mod_php) and disable the conflicting MPMs.
-RUN a2dismod mpm_event mpm_worker 2>/dev/null || true && \
-    a2enmod mpm_prefork
-
-# Startup hook: waits for Nextcloud to be ready, then installs + configures oidc_login.
-# Runs in the background so Apache starts immediately.
+# Copy hooks into Nextcloud's built-in before-starting hooks directory.
+# These run right before Apache starts, after entrypoint initialization.
+RUN mkdir -p /docker-entrypoint-hooks.d/before-starting
+COPY hooks/00-fix-mpm.sh    /docker-entrypoint-hooks.d/before-starting/
+COPY hooks/01-gen-config.sh /docker-entrypoint-hooks.d/before-starting/
+COPY hooks/02-oidc-async.sh /docker-entrypoint-hooks.d/before-starting/
 COPY oidc-setup.sh /oidc-setup.sh
-RUN chmod +x /oidc-setup.sh
-
-COPY docker-entrypoint-wrapper.sh /docker-entrypoint-wrapper.sh
-RUN chmod +x /docker-entrypoint-wrapper.sh
-
-ENTRYPOINT ["/docker-entrypoint-wrapper.sh"]
-CMD ["apache2-foreground"]
+RUN chmod +x \
+    /docker-entrypoint-hooks.d/before-starting/00-fix-mpm.sh \
+    /docker-entrypoint-hooks.d/before-starting/01-gen-config.sh \
+    /docker-entrypoint-hooks.d/before-starting/02-oidc-async.sh \
+    /oidc-setup.sh

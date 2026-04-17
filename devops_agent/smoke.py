@@ -28,10 +28,14 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_json_path(data: dict, path: str) -> object:
-    """Resolve a dot-separated JSON path like 'status' or 'data.count'."""
+    """Resolve a dot-separated JSON path like 'status', 'data.count', or 'data.0.object'."""
+    def _step(node, key):
+        if isinstance(node, list):
+            return node[int(key)]
+        return node[key]
     try:
-        return reduce(lambda d, key: d[key], path.split("."), data)
-    except (KeyError, TypeError, IndexError):
+        return reduce(_step, path.split("."), data)
+    except (KeyError, TypeError, IndexError, ValueError):
         return _MISSING
 
 

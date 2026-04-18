@@ -18,7 +18,7 @@
 
 (common) {
     import security_headers
-    encode gzip { minimum_length 1024 }
+    encode gzip
 }
 
 # ── OpenWebUI — oxp.chat.strongprompt.ai ─────────────────────────────────────

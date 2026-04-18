@@ -29,6 +29,13 @@ if [ "$INSTALLED" = "yes" ]; then
     # filesystem on redeploy, so rewrite config.php from env vars and skip install.
     echo "[wrapper] DB: installed — writing config.php, entrypoint will skip install"
 
+    # Data directory is created by the entrypoint only during install. In the
+    # skip-install fast path, we must create it ourselves — without it Nextcloud
+    # 503s every request because datadirectory in config.php points nowhere.
+    mkdir -p /var/www/html/data
+    chown -R www-data:www-data /var/www/html/data
+    chmod 750 /var/www/html/data
+
     if [ ! -f "$CONFIG_DIR/version.php" ]; then
         cp /var/www/html/version.php "$CONFIG_DIR/version.php" 2>/dev/null || true
     fi

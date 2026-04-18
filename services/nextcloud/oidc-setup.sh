@@ -9,8 +9,10 @@ CLIENT_ID="${OIDC_LOGIN_CLIENT_ID:-nextcloud}"
 CLIENT_SECRET="${OIDC_LOGIN_CLIENT_SECRET}"
 
 log() { echo "[oidc-setup] $*"; }
-# sudo is not installed in nextcloud:apache — use runuser (util-linux, present)
-OCC="timeout 45 runuser -u www-data -- php /var/www/html/occ"
+# before-starting hooks already run as www-data (entrypoint switches user
+# before invoking them). No sudo / runuser / su needed — would fail anyway
+# since www-data can't switch users.
+OCC="timeout 45 php /var/www/html/occ"
 
 # Fail-soft: hook failures here must NOT abort the entrypoint (would crash-loop
 # the container). We log diagnostics and exit 0 so Apache starts regardless.

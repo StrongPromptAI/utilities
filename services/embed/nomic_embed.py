@@ -5,6 +5,7 @@ Uses nomic-ai/nomic-embed-text-v1.5 (768-dim) with pre-exported ONNX weights.
 No torch/optimum dependency — just onnxruntime + transformers tokenizer + numpy.
 """
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -16,17 +17,22 @@ from transformers import AutoTokenizer
 
 _MODEL_ID = "nomic-ai/nomic-embed-text-v1.5"
 _ONNX_FILE = "onnx/model.onnx"
+_LOCAL_MODEL_PATH = "/app/models/nomic/onnx/model.onnx"
+_LOCAL_TOKENIZER_DIR = "/app/models/tokenizer"
 
 
 @lru_cache(maxsize=1)
 def _get_session(model_id: str = None):
-    """Download ONNX weights and create inference session, cached."""
+    """Load ONNX session + tokenizer from baked image paths; fall back to HF cache."""
     model_id = model_id or _MODEL_ID
     logger.info(f"Loading ONNX model: {model_id}")
 
-    # Download pre-exported ONNX file from HuggingFace
-    model_path = hf_hub_download(repo_id=model_id, filename=_ONNX_FILE)
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    if os.path.exists(_LOCAL_MODEL_PATH) and os.path.exists(_LOCAL_TOKENIZER_DIR):
+        model_path = _LOCAL_MODEL_PATH
+        tokenizer = AutoTokenizer.from_pretrained(_LOCAL_TOKENIZER_DIR)
+    else:
+        model_path = hf_hub_download(repo_id=model_id, filename=_ONNX_FILE)
+        tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 
     session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
     logger.info("ONNX embedding model loaded")

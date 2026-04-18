@@ -1,0 +1,61 @@
+{
+    admin off
+    auto_https off           # Railway terminates TLS at the edge
+    default_bind 0.0.0.0     # IPv4 healthcheck compatibility
+}
+
+# ── Shared snippets ──────────────────────────────────────────────────────────
+
+(security_headers) {
+    header {
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "SAMEORIGIN"
+        Referrer-Policy           "strict-origin-when-cross-origin"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        -Server
+    }
+}
+
+(common) {
+    import security_headers
+    encode gzip { minimum_length 1024 }
+}
+
+# ── OpenWebUI — oxp.chat.strongprompt.ai ─────────────────────────────────────
+# SSE streaming requires flush_interval -1 so chat tokens arrive incrementally
+# instead of in buffered bursts.
+
+http://oxp.chat.strongprompt.ai:{$PORT:8080} {
+    import common
+    reverse_proxy openwebui.railway.internal:8080 {
+        flush_interval -1
+    }
+}
+
+# ── Nextcloud — oxp.files.strongprompt.ai ────────────────────────────────────
+# WebDAV + long uploads need generous read/write timeouts.
+
+http://oxp.files.strongprompt.ai:{$PORT:8080} {
+    import common
+    reverse_proxy nextcloud.railway.internal:80 {
+        transport http {
+            read_timeout 300s
+            write_timeout 300s
+        }
+    }
+}
+
+# ── Catch-all — healthcheck + direct-URL safety net ──────────────────────────
+# Railway's healthcheck and anyone hitting the caddy-*.up.railway.app URL
+# directly land here. Route to OpenWebUI as a sensible default.
+
+:{$PORT:8080} {
+    handle /health {
+        respond "OK" 200
+    }
+
+    import common
+    reverse_proxy openwebui.railway.internal:8080 {
+        flush_interval -1
+    }
+}

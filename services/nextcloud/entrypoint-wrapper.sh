@@ -36,8 +36,12 @@ if [ "$INSTALLED" = "yes" ]; then
     chown -R www-data:www-data /var/www/html/data
     chmod 750 /var/www/html/data
 
-    if [ ! -f "$CONFIG_DIR/version.php" ]; then
-        cp /var/www/html/version.php "$CONFIG_DIR/version.php" 2>/dev/null || true
+    # Copy version.php from the image source (always present) — not from
+    # /var/www/html/version.php which is populated by the entrypoint's rsync
+    # AFTER our wrapper runs, so it wouldn't exist here.
+    if [ ! -f "$CONFIG_DIR/version.php" ] && [ -f /usr/src/nextcloud/version.php ]; then
+        cp /usr/src/nextcloud/version.php "$CONFIG_DIR/version.php"
+        chown www-data:www-data "$CONFIG_DIR/version.php"
     fi
 
     cat > "$CONFIG_DIR/config.php" <<PHP

@@ -38,6 +38,14 @@ if [ "$READY" != "yes" ]; then
     exit 0
 fi
 
+# Run upgrade first — if the DB is at an older schema than the code (common
+# after a fast-path redeploy where the entrypoint's upgrade check is bypassed),
+# this clears the needsDbUpgrade=true state that otherwise makes /status.php
+# 503 and blocks app:install ("not found on the appstore" during upgrade mode).
+# Idempotent — no-op if already at latest.
+log "Running occ upgrade (idempotent)..."
+$OCC upgrade --no-ansi 2>&1 | sed 's/^/[oidc-setup] /' || log "upgrade returned non-zero (may be a no-op)"
+
 # Install the app if missing. Idempotent — app:install bails out cleanly if
 # already present.
 if $OCC app:list --no-ansi 2>/dev/null | grep -q "oidc_login"; then

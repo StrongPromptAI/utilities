@@ -24,6 +24,9 @@ _ready: bool = False
 _load_error: str | None = None
 
 
+_WARMUP_TIMEOUT = 120  # seconds — loading a 1.5 GB ONNX model from cache takes ~30-60 s
+
+
 def _warmup() -> None:
     """Load model and run one inference to confirm it works."""
     global _ready, _load_error
@@ -42,7 +45,19 @@ def _warmup() -> None:
 @app.on_event("startup")
 async def startup() -> None:
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _warmup)
+    try:
+        await asyncio.wait_for(
+            loop.run_in_executor(None, _warmup),
+            timeout=_WARMUP_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        global _load_error
+        _load_error = (
+            f"Model warmup timed out after {_WARMUP_TIMEOUT}s — "
+            "the ONNX model may not be cached in the image. "
+            "Check that HF_HOME is set consistently in the Dockerfile and at runtime."
+        )
+        print(f"[embed] {_load_error}")
 
 
 @app.get("/health")

@@ -1,31 +1,52 @@
 """
 Embed service — nomic-embed-text-v1.5 ONNX embeddings.
 
-Shared service deployed per-project for PHI isolation.
+Shared service for the shared-svcs Railway project.
 Source: utilities/services/embed/
 
 Endpoints:
-  GET  /health              — 200 ready, 503 loading, 500 error
+  GET  /health              — 200 ready, 503 loading, 500 error (unauthenticated)
   POST /embed               — TEI-compatible: {"inputs": [str,...]} -> [[float,...],...]
   POST /v1/embeddings       — OpenAI-compatible (for OpenWebUI RAG)
 
+Auth: JWT HS256, required claims: exp, iss, aud="embed". Bearer token in Authorization header.
 No request body logging — inputs may contain patient text (PHI).
 """
 
 import asyncio
+import os
 from typing import Union
 
-from fastapi import FastAPI, HTTPException, Response
+import jwt as _jwt
+from fastapi import Depends, FastAPI, HTTPException, Response, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 app = FastAPI(title="embed")
+
+JWT_SECRET = os.environ["JWT_SECRET"]
+JWT_SECRET_PREV = os.environ.get("JWT_SECRET_PREV")
+_JWT_OPTIONS = {"require": ["exp", "iss", "aud"]}
+
+_bearer = HTTPBearer()
 
 _ready: bool = False
 _load_error: str | None = None
 
 
+def _require_embed_token(creds: HTTPAuthorizationCredentials = Security(_bearer)) -> None:
+    """Validate Bearer JWT with aud=embed. Raises 401 on failure."""
+    errors = []
+    for secret in filter(None, [JWT_SECRET, JWT_SECRET_PREV]):
+        try:
+            _jwt.decode(creds.credentials, secret, algorithms=["HS256"], audience="embed", options=_JWT_OPTIONS)
+            return
+        except _jwt.PyJWTError as e:
+            errors.append(e)
+    raise HTTPException(status_code=401, detail="invalid token")
+
+
 def _warmup() -> None:
-    """Load model and run one inference to confirm it works."""
     global _ready, _load_error
     try:
         from nomic_embed import _get_session, _embed
@@ -67,7 +88,7 @@ class OpenAIEmbedRequest(BaseModel):
     model: str = "nomic-embed-text-v1.5"
 
 
-@app.post("/embed")
+@app.post("/embed", dependencies=[Depends(_require_embed_token)])
 async def embed(req: EmbedRequest):
     """TEI-compatible batch embedding."""
     if not _ready:
@@ -87,7 +108,7 @@ async def embed(req: EmbedRequest):
         raise HTTPException(500, str(exc))
 
 
-@app.post("/v1/embeddings")
+@app.post("/v1/embeddings", dependencies=[Depends(_require_embed_token)])
 async def openai_embeddings(req: OpenAIEmbedRequest):
     """OpenAI-compatible embeddings endpoint for OpenWebUI RAG."""
     if not _ready:

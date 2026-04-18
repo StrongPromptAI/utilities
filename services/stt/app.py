@@ -1,22 +1,25 @@
 """
 STT service — sherpa-onnx streaming Zipformer speech-to-text.
 
-Shared service deployed per-project for PHI isolation.
+Shared service for the shared-svcs Railway project.
 Source: utilities/services/stt/
 
 Endpoints:
   GET  /health       — 200 ready, 503 loading, 500 error
-  WS   /transcribe   — binary PCM int16 mono 16kHz in → JSON transcripts out
+  WS   /transcribe   — first frame = JWT (aud=stt); then binary PCM int16 mono 16kHz → JSON transcripts
+
+Auth: JWT HS256, required claims: exp, iss, aud="stt". Token sent as first WS text frame (never in URL).
 """
 
+import asyncio
+import faulthandler
 import os
 import re
 import sys
 import time
-import asyncio
-import faulthandler
 from pathlib import Path
 
+import jwt as _jwt
 import json as _json
 
 import numpy as np
@@ -30,6 +33,10 @@ MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/app/models"))
 ORT_THREADS = int(os.environ.get("ORT_THREADS", "2"))
 STT_SAMPLE_RATE = 16000
 
+JWT_SECRET = os.environ["JWT_SECRET"]
+JWT_SECRET_PREV = os.environ.get("JWT_SECRET_PREV")
+_JWT_OPTIONS = {"require": ["exp", "iss", "aud"]}
+
 os.environ.setdefault("HF_HOME", str(MODELS_DIR / "hf_cache"))
 
 _stt_ready: bool = False
@@ -38,9 +45,19 @@ _stt = None
 
 
 def _log(msg: str) -> None:
-    """Write to stderr (unbuffered) for reliable Railway logging."""
     sys.stderr.write(f"{msg}\n")
     sys.stderr.flush()
+
+
+def _validate_token(token: str) -> dict:
+    """Validate JWT with aud=stt. Returns decoded payload. Raises _jwt.PyJWTError on failure."""
+    errors = []
+    for secret in filter(None, [JWT_SECRET, JWT_SECRET_PREV]):
+        try:
+            return _jwt.decode(token, secret, algorithms=["HS256"], audience="stt", options=_JWT_OPTIONS)
+        except _jwt.PyJWTError as e:
+            errors.append(e)
+    raise errors[0]
 
 
 def _load_stt() -> None:
@@ -111,7 +128,6 @@ def health() -> Response:
 
 
 def _normalize_transcript(text: str) -> str:
-    """Capitalize first letter of each sentence. Zipformer outputs all-caps."""
     text = text.strip()
     if not text:
         return text
@@ -124,7 +140,11 @@ def _normalize_transcript(text: str) -> str:
 async def transcribe(ws: WebSocket) -> None:
     """Streaming speech-to-text.
 
-    Protocol:
+    Auth: first text frame must be a valid JWT (aud=stt). Server closes with 4401 on failure.
+    Keepalive: client sends text "ping" every 30s; server discards silently.
+    Termination: server closes with code 1001 at token expiry; client should reconnect.
+
+    Protocol (after auth):
       Client sends: binary frames of PCM int16 mono 16kHz audio
       Client sends: text "EOS" to signal end of stream
       Server sends: JSON {"text": str, "is_final": bool, "segment": int, "time_ms": float}
@@ -134,6 +154,32 @@ async def transcribe(ws: WebSocket) -> None:
         return
 
     await ws.accept()
+
+    # First frame must be the JWT — token never goes in the URL
+    try:
+        token = await asyncio.wait_for(ws.receive_text(), timeout=5.0)
+        payload = _validate_token(token)
+    except asyncio.TimeoutError:
+        await ws.close(code=4401, reason="auth timeout")
+        return
+    except _jwt.PyJWTError:
+        await ws.close(code=4401, reason="invalid token")
+        return
+
+    # Schedule forced close at token expiry so long-lived connections can't outlive the token
+    exp = payload["exp"]
+    max_age = max(0, exp - int(time.time()))
+    loop = asyncio.get_event_loop()
+
+    async def _expire():
+        await asyncio.sleep(max_age)
+        try:
+            await ws.close(code=1001, reason="token expired")
+        except Exception:
+            pass
+
+    expiry_task = loop.create_task(_expire())
+
     stream = _stt.create_stream()
     segment = 0
     t0 = time.perf_counter()
@@ -147,6 +193,8 @@ async def transcribe(ws: WebSocket) -> None:
                 break
 
             if "text" in msg:
+                if msg["text"] == "ping":
+                    continue
                 if msg["text"] == "EOS":
                     tail_padding = np.zeros(int(STT_SAMPLE_RATE * 0.5), dtype=np.float32)
                     stream.accept_waveform(STT_SAMPLE_RATE, tail_padding)
@@ -203,4 +251,5 @@ async def transcribe(ws: WebSocket) -> None:
     except Exception as exc:
         _log(f"[stt] Transcribe error ({type(exc).__name__}): {exc}")
     finally:
+        expiry_task.cancel()
         del stream

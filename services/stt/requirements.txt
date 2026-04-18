@@ -3,3 +3,4 @@ uvicorn[standard]>=0.30.0
 numpy>=1.24.0
 sherpa-onnx>=1.10.0
 huggingface-hub>=0.23.0
+PyJWT>=2.8.0

@@ -1,5 +1,7 @@
 #!/bin/bash
-# Launch oidc_login setup in background so it doesn't block Apache startup.
-# oidc-setup.sh waits for Nextcloud to be fully ready before running occ.
-/oidc-setup.sh &
-echo "[oidc-async] setup launched in background (pid $!)"
+# Run OIDC setup synchronously.
+# Hook fires after Nextcloud install is complete, so occ is usable immediately.
+# Each occ call is wrapped in `timeout` so a hung DB can't block Apache forever.
+# Synchronous so output goes straight to Railway logs (background process
+# output was getting dropped in a previous async design).
+/oidc-setup.sh

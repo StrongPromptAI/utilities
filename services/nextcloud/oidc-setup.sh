@@ -11,20 +11,28 @@ CLIENT_SECRET="${OIDC_LOGIN_CLIENT_SECRET}"
 log() { echo "[oidc-setup] $*"; }
 OCC="timeout 45 sudo -u www-data php /var/www/html/occ"
 
-# One-shot readiness check — by the time this hook fires, install is done.
-# A few seconds of retries cover the rare case where Apache hasn't finished
-# bootstrapping occ yet.
-for i in 1 2 3 4 5; do
+# Fail-soft: hook failures here must NOT abort the entrypoint (would crash-loop
+# the container). We log diagnostics and exit 0 so Apache starts regardless.
+trap 'log "hook exiting 0 so Apache can still start"; exit 0' ERR
+
+log "occ status output ─────────"
+$OCC status --no-ansi 2>&1 | sed 's/^/[oidc-setup] /' || true
+log "─────────────────────────────"
+
+# Retry up to 20s — gives occ a chance if startup bootstrapping is still running
+READY=no
+for i in 1 2 3 4 5 6 7 8 9 10; do
     if $OCC status --no-ansi 2>/dev/null | grep -q "installed: true"; then
         log "Nextcloud ready (check $i)."
+        READY=yes
         break
     fi
     sleep 2
 done
 
-if ! $OCC status --no-ansi 2>/dev/null | grep -q "installed: true"; then
-    log "ERROR: Nextcloud not installed after 10s. Aborting oidc setup."
-    exit 1
+if [ "$READY" != "yes" ]; then
+    log "WARN: occ status never returned installed:true. Skipping oidc setup; Apache will still start."
+    exit 0
 fi
 
 # Install the app if missing. Idempotent — app:install bails out cleanly if

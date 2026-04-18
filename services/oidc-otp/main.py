@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS oidc_sessions (
     client_id   TEXT NOT NULL,
     redirect_uri TEXT NOT NULL,
     state       TEXT,
+    nonce       TEXT,
     expires_at  TIMESTAMPTZ NOT NULL,
     created_at  TIMESTAMPTZ DEFAULT now()
 );
@@ -94,9 +95,12 @@ CREATE TABLE IF NOT EXISTS oidc_auth_codes (
     email        TEXT NOT NULL,
     client_id    TEXT NOT NULL,
     redirect_uri TEXT NOT NULL,
+    nonce        TEXT,
     expires_at   TIMESTAMPTZ NOT NULL,
     created_at   TIMESTAMPTZ DEFAULT now()
 );
+ALTER TABLE oidc_sessions   ADD COLUMN IF NOT EXISTS nonce TEXT;
+ALTER TABLE oidc_auth_codes ADD COLUMN IF NOT EXISTS nonce TEXT;
 """
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -163,7 +167,7 @@ button:hover{background:#1d4ed8}.err{color:#dc2626;margin-top:0}
 """
 
 
-def _email_form(client_id, redirect_uri, state, response_type, scope, error=""):
+def _email_form(client_id, redirect_uri, state, response_type, scope, nonce="", error=""):
     err = f'<p class="err">{error}</p>' if error else ""
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>Sign In — OXP</title><style>{_CSS}</style></head><body>
@@ -173,6 +177,7 @@ def _email_form(client_id, redirect_uri, state, response_type, scope, error=""):
   <input type="hidden" name="client_id" value="{client_id}">
   <input type="hidden" name="redirect_uri" value="{redirect_uri}">
   <input type="hidden" name="state" value="{state}">
+  <input type="hidden" name="nonce" value="{nonce}">
   <input type="hidden" name="response_type" value="{response_type}">
   <input type="hidden" name="scope" value="{scope}">
   <input type="email" name="email" placeholder="you@example.com" required autofocus>
@@ -211,12 +216,13 @@ async def authorize_get(
     response_type: str = "code",
     state: str = "",
     scope: str = "openid",
+    nonce: str = "",
 ):
     if client_id not in CLIENTS:
         raise HTTPException(400, "unknown client_id")
     if CLIENTS[client_id]["redirect_uri"] != redirect_uri:
         raise HTTPException(400, "invalid redirect_uri")
-    return HTMLResponse(_email_form(client_id, redirect_uri, state, response_type, scope))
+    return HTMLResponse(_email_form(client_id, redirect_uri, state, response_type, scope, nonce))
 
 
 @app.post("/authorize", response_class=HTMLResponse)
@@ -224,6 +230,7 @@ async def authorize_post(
     client_id: str = Form(...),
     redirect_uri: str = Form(...),
     state: str = Form(""),
+    nonce: str = Form(""),
     response_type: str = Form("code"),
     scope: str = Form("openid"),
     email: str = Form(...),
@@ -243,9 +250,9 @@ async def authorize_post(
         )
         await conn.execute(
             """INSERT INTO oidc_sessions
-               (session_id, email, otp, client_id, redirect_uri, state, expires_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7)""",
-            session_id, email, otp, client_id, redirect_uri, state, expires_at,
+               (session_id, email, otp, client_id, redirect_uri, state, nonce, expires_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+            session_id, email, otp, client_id, redirect_uri, state, nonce, expires_at,
         )
 
     try:
@@ -313,9 +320,9 @@ async def otp_post(
         auth_code = secrets.token_urlsafe(32)
         auth_expires = datetime.now(timezone.utc) + timedelta(minutes=5)
         await conn.execute(
-            """INSERT INTO oidc_auth_codes (code, email, client_id, redirect_uri, expires_at)
-               VALUES ($1,$2,$3,$4,$5)""",
-            auth_code, row["email"], row["client_id"], row["redirect_uri"], auth_expires,
+            """INSERT INTO oidc_auth_codes (code, email, client_id, redirect_uri, nonce, expires_at)
+               VALUES ($1,$2,$3,$4,$5,$6)""",
+            auth_code, row["email"], row["client_id"], row["redirect_uri"], row["nonce"], auth_expires,
         )
         await conn.execute("DELETE FROM oidc_sessions WHERE session_id=$1", session_id)
         redirect_uri = row["redirect_uri"]
@@ -375,6 +382,11 @@ async def token_endpoint(
         "email_verified": True,
         "name": email.split("@")[0],
     }
+    # Echo nonce back into ID token if the client sent one at /authorize.
+    # Required by OIDC spec — authlib (OpenWebUI) rejects tokens missing the nonce
+    # it originally sent. Also required by strict Nextcloud oidc_login configurations.
+    if row["nonce"]:
+        claims["nonce"] = row["nonce"]
     id_token = jwt.encode(claims, _raw_pem, algorithm="RS256", headers={"kid": KID})
     access_token = jwt.encode(
         {**claims, "exp": now + 3600}, _raw_pem, algorithm="RS256", headers={"kid": KID}

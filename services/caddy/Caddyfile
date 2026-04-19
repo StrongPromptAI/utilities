@@ -28,6 +28,12 @@
 http://oxp.chat.strongprompt.ai:{$PORT:8080} {
     import common
     reverse_proxy openwebui.railway.internal:8080 {
+        # Railway terminates TLS at its edge, then forwards HTTP to Caddy.
+        # Force X-Forwarded-Proto=https so OpenWebUI generates https:// URLs
+        # in OIDC redirect_uri, session cookies, etc. Without this, the OIDC
+        # flow breaks with a scheme mismatch at the IdP.
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host oxp.chat.strongprompt.ai
         flush_interval -1
     }
 }
@@ -38,6 +44,8 @@ http://oxp.chat.strongprompt.ai:{$PORT:8080} {
 http://oxp.files.strongprompt.ai:{$PORT:8080} {
     import common
     reverse_proxy nextcloud.railway.internal:80 {
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host oxp.files.strongprompt.ai
         transport http {
             read_timeout 300s
             write_timeout 300s

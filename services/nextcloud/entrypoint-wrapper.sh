@@ -70,6 +70,23 @@ foreach (\$pdo->query(\"SELECT n.nspname AS schema, t.typname AS name FROM pg_ty
     \$pdo->exec('DROP TYPE IF EXISTS \"' . \$r['schema'] . '\".\"' . \$r['name'] . '\" CASCADE');
     \$counts['types']++;
 }
+
+// Drop accumulated oc_admin* roles from crashed prior installs. Each failed
+// 'occ maintenance:install' leaves one behind; after ~15 failures, Nextcloud's
+// install starts hitting permission_denied on oc_migrations because the new
+// retry clashes with leftover role grants. See install guide §5 gotcha #15.
+\$counts['roles'] = 0;
+foreach (\$pdo->query(\"SELECT rolname FROM pg_roles WHERE rolname LIKE 'oc_admin%' OR rolname LIKE 'oc_user%'\") as \$r) {
+    \$rolname = \$r['rolname'];
+    try {
+        \$pdo->exec('DROP OWNED BY ' . \$pdo->quote(\$rolname)); // refuses for quoted literal
+    } catch (Exception \$e) {}
+    // DROP OWNED / DROP ROLE require unquoted identifier, not a string literal:
+    \$ident = '\"' . str_replace('\"', '\"\"', \$rolname) . '\"';
+    try { \$pdo->exec('DROP OWNED BY ' . \$ident . ' CASCADE'); } catch (Exception \$e) { echo '[wrapper/role] DROP OWNED ' . \$rolname . ': ' . \$e->getMessage() . PHP_EOL; }
+    try { \$pdo->exec('DROP ROLE IF EXISTS ' . \$ident); \$counts['roles']++; } catch (Exception \$e) { echo '[wrapper/role] DROP ROLE ' . \$rolname . ': ' . \$e->getMessage() . PHP_EOL; }
+}
+
 echo '[wrapper] dropped: ' . json_encode(\$counts) . PHP_EOL;
 " 2>&1
 

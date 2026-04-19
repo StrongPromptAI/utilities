@@ -408,8 +408,16 @@ async def userinfo(request: Request):
         raise HTTPException(401, "Missing bearer token")
     token_str = auth[7:]
     try:
-        claims = jwt.decode(token_str, _PUBLIC_KEY_PEM, algorithms=["RS256"])
-    except Exception:
+        # We signed this token ourselves; we trust all its claims. Skip audience
+        # check — without this, PyJWT rejects any token that carries an `aud`
+        # claim when no audience= is passed to decode. (Nextcloud's oidc_login
+        # then gets 401 and shows "communication to retrieve user data failed".)
+        claims = jwt.decode(
+            token_str, _PUBLIC_KEY_PEM, algorithms=["RS256"],
+            options={"verify_aud": False},
+        )
+    except Exception as e:
+        logger.warning("userinfo token decode failed: %s", e)
         raise HTTPException(401, "Invalid or expired token")
     return {
         "sub": claims["sub"],

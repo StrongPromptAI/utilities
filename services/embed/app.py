@@ -14,6 +14,7 @@ No request body logging — inputs may contain patient text (PHI).
 """
 
 import asyncio
+import gc
 import os
 from typing import Union
 
@@ -66,6 +67,20 @@ async def startup() -> None:
     await loop.run_in_executor(None, _warmup)
 
 
+@app.get("/mem")
+def mem() -> Response:
+    """Memory usage snapshot — unauthenticated for monitoring."""
+    import resource
+    rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # macOS reports bytes, Linux reports KB
+    rss_mb = rss_kb / 1024 if os.uname().sysname == "Linux" else rss_kb / (1024 * 1024)
+    return Response(
+        content=f'{{"rss_mb":{rss_mb:.1f}}}',
+        status_code=200,
+        media_type="application/json",
+    )
+
+
 @app.get("/health")
 def health() -> Response:
     if _load_error:
@@ -103,7 +118,10 @@ async def embed(req: EmbedRequest):
     try:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, lambda: _embed(texts))
-        return result.tolist()
+        vectors = result.tolist()
+        del result
+        gc.collect()
+        return vectors
     except Exception as exc:
         raise HTTPException(500, str(exc))
 
@@ -124,6 +142,8 @@ async def openai_embeddings(req: OpenAIEmbedRequest):
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, lambda: _embed(texts))
         vectors = result.tolist()
+        del result
+        gc.collect()
     except Exception as exc:
         raise HTTPException(500, str(exc))
 

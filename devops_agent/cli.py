@@ -5,6 +5,10 @@ Commands:
     devops status <project>  Railway deployment status
     devops health <project>  Run health check
     devops send-test-email   Verify SMTP config
+    devops rollback <proj>   Roll back deployment
+    devops validate-deploy   Post-deploy validation pipeline
+    devops smoke <project>   Run smoke tests
+    devops report            Weekly reliability report
 
 Global options:
     --json       Machine-readable JSON output
@@ -32,6 +36,9 @@ from .logging_setup import setup_logging
 from .models import OperationResult
 from .notify import send_email
 from .railway import discover_projects, get_deployment_status
+from .regression import run_regression
+from .report import run_report
+from .second_opinion import review_file
 from .rollback import rollback_with_notification, validate_deploy
 from .smoke import run_smoke_tests
 
@@ -233,4 +240,128 @@ def smoke_cmd(ctx: click.Context, project: str) -> None:
     as_json = ctx.obj["json"]
     result = run_smoke_tests(project)
     _output(result, as_json=as_json)
+    sys.exit(_exit_code(result))
+
+
+@cli.command("regress")
+@click.argument("project")
+@click.option(
+    "--env",
+    type=click.Choice(["staging", "production"]),
+    default="production",
+    help="Environment to test (staging runs all tests; production is read-only)",
+)
+@click.pass_context
+def regress_cmd(ctx: click.Context, project: str, env: str) -> None:
+    """Run regression and security tests for a project."""
+    as_json = ctx.obj["json"]
+    result = run_regression(project, env=env)
+    if as_json:
+        _output(result, as_json=True)
+    else:
+        for t in result.test_results:
+            status = "PASS" if t.passed else "FAIL"
+            if t.error and t.error.startswith("SKIP"):
+                status = "SKIP"
+            tag = " [staging-only]" if t.staging_only else ""
+            err = f"  {t.error}" if t.error and not t.error.startswith("SKIP") else ""
+            latency = f" ({t.latency_ms:.0f}ms)" if t.latency_ms else ""
+            click.echo(f"  [{status}] {t.name}{tag}{latency}{err}")
+        click.echo()
+        click.echo(result.to_display())
+    sys.exit(_exit_code(result))
+
+
+@cli.command("report")
+@click.option("--days", default=7, help="Reporting period in days (default 7)")
+@click.option("--send", is_flag=True, help="Send report via email")
+@click.option("--dry-run", is_flag=True, help="Generate and display without sending")
+@click.option("--use-llm", is_flag=True, help="Add LLM-generated reliability insights")
+@click.option("--no-live-checks", is_flag=True, help="Skip health/smoke checks (safe mode)")
+@click.pass_context
+def report_cmd(
+    ctx: click.Context,
+    days: int,
+    send: bool,
+    dry_run: bool,
+    use_llm: bool,
+    no_live_checks: bool,
+) -> None:
+    """Generate weekly reliability report across all projects."""
+    as_json = ctx.obj["json"]
+    result = run_report(
+        days=days,
+        use_llm=use_llm,
+        send=send,
+        dry_run=dry_run,
+        no_live_checks=no_live_checks,
+    )
+    if as_json:
+        _output(result, as_json=True)
+    else:
+        # Display the markdown report to stdout
+        if result.report_markdown:
+            click.echo(result.report_markdown)
+            click.echo()
+        click.echo(result.to_display())
+        if result.email_sent:
+            click.echo("  Email sent successfully.")
+    sys.exit(_exit_code(result))
+
+
+@cli.command("second-opinion")
+@click.argument("file_path")
+@click.option("--model", default="openai/gpt-5.3-codex", help="OpenRouter model for review")
+@click.option(
+    "--purpose",
+    type=click.Choice(["plan", "security", "architecture", "general"]),
+    default="plan",
+    help="Review type (selects reviewer persona)",
+)
+@click.option("--context", default="", help="Additional context string for the reviewer")
+@click.option("--context-file", default=None, help="File with additional context to prepend")
+@click.option("--max-tokens", default=3000, help="Max response length")
+@click.pass_context
+def second_opinion_cmd(
+    ctx: click.Context,
+    file_path: str,
+    model: str,
+    purpose: str,
+    context: str,
+    context_file: str | None,
+    max_tokens: int,
+) -> None:
+    """Send a document to another LLM for critical review."""
+    as_json = ctx.obj["json"]
+
+    # Build context from string and/or file
+    ctx_parts = []
+    if context:
+        ctx_parts.append(context)
+    if context_file:
+        from pathlib import Path
+        cf = Path(context_file).expanduser()
+        if cf.exists():
+            ctx_parts.append(cf.read_text())
+        else:
+            click.echo(f"Context file not found: {context_file}", err=True)
+            sys.exit(EXIT_CONFIG)
+    full_context = "\n\n".join(ctx_parts)
+
+    result = review_file(
+        file_path,
+        context=full_context,
+        purpose=purpose,
+        model=model,
+        max_tokens=max_tokens,
+    )
+
+    if as_json:
+        _output(result, as_json=True)
+    else:
+        if result.ok and result.response_text:
+            click.echo(result.response_text)
+            click.echo(f"\n--- {result.model} | cost: ${result.cost:.4f}" if result.cost else f"\n--- {result.model}")
+        else:
+            click.echo(result.to_display())
     sys.exit(_exit_code(result))

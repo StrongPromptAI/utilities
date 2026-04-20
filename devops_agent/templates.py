@@ -6,6 +6,8 @@ are optional enhancements behind --use-llm flag.
 Every template returns (subject, body_text, body_html).
 """
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
 
 

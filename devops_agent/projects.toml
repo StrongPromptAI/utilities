@@ -60,6 +60,58 @@ tier = 1
 services = ["backend", "frontend", "landing", "ai-insights-hub", "caddy-proxy"]
 health_service_id = "d6496662-59ed-4e8d-ba70-9c8216ba28f4"
 
+[oxp-kb]
+display_name = "OXP Knowledge Base"
+railway_project_id = "96a6d9dd-b680-4821-bee6-ed850a19074b"
+production_env_id = "30bf77ef-ec92-472d-b92a-93e3806bd7e4"
+repo = "utilities"
+has_staging = false
+tier = 1
+# openwebui + nextcloud deploy from Docker images (no repo push needed — redeploy via Railway API)
+# embed deploys from StrongPromptAI/utilities repo, services/embed/ root
+services = ["postgres", "embed", "openwebui", "nextcloud"]
+health_service_id = "d373f3ec-d7b9-4939-b399-37a8cdcebf1d"
+health_url = "https://openwebui-production-bac6.up.railway.app/health"
+
+shared_service_ids = { embed = "11c9fd26-11c1-4438-b082-5f59c7d7be4c" }
+shared_service_repo = "utilities"
+
+# Resource limits — set via serviceInstanceLimitsUpdate mutation, verified via serviceInstanceLimits
+# To update: serviceInstanceLimitsUpdate(input: { serviceId, environmentId, vCPUs: N, memoryGB: N })
+[oxp-kb.resources]
+postgres  = { ram_gb = 2, vcpu = 2 }
+embed     = { ram_gb = 2, vcpu = 2 }
+openwebui = { ram_gb = 1, vcpu = 1 }
+nextcloud = { ram_gb = 1, vcpu = 1 }
+
+[[oxp-kb.smoke_tests]]
+name = "embed-health"
+url = "https://embed-production-d0ef.up.railway.app/health"
+expected_status = 200
+json_path = "status"
+json_value = "ok"
+
+[[oxp-kb.smoke_tests]]
+name = "embed-v1-compat"
+url = "https://embed-production-d0ef.up.railway.app/v1/embeddings"
+method = "POST"
+expected_status = 200
+headers = { Content-Type = "application/json" }
+body = '{"input": ["health check"], "model": "nomic-embed-text-v1.5"}'
+json_path = "data.0.object"
+json_value = "embedding"
+
+[[oxp-kb.smoke_tests]]
+name = "openwebui-health"
+url = "https://openwebui-production-bac6.up.railway.app/health"
+expected_status = 200
+
+[[oxp-kb.smoke_tests]]
+name = "nextcloud-alive"
+url = "https://nextcloud-production-83ae.up.railway.app/"
+expected_status = 200
+expected_body_contains = "Nextcloud"
+
 [kb]
 display_name = "KB (Utilities)"
 railway_project_id = "a3677be5-5392-473e-b609-f23b7c06b78c"

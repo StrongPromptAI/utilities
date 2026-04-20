@@ -39,11 +39,13 @@ def call_openrouter(
     model: str = DEFAULT_MODEL,
     temperature: float = 0.3,
     max_tokens: int = 1000,
+    timeout: float = LLM_TIMEOUT,
 ) -> AnalyzeResult:
     """Call OpenRouter API with a prompt.
 
-    Hard 8s timeout, no retries. Returns AnalyzeResult with response
-    text, model used, and cost. Never sends secrets in prompts.
+    Default 8s timeout for fast notification drafts. Callers expecting
+    longer responses (second-opinion reviews, large documents) should
+    pass a higher timeout.
     """
     t0 = time.monotonic()
 
@@ -73,13 +75,13 @@ def call_openrouter(
                 "temperature": temperature,
                 "max_tokens": max_tokens,
             },
-            timeout=LLM_TIMEOUT,
+            timeout=timeout,
         )
     except httpx.TimeoutException:
         return AnalyzeResult(
             ok=False,
             code=ErrorCode.TIMEOUT,
-            message=f"OpenRouter timeout after {LLM_TIMEOUT}s",
+            message=f"OpenRouter timeout after {timeout}s",
             model=model,
         )
     except httpx.ConnectError as e:

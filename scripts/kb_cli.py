@@ -2085,5 +2085,123 @@ def docs_stats(project):
     click.echo(f"{project}: {count_chunks(project)} chunks")
 
 
+# ─── OpenWebUI runtime state inspection (oxp-kb Postgres) ──────────────────
+
+@cli.group("openwebui")
+def openwebui_cmd():
+    """Inspect the live OpenWebUI Postgres (users, config, chats, knowledge).
+
+    READ ONLY — this group has no write commands by design.
+    For what the docs *say*, use `kb docs search`.
+    For what your instance actually *has*, use the commands here.
+    """
+    pass
+
+
+@openwebui_cmd.command("stats")
+def owu_stats():
+    """Row counts across the main OpenWebUI tables."""
+    from scripts.kb_core.openwebui_runtime import count_all
+    out = count_all()
+    for tbl, n in out.items():
+        click.echo(f"  {tbl:20} {n}")
+
+
+@openwebui_cmd.command("users")
+@click.option("-l", "--limit", default=20)
+def owu_users(limit):
+    """List users + their auth.active status."""
+    from scripts.kb_core.openwebui_runtime import list_users
+    rows = list_users(limit=limit)
+    if not rows:
+        click.secho("(no users)", fg="yellow"); return
+    for r in rows:
+        active = "✓" if r["auth_active"] else "✗"
+        click.echo(f"  [{active}] {r['email']:40} role={r['role']:8} last_active={r['last_active_at']}")
+
+
+@openwebui_cmd.command("config")
+@click.argument("key", required=False)
+@click.option("--json", "as_json", is_flag=True, help="Full JSON dump")
+def owu_config(key, as_json):
+    """Dump the config singleton (what admin UI saved), or a dotted key.
+
+    Examples:
+      kb openwebui config                           # full metadata
+      kb openwebui config rag.web.search.engine     # one key
+      kb openwebui config --json                    # pretty-print full data
+    """
+    from scripts.kb_core.openwebui_runtime import get_config, get_config_key
+    import json as _json
+    if key:
+        val = get_config_key(key)
+        if val is None:
+            click.secho(f"(key '{key}' not set)", fg="yellow")
+        else:
+            click.echo(_json.dumps(val, indent=2))
+        return
+    cfg = get_config()
+    if as_json:
+        click.echo(_json.dumps(cfg, indent=2, default=str))
+        return
+    if not cfg:
+        click.secho("(no config row)", fg="yellow"); return
+    click.echo(f"  version:    {cfg.get('version')}")
+    click.echo(f"  updated_at: {cfg.get('updated_at')}")
+    click.echo(f"  data size:  {len(_json.dumps(cfg.get('data') or {}))} bytes")
+    click.echo(f"  top-level keys: {list((cfg.get('data') or {}).keys())}")
+
+
+@openwebui_cmd.command("knowledge")
+@click.option("-l", "--limit", default=20)
+def owu_knowledge(limit):
+    """List user-uploaded knowledge bases."""
+    from scripts.kb_core.openwebui_runtime import list_knowledge
+    rows = list_knowledge(limit=limit)
+    if not rows:
+        click.secho("(no knowledge bases)", fg="yellow"); return
+    for r in rows:
+        click.echo(f"  {r['name']:40} files={r['file_count']:3}  created={r['created_at']}")
+
+
+@openwebui_cmd.command("files")
+@click.option("-l", "--limit", default=30)
+def owu_files(limit):
+    """List uploaded files."""
+    from scripts.kb_core.openwebui_runtime import list_files
+    rows = list_files(limit=limit)
+    if not rows:
+        click.secho("(no files)", fg="yellow"); return
+    for r in rows:
+        click.echo(f"  {r['filename']:50} created={r['created_at']}")
+
+
+@openwebui_cmd.command("chats")
+@click.option("-l", "--limit", default=20)
+def owu_chats(limit):
+    """List chat metadata only (title + message count, not content)."""
+    from scripts.kb_core.openwebui_runtime import list_chats
+    rows = list_chats(limit=limit)
+    if not rows:
+        click.secho("(no chats)", fg="yellow"); return
+    for r in rows:
+        flags = ("📌" if r["pinned"] else "  ") + ("🗄️ " if r["archived"] else "  ")
+        click.echo(f"  {flags}  {(r['title'] or '(untitled)')[:50]:50} msgs={r['message_count']:3}  updated={r['updated_at']}")
+
+
+@openwebui_cmd.command("models")
+@click.option("-l", "--limit", default=30)
+@click.option("--all", "show_all", is_flag=True, help="Include inactive")
+def owu_models(limit, show_all):
+    """List configured models."""
+    from scripts.kb_core.openwebui_runtime import list_models
+    rows = list_models(limit=limit, active_only=not show_all)
+    if not rows:
+        click.secho("(no models)", fg="yellow"); return
+    for r in rows:
+        active = "✓" if r["is_active"] else "✗"
+        click.echo(f"  [{active}] {r['name']:40} base={r['base_model_id'] or '(none)'}")
+
+
 if __name__ == "__main__":
     cli()

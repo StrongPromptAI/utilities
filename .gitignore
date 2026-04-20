@@ -25,3 +25,6 @@ __pycache__/
 
 # DevOps agent runtime data
 devops_agent/audit.jsonl
+
+# Local DB snapshots
+database/

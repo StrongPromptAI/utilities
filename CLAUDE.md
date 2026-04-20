@@ -106,6 +106,63 @@ curl -s -X POST https://backboard.railway.com/graphql/v2 \
 
 ---
 
+## Shared Services (embed + STT)
+
+Shared services live under `services/` and are deployed per-project on Railway for PHI isolation. Two services today:
+
+- `services/embed/` — nomic-embed-text-v1.5 ONNX, 768 dims, runs on port 8100. Two endpoints: TEI-native `/embed` (historical) and OpenAI-compatible `/v1/embeddings` (added `88e0521`).
+- `services/stt/` — speech-to-text, port per PORT_REGISTRY.
+
+Both authenticated with JWT (`195ad81`): `aud="stt"` or `aud="embed"`, HS256, dual-secret rotation (`JWT_SECRET` + optional `JWT_SECRET_PREV`). PyJWT dep is in `requirements.txt`; **not** in `pyproject.toml` — fresh `uv` venvs need `uv pip install PyJWT` before first startup.
+
+### Local embed service startup
+
+```bash
+cd ~/repos/utilities/services/embed
+JWT_SECRET=localdev uv run uvicorn app:app --port 8100
+```
+
+Auth is always on (no dev-bypass in code), but the secret value is arbitrary locally — pick anything, use the same value to mint tokens. The 8-byte `localdev` raises `InsecureKeyLengthWarning` from PyJWT; expected, ignore. Production secrets live on Railway (≥32 bytes).
+
+- `GET /health` — public, returns `{"status":"ok","model":"embed","dims":768}`
+- `POST /embed` — auth required, TEI shape: `{"inputs": [...]}` → `[[...]]`
+- `POST /v1/embeddings` — auth required, OpenAI shape: `{"input": [...], "model": "..."}` → `{"data": [{"embedding": [...]}], ...}`
+- `GET /mem` — public, returns RSS (for watching OOM during long batch runs)
+
+### Minting local tokens for consumers
+
+`services/shared_auth/token.py` exposes `make_embed_token(ttl_seconds=1800)` (30-min default) and `make_stt_token(ttl_seconds=300)` (5-min default). Reads `SHARED_SVC_JWT_SECRET` and `SERVICE_NAME` env vars; `SHARED_SVC_JWT_SECRET` must equal the service's `JWT_SECRET`.
+
+```bash
+cd ~/repos/utilities/services/embed
+TOKEN=$(SHARED_SVC_JWT_SECRET=localdev SERVICE_NAME=gitnexus-local \
+  uv run python -c "import sys; sys.path.insert(0, '..'); \
+  from shared_auth.token import make_embed_token; \
+  print(make_embed_token(ttl_seconds=60*60*24*7))")   # 7-day token
+```
+
+For in-process backend consumers (e.g. iTheraputix), `from shared_auth.token import make_embed_token` and call it inline — refresh before expiry.
+
+### gitnexus integration
+
+gitnexus speaks OpenAI-compatible HTTP embeddings. Point it at this service with:
+
+```bash
+export GITNEXUS_EMBEDDING_URL=http://localhost:8100/v1
+export GITNEXUS_EMBEDDING_MODEL=nomic-embed-text-v1.5
+export GITNEXUS_EMBEDDING_DIMS=768
+export GITNEXUS_EMBEDDING_API_KEY=$TOKEN   # 7-day token minted above
+cd ~/repos/<any-project> && gitnexus analyze --embeddings
+```
+
+See `~/repo_docs/skills/gitnexus/SKILL.md` for the gitnexus-side env-var contract (what's required, wire protocol, fallback behavior).
+
+### Deps drift to fix
+
+`services/embed/pyproject.toml` lists only `fastapi`, `uvicorn`, `nomic-onnx-embed`. `services/embed/requirements.txt` has the full set including `PyJWT`, `loguru`, `huggingface-hub`, `numpy`, `onnxruntime`, `transformers`. A fresh `uv run` misses the extras. Same drift likely in `services/stt/`. Low-priority cleanup: sync deps into `pyproject.toml` so `uv run` just works.
+
+---
+
 ## KB (Knowledge Base)
 
 Stakeholder intelligence system. User asks natural language questions, you run `kb` commands via Bash tool.

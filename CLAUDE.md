@@ -180,7 +180,23 @@ See `~/repo_docs/skills/gitnexus/SKILL.md` for the gitnexus-side env-var contrac
 
 ### Railway env
 
-Production on `shared-svcs` project (`504e0aec-fb69-443b-9786-139b5fe50e0a`): `JWT_SECRET` set (64 chars) on all three services (embed, stt, whisper). `RAILWAY_ENVIRONMENT=production` auto-populated. Explicit `ENVIRONMENT` not needed on Railway — the fallback to `RAILWAY_ENVIRONMENT` handles it. If setting up a new Railway environment (e.g. staging), Railway's auto `RAILWAY_ENVIRONMENT` value will be that environment's name, which must be one of `production` / `staging` for auth to turn on.
+Production on `shared-svcs` project: `JWT_SECRET` set (64 chars) on all three services (embed, stt, whisper). `RAILWAY_ENVIRONMENT=production` auto-populated. Explicit `ENVIRONMENT` not needed on Railway — the fallback to `RAILWAY_ENVIRONMENT` handles it. If setting up a new Railway environment (e.g. staging), Railway's auto `RAILWAY_ENVIRONMENT` value will be that environment's name, which must be one of `production` / `staging` for auth to turn on.
+
+### Railway IDs & URLs
+
+**Project**: `504e0aec-fb69-443b-9786-139b5fe50e0a`
+**Environment (production)**: `1ea8ab63-10af-4b83-b562-68a4a5c4f670`
+**Workspace**: `ddd86c61-bd3b-4316-9f5c-d44541c66cc3`
+
+| Service | ID | URL |
+|---------|-----|-----|
+| stt | `d86f18dc-b843-41e2-b67a-c8ffbeca3817` | `wss://shared-svcs-stt.up.railway.app/transcribe` |
+| embed | `ab604f00-e72c-4865-b362-843f585e2051` | `https://shared-svcs-embed.up.railway.app/embed` |
+| whisper | `2fe8a99d-8e57-47de-b7e5-f7ef4371cf66` | `https://shared-svcs-whisper.up.railway.app/v1/audio/transcriptions` |
+
+Whisper reuses `aud="stt"` — one token type works for both streaming STT (WS) and Whisper batch (REST).
+
+**GraphQL config**: `rootDirectory` without leading slash, `dockerfilePath: Dockerfile`, `watchPatterns: ["**"]`.
 
 ---
 

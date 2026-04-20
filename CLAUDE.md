@@ -110,56 +110,77 @@ curl -s -X POST https://backboard.railway.com/graphql/v2 \
 
 Shared services live under `services/` and are deployed per-project on Railway for PHI isolation. Two services today:
 
-- `services/embed/` — nomic-embed-text-v1.5 ONNX, 768 dims, runs on port 8100. Two endpoints: TEI-native `/embed` (historical) and OpenAI-compatible `/v1/embeddings` (added `88e0521`).
-- `services/stt/` — speech-to-text, port per PORT_REGISTRY.
+- `services/embed/` — nomic-embed-text-v1.5 ONNX, 768 dims, port 8100. Two endpoints: TEI-native `/embed` and OpenAI-compatible `/v1/embeddings`.
+- `services/stt/` — sherpa-onnx streaming speech-to-text. Port per PORT_REGISTRY.
 
-Both authenticated with JWT (`195ad81`): `aud="stt"` or `aud="embed"`, HS256, dual-secret rotation (`JWT_SECRET` + optional `JWT_SECRET_PREV`). PyJWT dep is in `requirements.txt`; **not** in `pyproject.toml` — fresh `uv` venvs need `uv pip install PyJWT` before first startup.
+### Environment-gated auth (dev = off, prod/staging = on)
 
-### Local embed service startup
+Both services check `ENVIRONMENT` (explicit) or `RAILWAY_ENVIRONMENT` (auto-set by Railway on every service) at startup. Auth enforcement is keyed off that:
+
+| Where | `ENVIRONMENT` | `RAILWAY_ENVIRONMENT` | Mode | Auth |
+|-------|--------------|----------------------|------|------|
+| Fresh local clone | unset | unset | development | **off** |
+| Local prod-auth test | `production` | unset | production | on |
+| Railway production | unset | `production` (auto) | production | on |
+| Railway staging (future) | unset | `staging` (auto) | staging | on |
+
+Default is committed in code (`app.py`). No per-machine `.env` file, no shell profile setup, no gitignored config to sync. A fresh clone on any new machine runs with auth off; Railway deploys run with auth on automatically via its own `RAILWAY_ENVIRONMENT` auto-population.
+
+### Starting locally
 
 ```bash
-cd ~/repos/utilities/services/embed
-JWT_SECRET=localdev uv run uvicorn app:app --port 8100
+cd ~/repos/utilities/services/embed && uv run uvicorn app:app --port 8100
+cd ~/repos/utilities/services/stt   && uv run uvicorn app:app --port <per PORT_REGISTRY>
 ```
 
-Auth is always on (no dev-bypass in code), but the secret value is arbitrary locally — pick anything, use the same value to mint tokens. The 8-byte `localdev` raises `InsecureKeyLengthWarning` from PyJWT; expected, ignore. Production secrets live on Railway (≥32 bytes).
+No env vars needed. No token minting. All endpoints serve unauthenticated.
 
-- `GET /health` — public, returns `{"status":"ok","model":"embed","dims":768}`
-- `POST /embed` — auth required, TEI shape: `{"inputs": [...]}` → `[[...]]`
-- `POST /v1/embeddings` — auth required, OpenAI shape: `{"input": [...], "model": "..."}` → `{"data": [{"embedding": [...]}], ...}`
-- `GET /mem` — public, returns RSS (for watching OOM during long batch runs)
+### Endpoints — embed
 
-### Minting local tokens for consumers
+- `GET /health` — public, always — returns `{"status":"ok","model":"embed","dims":768}`
+- `GET /mem` — public, always — RSS for OOM monitoring
+- `POST /embed` — auth enforced only in prod/staging — TEI shape: `{"inputs": [...]}` → `[[...]]`
+- `POST /v1/embeddings` — auth enforced only in prod/staging — OpenAI shape: `{"input": [...], "model": "..."}` → `{"data": [{"embedding": [...]}], ...}`
 
-`services/shared_auth/token.py` exposes `make_embed_token(ttl_seconds=1800)` (30-min default) and `make_stt_token(ttl_seconds=300)` (5-min default). Reads `SHARED_SVC_JWT_SECRET` and `SERVICE_NAME` env vars; `SHARED_SVC_JWT_SECRET` must equal the service's `JWT_SECRET`.
+### Endpoints — STT
 
+- `GET /health` — public, always
+- `WS /transcribe` — in prod, first WS text frame must be a valid JWT (`aud="stt"`); in dev, the first-frame JWT check is skipped entirely (any text frame is accepted and the WS connects immediately)
+
+### Minting tokens (prod consumers)
+
+`services/shared_auth/token.py` exposes `make_embed_token(ttl_seconds=1800)` and `make_stt_token(ttl_seconds=300)`. Reads `SHARED_SVC_JWT_SECRET` (must equal the service's `JWT_SECRET`) and `SERVICE_NAME`.
+
+In-process backend consumers (e.g. iTheraputix): `from shared_auth.token import make_embed_token` and call inline, refreshing before expiry.
+
+Command-line / out-of-process consumers that need a token for prod-mirror testing:
 ```bash
-cd ~/repos/utilities/services/embed
-TOKEN=$(SHARED_SVC_JWT_SECRET=localdev SERVICE_NAME=gitnexus-local \
+TOKEN=$(SHARED_SVC_JWT_SECRET=$JWT_SECRET SERVICE_NAME=local-dev \
   uv run python -c "import sys; sys.path.insert(0, '..'); \
-  from shared_auth.token import make_embed_token; \
-  print(make_embed_token(ttl_seconds=60*60*24*7))")   # 7-day token
+  from shared_auth.token import make_embed_token; print(make_embed_token(ttl_seconds=86400))")
 ```
 
-For in-process backend consumers (e.g. iTheraputix), `from shared_auth.token import make_embed_token` and call it inline — refresh before expiry.
+### gitnexus integration (local development)
 
-### gitnexus integration
-
-gitnexus speaks OpenAI-compatible HTTP embeddings. Point it at this service with:
+gitnexus speaks OpenAI-compatible HTTP embeddings. With the local embed service running unauthenticated in dev:
 
 ```bash
 export GITNEXUS_EMBEDDING_URL=http://localhost:8100/v1
 export GITNEXUS_EMBEDDING_MODEL=nomic-embed-text-v1.5
 export GITNEXUS_EMBEDDING_DIMS=768
-export GITNEXUS_EMBEDDING_API_KEY=$TOKEN   # 7-day token minted above
+# GITNEXUS_EMBEDDING_API_KEY unset — gitnexus sends "Bearer unused", dev mode ignores
 cd ~/repos/<any-project> && gitnexus analyze --embeddings
 ```
 
-See `~/repo_docs/skills/gitnexus/SKILL.md` for the gitnexus-side env-var contract (what's required, wire protocol, fallback behavior).
+See `~/repo_docs/skills/gitnexus/SKILL.md` for the gitnexus-side env-var contract (required vars, wire protocol, fallback behavior).
 
-### Deps drift to fix
+### Skill Radar hook
 
-`services/embed/pyproject.toml` lists only `fastapi`, `uvicorn`, `nomic-onnx-embed`. `services/embed/requirements.txt` has the full set including `PyJWT`, `loguru`, `huggingface-hub`, `numpy`, `onnxruntime`, `transformers`. A fresh `uv run` misses the extras. Same drift likely in `services/stt/`. Low-priority cleanup: sync deps into `pyproject.toml` so `uv run` just works.
+`utilities/scripts/skill_hook/hook.py` calls `http://localhost:8100/embed` without an Authorization header — relies on dev-mode auth-off to land. This is why local dev must stay auth-off by default, not require per-machine token setup.
+
+### Railway env
+
+Production on `shared-svcs` project (`504e0aec-fb69-443b-9786-139b5fe50e0a`): `JWT_SECRET` set (64 chars) on all three services (embed, stt, whisper). `RAILWAY_ENVIRONMENT=production` auto-populated. Explicit `ENVIRONMENT` not needed on Railway — the fallback to `RAILWAY_ENVIRONMENT` handles it. If setting up a new Railway environment (e.g. staging), Railway's auto `RAILWAY_ENVIRONMENT` value will be that environment's name, which must be one of `production` / `staging` for auth to turn on.
 
 ---
 

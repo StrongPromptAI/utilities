@@ -5,11 +5,15 @@ Shared service for the shared-svcs Railway project.
 Source: utilities/services/embed/
 
 Endpoints:
-  GET  /health              — 200 ready, 503 loading, 500 error (unauthenticated)
+  GET  /health              — 200 ready, 503 loading, 500 error (always unauthenticated)
+  GET  /mem                 — RSS snapshot (always unauthenticated, for monitoring)
   POST /embed               — TEI-compatible: {"inputs": [str,...]} -> [[float,...],...]
-  POST /v1/embeddings       — OpenAI-compatible (for OpenWebUI RAG)
+  POST /v1/embeddings       — OpenAI-compatible (for OpenWebUI RAG, gitnexus, etc.)
 
 Auth: JWT HS256, required claims: exp, iss, aud="embed". Bearer token in Authorization header.
+Enforced only in prod/staging (ENVIRONMENT or RAILWAY_ENVIRONMENT set). Dev mode
+serves every endpoint unauthenticated — no local token setup required.
+
 No request body logging — inputs may contain patient text (PHI).
 """
 
@@ -25,8 +29,24 @@ from pydantic import BaseModel
 
 app = FastAPI(title="embed")
 
-JWT_SECRET = os.environ["JWT_SECRET"]
-JWT_SECRET_PREV = os.environ.get("JWT_SECRET_PREV")
+# Environment resolution: explicit ENVIRONMENT wins, else Railway's auto-set
+# RAILWAY_ENVIRONMENT, else "development". Dev-mode disables auth so hooks,
+# gitnexus, and local backends can call the service with no token setup.
+ENVIRONMENT = (
+    os.environ.get("ENVIRONMENT")
+    or os.environ.get("RAILWAY_ENVIRONMENT")
+    or "development"
+)
+_IS_PROD = ENVIRONMENT in ("production", "staging")
+
+if _IS_PROD:
+    JWT_SECRET = os.environ["JWT_SECRET"]
+    JWT_SECRET_PREV = os.environ.get("JWT_SECRET_PREV")
+else:
+    # Dev defaults — arbitrary, never trusted on prod because _IS_PROD gates auth
+    JWT_SECRET = os.environ.get("JWT_SECRET", "localdev")
+    JWT_SECRET_PREV = None
+
 _JWT_OPTIONS = {"require": ["exp", "iss", "aud"]}
 
 _bearer = HTTPBearer()
@@ -45,6 +65,12 @@ def _require_embed_token(creds: HTTPAuthorizationCredentials = Security(_bearer)
         except _jwt.PyJWTError as e:
             errors.append(e)
     raise HTTPException(status_code=401, detail="invalid token")
+
+
+# Auth dependency list — applied to /embed and /v1/embeddings only in prod/staging.
+# Dev mode serves both endpoints unauthenticated so tools without token-minting
+# infrastructure (hooks, gitnexus, quick curl) can reach the service locally.
+_AUTH_DEPS = [Depends(_require_embed_token)] if _IS_PROD else []
 
 
 def _warmup() -> None:
@@ -103,7 +129,7 @@ class OpenAIEmbedRequest(BaseModel):
     model: str = "nomic-embed-text-v1.5"
 
 
-@app.post("/embed", dependencies=[Depends(_require_embed_token)])
+@app.post("/embed", dependencies=_AUTH_DEPS)
 async def embed(req: EmbedRequest):
     """TEI-compatible batch embedding."""
     if not _ready:
@@ -126,7 +152,7 @@ async def embed(req: EmbedRequest):
         raise HTTPException(500, str(exc))
 
 
-@app.post("/v1/embeddings", dependencies=[Depends(_require_embed_token)])
+@app.post("/v1/embeddings", dependencies=_AUTH_DEPS)
 async def openai_embeddings(req: OpenAIEmbedRequest):
     """OpenAI-compatible embeddings endpoint for OpenWebUI RAG."""
     if not _ready:

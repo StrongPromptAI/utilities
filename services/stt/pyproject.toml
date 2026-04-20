@@ -5,10 +5,11 @@ description = "Sherpa-ONNX streaming STT service"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.111.0",
-    "uvicorn>=0.30.0",
+    "uvicorn[standard]>=0.30.0",
     "numpy>=1.24.0",
     "sherpa-onnx>=1.10.0",
     "huggingface-hub>=0.23.0",
+    "PyJWT>=2.8.0",
 ]
 
 [build-system]

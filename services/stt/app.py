@@ -5,10 +5,12 @@ Shared service for the shared-svcs Railway project.
 Source: utilities/services/stt/
 
 Endpoints:
-  GET  /health       — 200 ready, 503 loading, 500 error
+  GET  /health       — 200 ready, 503 loading, 500 error (always unauthenticated)
   WS   /transcribe   — first frame = JWT (aud=stt); then binary PCM int16 mono 16kHz → JSON transcripts
 
 Auth: JWT HS256, required claims: exp, iss, aud="stt". Token sent as first WS text frame (never in URL).
+Enforced only in prod/staging (ENVIRONMENT or RAILWAY_ENVIRONMENT set). Dev mode
+accepts any first frame without validation — no local token setup required.
 """
 
 import asyncio
@@ -33,8 +35,23 @@ MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/app/models"))
 ORT_THREADS = int(os.environ.get("ORT_THREADS", "2"))
 STT_SAMPLE_RATE = 16000
 
-JWT_SECRET = os.environ["JWT_SECRET"]
-JWT_SECRET_PREV = os.environ.get("JWT_SECRET_PREV")
+# Environment resolution: explicit ENVIRONMENT wins, else Railway's auto-set
+# RAILWAY_ENVIRONMENT, else "development". Dev-mode skips WS first-frame JWT
+# validation so local clients can connect without token-minting setup.
+ENVIRONMENT = (
+    os.environ.get("ENVIRONMENT")
+    or os.environ.get("RAILWAY_ENVIRONMENT")
+    or "development"
+)
+_IS_PROD = ENVIRONMENT in ("production", "staging")
+
+if _IS_PROD:
+    JWT_SECRET = os.environ["JWT_SECRET"]
+    JWT_SECRET_PREV = os.environ.get("JWT_SECRET_PREV")
+else:
+    JWT_SECRET = os.environ.get("JWT_SECRET", "localdev")
+    JWT_SECRET_PREV = None
+
 _JWT_OPTIONS = {"require": ["exp", "iss", "aud"]}
 
 os.environ.setdefault("HF_HOME", str(MODELS_DIR / "hf_cache"))
@@ -155,30 +172,33 @@ async def transcribe(ws: WebSocket) -> None:
 
     await ws.accept()
 
-    # First frame must be the JWT — token never goes in the URL
-    try:
-        token = await asyncio.wait_for(ws.receive_text(), timeout=5.0)
-        payload = _validate_token(token)
-    except asyncio.TimeoutError:
-        await ws.close(code=4401, reason="auth timeout")
-        return
-    except _jwt.PyJWTError:
-        await ws.close(code=4401, reason="invalid token")
-        return
+    expiry_task: asyncio.Task | None = None
 
-    # Schedule forced close at token expiry so long-lived connections can't outlive the token
-    exp = payload["exp"]
-    max_age = max(0, exp - int(time.time()))
-    loop = asyncio.get_event_loop()
-
-    async def _expire():
-        await asyncio.sleep(max_age)
+    if _IS_PROD:
+        # First frame must be the JWT — token never goes in the URL
         try:
-            await ws.close(code=1001, reason="token expired")
-        except Exception:
-            pass
+            token = await asyncio.wait_for(ws.receive_text(), timeout=5.0)
+            payload = _validate_token(token)
+        except asyncio.TimeoutError:
+            await ws.close(code=4401, reason="auth timeout")
+            return
+        except _jwt.PyJWTError:
+            await ws.close(code=4401, reason="invalid token")
+            return
 
-    expiry_task = loop.create_task(_expire())
+        # Schedule forced close at token expiry so long-lived connections can't outlive the token
+        exp = payload["exp"]
+        max_age = max(0, exp - int(time.time()))
+        loop = asyncio.get_event_loop()
+
+        async def _expire() -> None:
+            await asyncio.sleep(max_age)
+            try:
+                await ws.close(code=1001, reason="token expired")
+            except Exception:
+                pass
+
+        expiry_task = loop.create_task(_expire())
 
     stream = _stt.create_stream()
     segment = 0
@@ -251,5 +271,6 @@ async def transcribe(ws: WebSocket) -> None:
     except Exception as exc:
         _log(f"[stt] Transcribe error ({type(exc).__name__}): {exc}")
     finally:
-        expiry_task.cancel()
+        if expiry_task is not None:
+            expiry_task.cancel()
         del stream

@@ -19,14 +19,16 @@ Exits silently (code 0) on any failure — never blocks Claude Code.
 import json
 import re
 import sys
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Local import — shared-svcs embed client (Railway-hosted, JWT-authed).
+sys.path.insert(0, str(Path(__file__).parent))
+from embed_client import embed as _shared_embed
 
 INDEX_PATH = Path.home() / ".claude/skill_index.json"
 SKILL_DEBT_PATH = Path.home() / "repo_docs/skills/SKILL_DEBT.md"
 SKILL_INJECT_LOG_PATH = Path.home() / "repo_docs/skills/SKILL_INJECT_LOG.md"
-EMBED_URL = "http://localhost:8100/embed"
 QUERY_PREFIX = "search_query: "
 THRESHOLD = 0.70
 TOP_N = 2
@@ -48,15 +50,10 @@ def dot(a: list[float], b: list[float]) -> float:
 
 
 def embed(text: str) -> list[float] | None:
+    """Single-text embed via shared-svcs. Returns None on any failure so the
+    hook silently no-ops instead of blocking Claude Code."""
     try:
-        payload = json.dumps({"inputs": [text]}).encode()
-        req = urllib.request.Request(
-            EMBED_URL,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            return json.loads(resp.read())[0]
+        return _shared_embed([text], timeout=3.0)[0]
     except Exception:
         return None
 

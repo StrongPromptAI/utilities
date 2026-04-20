@@ -82,14 +82,20 @@ def _load_stt() -> None:
 
     try:
         import sherpa_onnx
-        from huggingface_hub import snapshot_download
 
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
         stt_dir = MODELS_DIR / "streaming-zipformer-en-2023-06-21"
+        baked_present = stt_dir.exists() and (stt_dir / "encoder-epoch-99-avg-1.int8.onnx").exists()
 
-        if not stt_dir.exists() or not (stt_dir / "encoder-epoch-99-avg-1.int8.onnx").exists():
-            _log("[stt] Downloading streaming Zipformer model...")
+        if not baked_present:
+            if _IS_PROD:
+                raise RuntimeError(
+                    f"Baked model missing in prod: expected {stt_dir}. "
+                    "Fix the Dockerfile bake step — do not fall back to HF download."
+                )
+            from huggingface_hub import snapshot_download
+            _log("[stt] Dev mode: baked model not found, downloading from HF...")
             snapshot_download(
                 repo_id="csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-21",
                 local_dir=str(stt_dir),

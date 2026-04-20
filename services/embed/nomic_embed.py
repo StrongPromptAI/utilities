@@ -7,11 +7,9 @@ No torch/optimum dependency — just onnxruntime + transformers tokenizer + nump
 
 import os
 from functools import lru_cache
-from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
-from huggingface_hub import hf_hub_download
 from loguru import logger
 from transformers import AutoTokenizer
 
@@ -20,17 +18,35 @@ _ONNX_FILE = "onnx/model.onnx"
 _LOCAL_MODEL_PATH = "/app/models/nomic/onnx/model.onnx"
 _LOCAL_TOKENIZER_DIR = "/app/models/tokenizer"
 
+_IS_PROD = (
+    os.environ.get("ENVIRONMENT") or os.environ.get("RAILWAY_ENVIRONMENT") or ""
+) in ("production", "staging")
+
 
 @lru_cache(maxsize=1)
 def _get_session(model_id: str = None):
-    """Load ONNX session + tokenizer from baked image paths; fall back to HF cache."""
+    """Load ONNX session + tokenizer from baked image paths.
+
+    Prod/staging: baked paths are required — missing files raise RuntimeError
+    (never silently re-download, which can OOM concurrent with ORT init).
+    Dev: falls back to HF download so fresh clones work with no setup.
+    """
     model_id = model_id or _MODEL_ID
     logger.info(f"Loading ONNX model: {model_id}")
 
-    if os.path.exists(_LOCAL_MODEL_PATH) and os.path.exists(_LOCAL_TOKENIZER_DIR):
+    baked_present = os.path.exists(_LOCAL_MODEL_PATH) and os.path.exists(_LOCAL_TOKENIZER_DIR)
+
+    if baked_present:
         model_path = _LOCAL_MODEL_PATH
         tokenizer = AutoTokenizer.from_pretrained(_LOCAL_TOKENIZER_DIR)
+    elif _IS_PROD:
+        raise RuntimeError(
+            f"Baked model missing in prod: expected {_LOCAL_MODEL_PATH} and {_LOCAL_TOKENIZER_DIR}. "
+            "Fix the Dockerfile bake step — do not fall back to HF download (OOM risk)."
+        )
     else:
+        from huggingface_hub import hf_hub_download
+        logger.warning("Dev mode: baked model not found, downloading from HF")
         model_path = hf_hub_download(repo_id=model_id, filename=_ONNX_FILE)
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 

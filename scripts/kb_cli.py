@@ -2012,5 +2012,78 @@ def ingest_pretag(project, limit, reprocess):
     click.secho(f"\nPosition paper predicted ~65-70% static. Actual: {static_pct}", dim=True)
 
 
+# ─── Documentation ingest (scraped markdown repos) ─────────────────────────
+
+@cli.group("docs")
+def docs_cmd():
+    """Ingest + search external documentation (e.g., OpenWebUI docs)."""
+    pass
+
+
+@docs_cmd.command("ingest")
+@click.option("--project", "-p", required=True, help="Project name (e.g. openwebui-docs)")
+@click.option("--keep", type=click.Path(), default=None,
+              help="Keep the cloned repo at this path instead of cleaning up (for debugging)")
+@click.option("--limit", type=int, default=None, help="Limit to first N markdown files (dry-run)")
+def docs_ingest(project, keep, limit):
+    """Clone the docs repo, chunk, embed, upsert. Idempotent."""
+    from scripts.kb_core.ingest.docs import ingest_project
+    result = ingest_project(project, keep_clone=keep, limit_files=limit)
+    click.secho(
+        f"\n✅ ingest complete: {result['files']} files · "
+        f"{result['chunks_written']} chunks written · "
+        f"{result['chunks_pruned']} stale pruned",
+        fg="green",
+    )
+
+
+@docs_cmd.command("search")
+@click.argument("query")
+@click.option("--project", "-p", default="openwebui-docs", help="Project name (default: openwebui-docs)")
+@click.option("-k", "--limit", default=5, help="Top K results (default: 5)")
+@click.option("--json", "as_json", is_flag=True, help="Output JSON for programmatic consumption")
+def docs_search(query, project, limit, as_json):
+    """Semantic search over ingested docs. Returns source URL + section + snippet."""
+    from scripts.kb_core.crud.docs import semantic_search_docs
+    results = semantic_search_docs(query, project_name=project, limit=limit)
+    if as_json:
+        import json as _json
+        click.echo(_json.dumps([{
+            "source_url": r["source_url"],
+            "section_path": r["section_path"],
+            "similarity": round(r["similarity"], 3),
+            "text": r["text"],
+        } for r in results], indent=2))
+        return
+    if not results:
+        click.secho("(no results — has the project been ingested?)", fg="yellow")
+        return
+    for i, r in enumerate(results, 1):
+        click.secho(f"\n#{i}  sim={r['similarity']:.3f}  {r['section_path'] or '(no section)'}", fg="cyan", bold=True)
+        click.echo(f"   {r['source_url']}")
+        preview = r["text"][:400] + ("…" if len(r["text"]) > 400 else "")
+        click.echo(f"\n{preview}")
+
+
+@docs_cmd.command("reset")
+@click.option("--project", "-p", required=True, help="Project name")
+@click.confirmation_option(prompt="Delete all doc_chunks for this project?")
+def docs_reset(project):
+    """Wipe all doc_chunks for a project. Project row itself is preserved."""
+    from scripts.kb_core.crud.docs import semantic_search_docs  # noqa: ensures import works
+    from scripts.kb_core.crud.docs import reset_project, get_or_create_project
+    pid = get_or_create_project(project)
+    n = reset_project(pid)
+    click.secho(f"deleted {n} rows", fg="yellow")
+
+
+@docs_cmd.command("stats")
+@click.option("--project", "-p", default="openwebui-docs", help="Project name")
+def docs_stats(project):
+    """Show count of ingested chunks for a project."""
+    from scripts.kb_core.crud.docs import count_chunks
+    click.echo(f"{project}: {count_chunks(project)} chunks")
+
+
 if __name__ == "__main__":
     cli()

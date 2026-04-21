@@ -3,7 +3,8 @@ FROM nextcloud:apache
 # entrypoint-wrapper.sh runs as root BEFORE the nextcloud entrypoint.
 # It writes config.php (so the install check is skipped) and fixes MPM.
 # Hooks run AFTER the install check — too late for config.php or MPM.
-COPY entrypoint-wrapper.sh /entrypoint-wrapper.sh
+COPY entrypoint-wrapper.sh       /entrypoint-wrapper.sh
+COPY entrypoint-wrapper-state.php /entrypoint-wrapper-state.php
 RUN chmod +x /entrypoint-wrapper.sh
 
 RUN mkdir -p /docker-entrypoint-hooks.d/before-starting

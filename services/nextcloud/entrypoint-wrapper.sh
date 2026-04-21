@@ -32,11 +32,17 @@ a2dismod mpm_event 2>/dev/null || true
 a2enmod mpm_prefork
 echo "[wrapper] MPM: prefork enforced"
 
-# ─── Always: data dir perms ────────────────────────────────────────────────
-# Even with S3 object storage, Nextcloud still writes logs / .ocdata sentinel
-# here. /var/www/html/data is ephemeral — that's fine, these are regenerated.
+# ─── Always: data dir perms + sentinel ─────────────────────────────────────
+# Even with S3 as primary object store, /var/www/html/data is still required
+# to exist locally with a sentinel. Nextcloud 33 checks for `.ncdata` (content
+# "# Nextcloud data directory") on EVERY boot. The install writes it; skipping
+# install does not. Since this dir is ephemeral (regenerated each deploy),
+# write the sentinel every time — idempotent.
 mkdir -p /var/www/html/data
+echo "# Nextcloud data directory" > /var/www/html/data/.ncdata
 chown -R www-data:www-data /var/www/html/data
+chmod 750 /var/www/html/data
+chmod 640 /var/www/html/data/.ncdata
 
 # ─── Always: config volume perms ───────────────────────────────────────────
 # The volume comes up owned by root. Nextcloud + occ run as www-data and

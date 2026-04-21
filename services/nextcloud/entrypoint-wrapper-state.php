@@ -7,7 +7,7 @@
  * Three outcomes:
  *   1. "healthy"  → write config.php from live DB values + env vars; entrypoint
  *                   skips install; occ upgrade only if version drifted.
- *   2. "orphaned" → orphan oc_admin*/oc_user* roles present (crashed prior
+ *   2. "orphaned" → orphan oc_admin%/oc_user% roles present (crashed prior
  *                   install). DROP OWNED BY them first, then drop all oc_*
  *                   tables/seq/views/types; entrypoint installs fresh.
  *   3. "fresh"    → no installedat sentinel. Just let entrypoint install.

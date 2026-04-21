@@ -50,15 +50,25 @@ CONFIG_FILE=/var/www/html/config/config.php
 [ -f "$CONFIG_FILE" ] && config_present=yes || config_present=no
 
 db_installed=$(php -r "
+// Step 1: CONNECT. Failure here = postgres unreachable = fatal; let it bubble.
 try {
     \$pdo = new PDO('pgsql:host=' . (getenv('POSTGRES_HOST') ?: 'postgres.railway.internal') .
                    ';dbname=' . (getenv('POSTGRES_DB') ?: 'postgres'),
                    getenv('POSTGRES_USER'), getenv('POSTGRES_PASSWORD'),
                    [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                     PDO::ATTR_TIMEOUT => 10]);
+} catch (Throwable \$e) {
+    echo 'unreachable:' . \$e->getMessage();
+    exit;
+}
+// Step 2: QUERY. Missing table = fresh DB = 'no'. Other errors also 'no' —
+// the only way we return 'yes' is a clean successful fetch of the sentinel.
+try {
     \$r = \$pdo->query(\"SELECT 1 FROM oc_appconfig WHERE appid='core' AND configkey='installedat' LIMIT 1\")->fetchColumn();
     echo \$r ? 'yes' : 'no';
-} catch (Throwable \$e) { echo 'error:' . \$e->getMessage(); }
+} catch (PDOException \$e) {
+    echo 'no';
+}
 ")
 
 echo "[wrapper] state: config.php=$config_present, db_installedat=$db_installed"
@@ -117,8 +127,9 @@ case "$config_present/$db_installed" in
         exit 1
         ;;
     *)
-        echo "[wrapper] could not assess DB state: $db_installed"
-        echo "[wrapper] refusing to start (crashloop until Postgres is reachable)"
+        # Only reached when db_installed=unreachable:... (Postgres connect failed)
+        echo "[wrapper] $db_installed"
+        echo "[wrapper] refusing to start — Postgres unreachable. Crashlooping until it recovers."
         exit 1
         ;;
 esac

@@ -177,28 +177,36 @@ function sync_version_file(): void {
 // ─── Main decision ─────────────────────────────────────────────────────────
 
 $installed = is_installed($pdo);
-$orphans   = orphan_roles($pdo);
+$roles     = orphan_roles($pdo);
 
-if ($installed && empty($orphans)) {
+// A role like oc_admin / oc_admin2 is only ORPHAN when there's no matching
+// installation — i.e., installedat is missing. After a successful install,
+// the same role pattern is legitimate (created by occ maintenance:install
+// and still referenced by the live Nextcloud). Treating it as orphan when
+// installedat IS set causes every redeploy to drop-and-reinstall, defeating
+// the whole point of Phase 2.
+$orphaned = !$installed && !empty($roles);
+
+if ($installed) {
     // Fast path. Healthy install; just rebuild the ephemeral filesystem state.
-    log_line('state=healthy — fast path (reuse DB; regen config.php from live values)');
+    log_line('state=healthy — fast path (' . count($roles) . ' installed-role(s) preserved)');
     $dbcfg = read_core_config($pdo);
     if (empty($dbcfg['instanceid']) || empty($dbcfg['passwordsalt'])) {
         log_line('WARN: installedat set but instanceid/passwordsalt missing — falling through to cleanup');
-        $installed = false;   // fall through
+        $installed = false;
+        $orphaned  = !empty($roles);
     } else {
         write_config_php($dbcfg);
         sync_version_file();
         log_line('config.php + version.php written from DB values');
-        return;  // exit cleanly; bash continues to /entrypoint.sh
+        return;
     }
 }
 
-if ($orphans) {
-    log_line('state=orphaned — found ' . count($orphans) . ' orphan role(s): ' . implode(', ', $orphans));
-}
-if (!$installed) {
-    log_line('state=' . ($orphans ? 'orphaned' : 'fresh') . ' — cleaning DB for fresh install');
+if ($orphaned) {
+    log_line('state=orphaned — installedat missing but ' . count($roles) . ' orphan role(s): ' . implode(', ', $roles));
+} else {
+    log_line('state=fresh — empty DB, letting entrypoint install');
 }
 
 $counts = cleanup($pdo);

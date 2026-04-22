@@ -38,12 +38,12 @@ http://oxp.chat.strongprompt.ai:{$PORT:8080} {
     }
 }
 
-# ── Nextcloud — oxp.files.strongprompt.ai ────────────────────────────────────
-# WebDAV + long uploads need generous read/write timeouts.
+# ── SFTPGo — oxp.files.strongprompt.ai ───────────────────────────────────────
+# Large file uploads need generous read/write timeouts.
 
 http://oxp.files.strongprompt.ai:{$PORT:8080} {
     import common
-    reverse_proxy nextcloud.railway.internal:80 {
+    reverse_proxy sftpgo.railway.internal:8080 {
         header_up X-Forwarded-Proto https
         header_up X-Forwarded-Host oxp.files.strongprompt.ai
         transport http {

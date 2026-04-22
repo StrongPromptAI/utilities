@@ -39,6 +39,10 @@ CLIENTS = {
         "secret": os.environ["OIDC_CLIENT_NEXTCLOUD_SECRET"],
         "redirect_uri": os.environ["OIDC_CLIENT_NEXTCLOUD_REDIRECT"],
     },
+    os.environ["OIDC_CLIENT_SFTPGO_ID"]: {
+        "secret": os.environ["OIDC_CLIENT_SFTPGO_SECRET"],
+        "redirect_uri": os.environ["OIDC_CLIENT_SFTPGO_REDIRECT"],
+    },
 }
 
 # ── Key setup ────────────────────────────────────────────────────────────────

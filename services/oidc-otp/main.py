@@ -35,10 +35,6 @@ CLIENTS = {
         "secret": os.environ["OIDC_CLIENT_OPENWEBUI_SECRET"],
         "redirect_uri": os.environ["OIDC_CLIENT_OPENWEBUI_REDIRECT"],
     },
-    os.environ["OIDC_CLIENT_NEXTCLOUD_ID"]: {
-        "secret": os.environ["OIDC_CLIENT_NEXTCLOUD_SECRET"],
-        "redirect_uri": os.environ["OIDC_CLIENT_NEXTCLOUD_REDIRECT"],
-    },
     os.environ["OIDC_CLIENT_SFTPGO_ID"]: {
         "secret": os.environ["OIDC_CLIENT_SFTPGO_SECRET"],
         "redirect_uri": os.environ["OIDC_CLIENT_SFTPGO_REDIRECT"],
@@ -424,11 +420,17 @@ async def sftpgo_prelogin(request: Request):
     if protocol != "HTTP" or "@" not in username:
         return JSONResponse({}, status_code=200)
 
+    # SFTPGo's pre-login validator requires explicit user-level permissions
+    # even when the user is in a group that has its own permission set —
+    # group inheritance doesn't satisfy the validator. Mirror the group's
+    # ACL here so the validator passes; the actual runtime auth is still
+    # backed by group inheritance via the user's primary group.
     return JSONResponse({
         "username": username,
         "email": username,
         "status": 1,
         "groups": [{"name": "oidc-users", "type": 1}],
+        "permissions": {"/": ["list", "download", "upload", "overwrite", "delete"]},
     })
 
 

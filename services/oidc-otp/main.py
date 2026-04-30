@@ -411,6 +411,16 @@ async def token_endpoint(
 # can't be used to backdoor SFTP-only auth — those ports are disabled in our
 # deployment anyway, this is belt-and-braces.
 
+# Email domain whitelist for SFTPGo auto-provisioning. Only addresses on
+# these domains get a user record created via the prelogin hook. Edit + redeploy
+# to add or remove a domain.
+_ALLOWED_SFTPGO_DOMAINS = (
+    "orthoxpress.com",
+    "strongprompt.ai",
+    "bilberryindustries.com",
+)
+
+
 @app.post("/sftpgo/prelogin")
 async def sftpgo_prelogin(request: Request):
     body = await request.json()
@@ -419,6 +429,14 @@ async def sftpgo_prelogin(request: Request):
 
     if "@" not in username:
         logger.info("sftpgo prelogin: not an email, returning empty (use-existing)")
+        return JSONResponse({}, status_code=200)
+
+    domain = username.rsplit("@", 1)[-1].lower()
+    if domain not in _ALLOWED_SFTPGO_DOMAINS:
+        logger.warning(
+            "sftpgo prelogin: domain %s not in whitelist, refusing auto-provision for %s",
+            domain, username,
+        )
         return JSONResponse({}, status_code=200)
 
     # SFTPGo's pre-login validator runs the full User schema check before

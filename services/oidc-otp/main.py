@@ -403,6 +403,35 @@ async def token_endpoint(
     })
 
 
+# ── SFTPGo pre-login hook ─────────────────────────────────────────────────────
+# SFTPGo's data provider calls this URL before a login attempt. We return a
+# user spec for any HTTP-protocol login with an email-shaped username so SFTPGo
+# auto-provisions the user on first OIDC redirect. The user's permissions and
+# filesystem (S3 with per-user prefix) come from the `oidc-users` group, so we
+# only set group membership here — leaving permissions/filesystem unset means
+# group settings flow through unchanged.
+#
+# Protocols other than HTTP (SFTP/FTP/DAV) get an empty response so the hook
+# can't be used to backdoor SFTP-only auth — those ports are disabled in our
+# deployment anyway, this is belt-and-braces.
+
+@app.post("/sftpgo/prelogin")
+async def sftpgo_prelogin(request: Request):
+    body = await request.json()
+    username = body.get("username", "")
+    protocol = body.get("protocol", "")
+
+    if protocol != "HTTP" or "@" not in username:
+        return JSONResponse({}, status_code=200)
+
+    return JSONResponse({
+        "username": username,
+        "email": username,
+        "status": 1,
+        "groups": [{"name": "oidc-users", "type": 1}],
+    })
+
+
 # ── Userinfo ──────────────────────────────────────────────────────────────────
 
 @app.get("/userinfo")

@@ -420,17 +420,22 @@ async def sftpgo_prelogin(request: Request):
     if protocol != "HTTP" or "@" not in username:
         return JSONResponse({}, status_code=200)
 
-    # SFTPGo's pre-login validator requires explicit user-level permissions
-    # even when the user is in a group that has its own permission set —
-    # group inheritance doesn't satisfy the validator. Mirror the group's
-    # ACL here so the validator passes; the actual runtime auth is still
-    # backed by group inheritance via the user's primary group.
+    # SFTPGo's pre-login validator runs the full User schema check before
+    # creating the record. It requires:
+    #   - permissions explicitly set (group inheritance doesn't satisfy)
+    #   - filesystem.provider explicitly set (group's S3 provider takes over
+    #     at runtime via the type=1 primary group, but creation needs a value)
+    #   - home_dir as a placeholder (validator wants something even though S3
+    #     users never read from local fs)
+    # Mirror the working hand-created user record here.
     return JSONResponse({
         "username": username,
         "email": username,
         "status": 1,
+        "home_dir": f"/srv/sftpgo/data/{username}",
         "groups": [{"name": "oidc-users", "type": 1}],
         "permissions": {"/": ["list", "download", "upload", "overwrite", "delete"]},
+        "filesystem": {"provider": 0},
     })
 
 

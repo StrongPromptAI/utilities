@@ -414,21 +414,18 @@ async def token_endpoint(
 @app.post("/sftpgo/prelogin")
 async def sftpgo_prelogin(request: Request):
     body = await request.json()
+    logger.info("sftpgo prelogin called: %s", body)
     username = body.get("username", "")
-    protocol = body.get("protocol", "")
 
-    if protocol != "HTTP" or "@" not in username:
+    if "@" not in username:
+        logger.info("sftpgo prelogin: not an email, returning empty (use-existing)")
         return JSONResponse({}, status_code=200)
 
     # SFTPGo's pre-login validator runs the full User schema check before
-    # creating the record. It requires:
-    #   - permissions explicitly set (group inheritance doesn't satisfy)
-    #   - filesystem.provider explicitly set (group's S3 provider takes over
-    #     at runtime via the type=1 primary group, but creation needs a value)
-    #   - home_dir as a placeholder (validator wants something even though S3
-    #     users never read from local fs)
-    # Mirror the working hand-created user record here.
-    return JSONResponse({
+    # creating the record. Mirror the shape of the working hand-created user
+    # record: explicit permissions + filesystem.provider + home_dir placeholder.
+    # Group inheritance via type=1 primary group brings in S3 fs at runtime.
+    spec = {
         "username": username,
         "email": username,
         "status": 1,
@@ -436,7 +433,9 @@ async def sftpgo_prelogin(request: Request):
         "groups": [{"name": "oidc-users", "type": 1}],
         "permissions": {"/": ["list", "download", "upload", "overwrite", "delete"]},
         "filesystem": {"provider": 0},
-    })
+    }
+    logger.info("sftpgo prelogin: returning spec for %s", username)
+    return JSONResponse(spec)
 
 
 # ── Userinfo ──────────────────────────────────────────────────────────────────

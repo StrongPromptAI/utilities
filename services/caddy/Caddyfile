@@ -43,6 +43,11 @@ http://oxp.chat.strongprompt.ai:{$PORT:8080} {
 
 http://oxp.files.strongprompt.ai:{$PORT:8080} {
     import common
+
+    # OTP-only UX: skip the now-empty SFTPGo password page and bounce
+    # straight into the OIDC redirect handler (which 302s to oidc-otp).
+    redir /web/client/login /web/client/oidclogin 302
+
     reverse_proxy sftpgo.railway.internal:8080 {
         header_up X-Forwarded-Proto https
         header_up X-Forwarded-Host oxp.files.strongprompt.ai

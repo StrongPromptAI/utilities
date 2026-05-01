@@ -26,12 +26,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from embed_client import embed as _shared_embed
 
-INDEX_PATH = Path.home() / ".claude/skill_index.json"
+INDEX_WISDOM_PATH = Path.home() / ".claude/skill_index_wisdom.json"
+INDEX_WHAT_PATH = Path.home() / ".claude/skill_index_what.json"
 SKILL_DEBT_PATH = Path.home() / "repo_docs/skills/SKILL_DEBT.md"
 SKILL_INJECT_LOG_PATH = Path.home() / "repo_docs/skills/SKILL_INJECT_LOG.md"
 QUERY_PREFIX = "search_query: "
-THRESHOLD = 0.70
-TOP_N = 2
+
+# Per-dimension thresholds — error text usually wants a code/cluster match
+# (what) more than a wisdom narrative, but wisdom can also fire (e.g.
+# ConnectionRefused → networking skill). Bars are tuned per-distribution.
+THRESHOLD_WISDOM = 0.70
+THRESHOLD_WHAT = 0.65
+
+# Top-1 from each dimension — same discipline as prompt_hook: side-by-side
+# beats stacked-within-one-pool for noise control.
+TOP_PER_DIM = 1
+
 CONTEXT_CHARS = 800  # max chars of chunk text to inject per match
 DEBT_SNIPPET_CHARS = 400  # error snippet saved to skill debt log
 INJECT_SNIPPET_CHARS = 200  # error snippet saved to inject log
@@ -66,13 +76,14 @@ def extract_error(output: str) -> str | None:
     return snippet.strip()
 
 
-def load_index() -> list[dict] | None:
-    if not INDEX_PATH.exists():
-        return None
+def load_index(path: Path) -> list[dict]:
+    """Load one dimension's index. Empty list on any failure."""
+    if not path.exists():
+        return []
     try:
-        return json.loads(INDEX_PATH.read_text())
+        return json.loads(path.read_text())
     except Exception:
-        return None
+        return []
 
 
 def log_skill_debt(error_text: str, top_scored: list[dict]) -> None:
@@ -94,7 +105,7 @@ def log_skill_debt(error_text: str, top_scored: list[dict]) -> None:
 
         entry = (
             f"\n## {ts}\n\n"
-            f"**Best scores (all below {THRESHOLD}):**\n"
+            f"**Best scores (below per-dim thresholds — wisdom {THRESHOLD_WISDOM}, what {THRESHOLD_WHAT}):**\n"
             f"{best_block}\n\n"
             f"**Error snippet:**\n"
             f"```\n{snippet}\n```\n\n"
@@ -188,43 +199,65 @@ def main():
     if not error_text:
         sys.exit(0)
 
-    index = load_index()
-    if not index:
+    wisdom_idx = load_index(INDEX_WISDOM_PATH)
+    what_idx = load_index(INDEX_WHAT_PATH)
+    if not wisdom_idx and not what_idx:
         sys.exit(0)
 
     query_vec = embed(QUERY_PREFIX + error_text)
     if not query_vec:
         sys.exit(0)
 
-    scored = sorted(
-        [{"score": dot(query_vec, s["embedding"]), **s} for s in index],
-        key=lambda x: x["score"],
-        reverse=True,
-    )
+    matches_by_dim: dict[str, list[dict]] = {"wisdom": [], "what": []}
+    top_scored_for_debt: list[dict] = []  # for SKILL_DEBT.md when nothing fires
 
-    matches = [s for s in scored[:TOP_N] if s["score"] >= THRESHOLD]
+    for dim, idx, threshold in (
+        ("wisdom", wisdom_idx, THRESHOLD_WISDOM),
+        ("what", what_idx, THRESHOLD_WHAT),
+    ):
+        if not idx:
+            continue
+        scored = sorted(
+            [{"score": dot(query_vec, s["embedding"]), **s} for s in idx],
+            key=lambda x: x["score"],
+            reverse=True,
+        )
+        matches_by_dim[dim] = [s for s in scored[:TOP_PER_DIM] if s["score"] >= threshold]
+        # Always remember top-2 from each dim for the debt log if everything misses
+        top_scored_for_debt.extend(scored[:2])
 
-    if not matches:
-        log_skill_debt(error_text, scored[:3])
+    all_matches = matches_by_dim["wisdom"] + matches_by_dim["what"]
+
+    if not all_matches:
+        # Sort the debt candidates by score so the log shows actual top-3
+        top_scored_for_debt.sort(key=lambda x: x["score"], reverse=True)
+        log_skill_debt(error_text, top_scored_for_debt[:3])
         sys.exit(0)
 
-    # Log every injection — Outcome C (false positives above threshold) is
-    # only detectable by reviewing this log, not from SKILL_DEBT.md.
-    log_skill_inject(error_text, matches)
+    # Outcome C detection — review this log periodically.
+    log_skill_inject(error_text, all_matches)
 
-    lines = ["Skill Radar — relevant section(s) for this error:"]
-    lines.append("")
-    for m in matches:
-        skill = m.get("skill_name", m.get("name", "?"))
-        header = m.get("header", "")
-        fpath = m.get("file_path", "")
-        score = m["score"]
-        text = m.get("text", m.get("description", ""))
-
-        lines.append(f"[{score:.2f}] {skill} › {header}  ({fpath})")
-        lines.append("---")
-        lines.append(text[:CONTEXT_CHARS])
+    lines: list[str] = []
+    section_labels = {
+        "wisdom": "Skill Radar — what we've learned (Layers 1+4):",
+        "what":   "Skill Radar — what is (Layer 3, project clusters):",
+    }
+    for dim in ("wisdom", "what"):
+        ms = matches_by_dim[dim]
+        if not ms:
+            continue
+        lines.append(section_labels[dim])
         lines.append("")
+        for m in ms:
+            skill = m.get("skill_name", m.get("name", "?"))
+            header = m.get("header", "")
+            fpath = m.get("file_path", "")
+            score = m["score"]
+            text = m.get("text", m.get("description", ""))
+            lines.append(f"[{score:.2f}] {skill} › {header}  ({fpath})")
+            lines.append("---")
+            lines.append(text[:CONTEXT_CHARS])
+            lines.append("")
 
     print(json.dumps({
         "hookSpecificOutput": {

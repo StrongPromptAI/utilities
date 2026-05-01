@@ -30,11 +30,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from embed_client import embed as _shared_embed
 
-INDEX_PATH = Path.home() / ".claude/skill_index.json"
+INDEX_WISDOM_PATH = Path.home() / ".claude/skill_index_wisdom.json"
+INDEX_WHAT_PATH = Path.home() / ".claude/skill_index_what.json"
 SKILL_INJECT_LOG_PATH = Path.home() / "repo_docs/skills/SKILL_INJECT_LOG.md"
 QUERY_PREFIX = "search_query: "
-THRESHOLD = 0.72
-TOP_N = 1
+
+# Bifurcated radar: two content classes, two distributions, two thresholds.
+# - WISDOM (Layers 1+4): narrative, high semantic signal, conservative bar.
+# - WHAT  (Layer 3 cluster digests): structural tables/symbol lists, lower
+#   semantic signal against natural-language prompts; bar tuned for the
+#   distribution observed at build-time.
+THRESHOLD_WISDOM = 0.72
+THRESHOLD_WHAT = 0.65
+
+# Top-1 from each dimension: prompts are usually single-intent on each axis.
+# Two surfaces firing at once is fine; two within one surface doubles noise.
+TOP_PER_DIM = 1
+
 CONTEXT_CHARS = 800
 INJECT_SNIPPET_CHARS = 200
 MIN_PROMPT_CHARS = 30
@@ -116,13 +128,15 @@ def embed(text: str) -> list[float] | None:
         return None
 
 
-def load_index() -> list[dict] | None:
-    if not INDEX_PATH.exists():
-        return None
+def load_index(path: Path) -> list[dict]:
+    """Load one dimension's index. Empty list on any failure (silent no-op
+    discipline — never block Claude Code on a missing/malformed cache)."""
+    if not path.exists():
+        return []
     try:
-        return json.loads(INDEX_PATH.read_text())
+        return json.loads(path.read_text())
     except Exception:
-        return None
+        return []
 
 
 def log_skill_inject(prompt_text: str, matches: list[dict]) -> None:
@@ -180,47 +194,71 @@ def main():
     if SKIP_PATTERNS.match(prompt):
         sys.exit(0)
 
-    index = load_index()
-    if not index:
+    wisdom_idx = load_index(INDEX_WISDOM_PATH)
+    what_idx = load_index(INDEX_WHAT_PATH)
+    if not wisdom_idx and not what_idx:
         sys.exit(0)
 
-    # Tier 1: deterministic keyword match — "quick take", "gitnexus", etc.
-    kw_matches = keyword_prefilter(prompt, index)
+    # Tier 1: deterministic keyword match — fires on either dimension.
+    # Search the union; if the matched chunk is in the what index, it goes
+    # to the "what" surface, otherwise wisdom. Score is 1.0 either way.
+    matches_by_dim: dict[str, list[dict]] = {"wisdom": [], "what": []}
+    kw_matches = keyword_prefilter(prompt, wisdom_idx + what_idx)
     if kw_matches:
-        log_skill_inject(prompt, kw_matches)
-        matches = kw_matches
+        # Bucket each match by which index it came from
+        what_paths = {(e.get("file_path"), e.get("skill_name")) for e in what_idx}
+        for m in kw_matches:
+            key = (m.get("file_path"), m.get("skill_name"))
+            dim = "what" if key in what_paths else "wisdom"
+            matches_by_dim[dim].append(m)
     else:
-        # Tier 2: semantic fallback
+        # Tier 2: semantic — single embed, score against each index, apply
+        # per-dimension threshold, take top-N from each.
         query_vec = embed(QUERY_PREFIX + prompt[:1000])
         if not query_vec:
             sys.exit(0)
 
-        scored = sorted(
-            [{"score": dot(query_vec, s["embedding"]), **s} for s in index],
-            key=lambda x: x["score"],
-            reverse=True,
-        )
+        for dim, idx, threshold in (
+            ("wisdom", wisdom_idx, THRESHOLD_WISDOM),
+            ("what", what_idx, THRESHOLD_WHAT),
+        ):
+            if not idx:
+                continue
+            scored = sorted(
+                [{"score": dot(query_vec, s["embedding"]), **s} for s in idx],
+                key=lambda x: x["score"],
+                reverse=True,
+            )
+            matches_by_dim[dim] = [s for s in scored[:TOP_PER_DIM] if s["score"] >= threshold]
 
-        matches = [s for s in scored[:TOP_N] if s["score"] >= THRESHOLD]
+    all_matches = matches_by_dim["wisdom"] + matches_by_dim["what"]
+    if not all_matches:
+        sys.exit(0)
 
-        if not matches:
-            sys.exit(0)
+    log_skill_inject(prompt, all_matches)
 
-        log_skill_inject(prompt, matches)
-
-    lines = ["Skill Radar — possibly relevant section for this prompt:"]
-    lines.append("")
-    for m in matches:
-        skill = m.get("skill_name", m.get("name", "?"))
-        header = m.get("header", "")
-        fpath = m.get("file_path", "")
-        score = m["score"]
-        text = m.get("text", m.get("description", ""))
-
-        lines.append(f"[{score:.2f}] {skill} › {header}  ({fpath})")
-        lines.append("---")
-        lines.append(text[:CONTEXT_CHARS])
+    # Render side-by-side: one labeled section per dimension that fired.
+    lines: list[str] = []
+    section_labels = {
+        "wisdom": "Skill Radar — what we've learned (Layers 1+4):",
+        "what":   "Skill Radar — what is (Layer 3, project clusters):",
+    }
+    for dim in ("wisdom", "what"):
+        ms = matches_by_dim[dim]
+        if not ms:
+            continue
+        lines.append(section_labels[dim])
         lines.append("")
+        for m in ms:
+            skill = m.get("skill_name", m.get("name", "?"))
+            header = m.get("header", "")
+            fpath = m.get("file_path", "")
+            score = m["score"]
+            text = m.get("text", m.get("description", ""))
+            lines.append(f"[{score:.2f}] {skill} › {header}  ({fpath})")
+            lines.append("---")
+            lines.append(text[:CONTEXT_CHARS])
+            lines.append("")
 
     print(json.dumps({
         "hookSpecificOutput": {

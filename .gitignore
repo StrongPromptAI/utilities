@@ -23,6 +23,9 @@ __pycache__/
 .venv/
 *.so
 
+# Local model weights (services bake these at build time on Railway)
+services/tts/.models/
+
 # DevOps agent runtime data
 devops_agent/audit.jsonl
 

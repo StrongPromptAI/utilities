@@ -44,3 +44,12 @@ def make_embed_token(ttl_seconds: int = 1800) -> str:
         _SECRET,
         algorithm="HS256",
     )
+
+
+def make_tts_token(ttl_seconds: int = 300) -> str:
+    """5-min JWT for TTS calls (aud=tts). Refresh before expiry on long turns."""
+    return jwt.encode(
+        {"iss": _SERVICE, "aud": "tts", "exp": int(time.time()) + ttl_seconds},
+        _SECRET,
+        algorithm="HS256",
+    )

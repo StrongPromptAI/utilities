@@ -106,12 +106,14 @@ curl -s -X POST https://backboard.railway.com/graphql/v2 \
 
 ---
 
-## Shared Services (embed + STT)
+## Shared Services (embed + STT + TTS + Whisper)
 
-Shared services live under `services/` and are deployed per-project on Railway for PHI isolation. Two services today:
+Shared services live under `services/` and are deployed in the `shared-svcs` Railway project. Four services today:
 
 - `services/embed/` — nomic-embed-text-v1.5 ONNX, 768 dims, port 8100. Two endpoints: TEI-native `/embed` and OpenAI-compatible `/v1/embeddings`.
-- `services/stt/` — sherpa-onnx streaming speech-to-text. Port per PORT_REGISTRY.
+- `services/stt/` — sherpa-onnx streaming speech-to-text. Port 8101. WebSocket `/transcribe`.
+- `services/tts/` — Kokoro-82M ONNX text-to-speech, 24 kHz mono. Port 8102. OpenAI-compatible REST `/v1/audio/speech`. Voice allowlist (default `af_heart`); env-tunable via `TTS_VOICE_ALLOWLIST`.
+- `services/whisper/` — faster-whisper batch transcription. OpenAI-compatible REST `/v1/audio/transcriptions`.
 
 ### Environment-gated auth (dev = off, prod/staging = on)
 
@@ -130,7 +132,8 @@ Default is committed in code (`app.py`). No per-machine `.env` file, no shell pr
 
 ```bash
 cd ~/repos/utilities/services/embed && uv run uvicorn app:app --port 8100
-cd ~/repos/utilities/services/stt   && uv run uvicorn app:app --port <per PORT_REGISTRY>
+cd ~/repos/utilities/services/stt   && uv run uvicorn app:app --port 8101
+cd ~/repos/utilities/services/tts   && uv run uvicorn app:app --port 8102
 ```
 
 No env vars needed. No token minting. All endpoints serve unauthenticated.
@@ -147,9 +150,14 @@ No env vars needed. No token minting. All endpoints serve unauthenticated.
 - `GET /health` — public, always
 - `WS /transcribe` — in prod, first WS text frame must be a valid JWT (`aud="stt"`); in dev, the first-frame JWT check is skipped entirely (any text frame is accepted and the WS connects immediately)
 
+### Endpoints — TTS
+
+- `GET /health` — public, always — returns `{"status":"ok","model":"kokoro-82m-v1.0","voices_allowed":[...],"sample_rate":24000,"license":"Apache-2.0"}`
+- `POST /v1/audio/speech` — OpenAI-compatible JSON body: `{"input": "...", "voice": "af_heart", "response_format": "wav"|"pcm", "speed": 1.0, "language": "en-us"}`. Returns `audio/wav` or `audio/L16; rate=24000; channels=1`. Auth `aud="tts"` enforced in prod/staging only. Per-request limits: max 800 chars input, voice must be in allowlist, speed 0.5–2.0.
+
 ### Minting tokens (prod consumers)
 
-`services/shared_auth/token.py` exposes `make_embed_token(ttl_seconds=1800)` and `make_stt_token(ttl_seconds=300)`. Reads `SHARED_SVC_JWT_SECRET` (must equal the service's `JWT_SECRET`) and `SERVICE_NAME`.
+`services/shared_auth/token.py` exposes `make_embed_token(ttl_seconds=1800)`, `make_stt_token(ttl_seconds=300)`, and `make_tts_token(ttl_seconds=300)`. Reads `SHARED_SVC_JWT_SECRET` (must equal the service's `JWT_SECRET`) and `SERVICE_NAME`.
 
 In-process backend consumers (e.g. iTheraputix): `from shared_auth.token import make_embed_token` and call inline, refreshing before expiry.
 
@@ -180,7 +188,7 @@ See `~/repo_docs/skills/gitnexus/SKILL.md` for the gitnexus-side env-var contrac
 
 ### Railway env
 
-Production on `shared-svcs` project: `JWT_SECRET` set (64 chars) on all three services (embed, stt, whisper). `RAILWAY_ENVIRONMENT=production` auto-populated. Explicit `ENVIRONMENT` not needed on Railway — the fallback to `RAILWAY_ENVIRONMENT` handles it. If setting up a new Railway environment (e.g. staging), Railway's auto `RAILWAY_ENVIRONMENT` value will be that environment's name, which must be one of `production` / `staging` for auth to turn on.
+Production on `shared-svcs` project: `JWT_SECRET` set (64 chars) on all four services (embed, stt, whisper, tts). `RAILWAY_ENVIRONMENT=production` auto-populated. Explicit `ENVIRONMENT` not needed on Railway — the fallback to `RAILWAY_ENVIRONMENT` handles it. If setting up a new Railway environment (e.g. staging), Railway's auto `RAILWAY_ENVIRONMENT` value will be that environment's name, which must be one of `production` / `staging` for auth to turn on.
 
 ### Railway IDs & URLs
 
@@ -193,14 +201,55 @@ Production on `shared-svcs` project: `JWT_SECRET` set (64 chars) on all three se
 | stt | `d86f18dc-b843-41e2-b67a-c8ffbeca3817` | `wss://shared-svcs-stt.up.railway.app/transcribe` |
 | embed | `ab604f00-e72c-4865-b362-843f585e2051` | `https://shared-svcs-embed.up.railway.app/embed` |
 | whisper | `2fe8a99d-8e57-47de-b7e5-f7ef4371cf66` | `https://shared-svcs-whisper.up.railway.app/v1/audio/transcriptions` |
+| tts | _set after deploy_ | `https://shared-svcs-tts.up.railway.app/v1/audio/speech` |
 
-Whisper reuses `aud="stt"` — one token type works for both streaming STT (WS) and Whisper batch (REST).
+Whisper reuses `aud="stt"` — one token type works for both streaming STT (WS) and Whisper batch (REST). TTS uses its own `aud="tts"`.
 
 **GraphQL config**: `rootDirectory` without leading slash, `dockerfilePath: Dockerfile`, `watchPatterns: ["**"]`.
 
 ---
 
-## KB (Knowledge Base)
+## oxp-kb (OpenWebUI on Railway)
+
+Self-hosted OpenWebUI stack on Railway project `oxp-kb`. Public surface: `oxp.chat`. Full stack guide: `~/repo_docs/utilities/guides/26-4-17_GUIDE_oxp-kb-stack.md`.
+
+### Railway IDs
+
+**Project**: `96a6d9dd-b680-4821-bee6-ed850a19074b`
+**Environment (production)**: `30bf77ef-ec92-472d-b92a-93e3806bd7e4`
+**Workspace**: `ddd86c61-bd3b-4316-9f5c-d44541c66cc3`
+
+| Service | ID |
+|---------|-----|
+| openwebui | `d373f3ec-d7b9-4939-b399-37a8cdcebf1d` |
+| caddy | `6a3e8be7-db29-42a3-aded-b86c3029941a` |
+| postgres | `6e3ccd17-d0fd-42c5-8edd-bef785445c57` |
+| sftpgo | `8a083805-554f-44e5-9562-9cddd86ca419` |
+| sftpgo-bridge | `16786a24-4ba3-43de-8ed0-746e59ae69cc` |
+| oidc-otp | `bbefc796-5871-428c-ab82-4b44e29d112b` |
+| tika | `38bc46e6-1a8f-4c72-b6e8-f34e62faab45` |
+
+### Document extraction (Tika)
+
+PDF / Office uploads route through **Apache Tika**, deployed as a sidecar service. The default OpenWebUI extractor (pypdf) returns empty content for image-based and many real-world PDFs, which surfaces in the UI as a vague "type error" and in logs as `ValueError: The content provided is empty` from `open_webui.routers.retrieval:process_file`.
+
+Wired via:
+- `CONTENT_EXTRACTION_ENGINE=tika` on openwebui
+- `TIKA_SERVER_URL=http://tika.railway.internal:9998` on openwebui
+- `tika` service is `apache/tika:latest`, listens on `0.0.0.0:9998`
+
+If uploads still produce empty content after Tika is in place, the PDF is fully image-only / scanned with no text layer — Tika does not OCR by default. Add Docling or pre-OCR before upload.
+
+### Gotcha — `PersistentConfig` env vars
+
+OpenWebUI marks many of its env vars (`CONTENT_EXTRACTION_ENGINE`, `TIKA_SERVER_URL`, all `RAG_*`, `PDF_*`, etc.) as **`PersistentConfig`**. The env-var value is read **only on first boot** into the runtime database; after that, the DB row wins and env-var changes are silently ignored.
+
+When changing one of these later:
+1. Update the env var in Railway (for fresh containers / future re-init), AND
+2. Update the same setting in **Admin Settings → Documents** (or the relevant tab) in the OpenWebUI UI, OR
+3. Clear the persisted config row in postgres before redeploying.
+
+If you only do (1), the redeploy looks healthy but behavior is unchanged. The OpenWebUI docs flag which vars are `PersistentConfig` next to each variable's definition.
 
 Stakeholder intelligence system. User asks natural language questions, you run `kb` commands via Bash tool.
 

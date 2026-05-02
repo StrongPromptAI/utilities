@@ -16,9 +16,13 @@ License: Kokoro-82M is Apache 2.0 (hexgrad/Kokoro-82M).
 """
 
 import asyncio
+import collections
+import importlib.metadata
 import io
+import json
 import os
 import sys
+import time
 import wave
 from pathlib import Path
 from typing import Optional
@@ -56,16 +60,33 @@ VOICE_ALLOWLIST = set(
 )
 DEFAULT_VOICE = os.environ.get("TTS_DEFAULT_VOICE", "af_heart")
 MAX_INPUT_CHARS = int(os.environ.get("TTS_MAX_INPUT_CHARS", "800"))
+MAX_CONCURRENCY = int(os.environ.get("TTS_MAX_CONCURRENCY", "4"))
 MIN_SPEED = 0.5
 MAX_SPEED = 2.0
 
 _ready: bool = False
 _load_error: Optional[str] = None
 _kokoro = None
+_kokoro_pkg_version = "unknown"
+
+# Concurrency limiter: Kokoro inference is single-threaded per call; queueing
+# beyond a handful of concurrent requests degrades latency for everyone.
+_synth_semaphore: Optional[asyncio.Semaphore] = None
+_in_flight: int = 0
+
+# Ring buffer of recent synthesis end timestamps for short-window load reporting.
+_recent_synths: collections.deque = collections.deque(maxlen=512)
+_LOAD_WINDOW_SECONDS = 60.0
 
 
 def _log(msg: str) -> None:
     sys.stderr.write(f"{msg}\n")
+    sys.stderr.flush()
+
+
+def _log_event(event: str, **fields) -> None:
+    payload = {"event": event, **fields}
+    sys.stderr.write(json.dumps(payload, separators=(",", ":")) + "\n")
     sys.stderr.flush()
 
 
@@ -99,15 +120,11 @@ def _patch_kokoro_speed_dtype() -> None:
     """
     import kokoro_onnx as _kk
 
-    original = _kk.Kokoro._create_audio
-
     def patched(self, phonemes: str, voice, speed: float):
         import numpy as _np
-        import time as _time
 
         if len(phonemes) > _kk.MAX_PHONEME_LENGTH:
             phonemes = phonemes[: _kk.MAX_PHONEME_LENGTH]
-        start_t = _time.time()
         tokens = _np.array(self.tokenizer.tokenize(phonemes), dtype=_np.int64)
         voice = voice[len(tokens)]
         tokens = [[0, *tokens, 0]]
@@ -131,10 +148,15 @@ def _patch_kokoro_speed_dtype() -> None:
 
 
 def _load_kokoro() -> None:
-    global _ready, _kokoro, _load_error
+    global _ready, _kokoro, _load_error, _kokoro_pkg_version
     try:
         _patch_kokoro_speed_dtype()
         from kokoro_onnx import Kokoro
+
+        try:
+            _kokoro_pkg_version = importlib.metadata.version("kokoro-onnx")
+        except importlib.metadata.PackageNotFoundError:
+            _kokoro_pkg_version = "unknown"
 
         if not (KOKORO_MODEL_PATH.exists() and KOKORO_VOICES_PATH.exists()):
             if _IS_PROD:
@@ -155,7 +177,7 @@ def _load_kokoro() -> None:
                     _log(f"[tts]   fetching {name}...")
                     urllib.request.urlretrieve(f"{base}/{name}", dest)
 
-        _log(f"[tts] Loading Kokoro from {MODELS_DIR}...")
+        _log(f"[tts] Loading Kokoro from {MODELS_DIR}... (kokoro-onnx={_kokoro_pkg_version})")
         _kokoro = Kokoro(str(KOKORO_MODEL_PATH), str(KOKORO_VOICES_PATH))
         _ready = True
         _log("[tts] Ready")
@@ -167,8 +189,17 @@ def _load_kokoro() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
+    global _synth_semaphore
+    _synth_semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _load_kokoro)
+
+
+def _recent_synth_count(now: float) -> int:
+    cutoff = now - _LOAD_WINDOW_SECONDS
+    while _recent_synths and _recent_synths[0] < cutoff:
+        _recent_synths.popleft()
+    return len(_recent_synths)
 
 
 @app.get("/health")
@@ -177,18 +208,27 @@ def health() -> Response:
         return Response(content=_load_error, status_code=500, media_type="text/plain")
     if not _ready:
         return Response(content="loading", status_code=503, media_type="text/plain")
-    body = (
-        '{"status":"ok","model":"kokoro-82m-v1.0","voices_allowed":'
-        + _json_array(sorted(VOICE_ALLOWLIST))
-        + ',"sample_rate":'
-        + str(KOKORO_SAMPLE_RATE)
-        + ',"license":"Apache-2.0","attribution":"hexgrad/Kokoro-82M"}'
+    now = time.time()
+    body = {
+        "status": "ok",
+        "model": "kokoro-82m-v1.0",
+        "version": _kokoro_pkg_version,
+        "voices_allowed": sorted(VOICE_ALLOWLIST),
+        "sample_rate": KOKORO_SAMPLE_RATE,
+        "load": {
+            "in_flight": _in_flight,
+            "synths_last_60s": _recent_synth_count(now),
+            "max_concurrency": MAX_CONCURRENCY,
+        },
+        "rate_limit_remaining": MAX_CONCURRENCY - _in_flight,
+        "license": "Apache-2.0",
+        "attribution": "hexgrad/Kokoro-82M",
+    }
+    return Response(
+        content=json.dumps(body, separators=(",", ":")),
+        status_code=200,
+        media_type="application/json",
     )
-    return Response(content=body, status_code=200, media_type="application/json")
-
-
-def _json_array(items: list[str]) -> str:
-    return "[" + ",".join('"' + i.replace('"', '\\"') + '"' for i in items) + "]"
 
 
 class SpeechRequest(BaseModel):
@@ -229,6 +269,8 @@ def _synthesize_blocking(text: str, voice: str, speed: float, language: str) -> 
 
 @app.post("/v1/audio/speech")
 async def speech(req: SpeechRequest, _: Optional[dict] = Depends(require_tts_token)):
+    global _in_flight
+
     if not _ready:
         raise HTTPException(503, "tts model loading")
 
@@ -251,14 +293,36 @@ async def speech(req: SpeechRequest, _: Optional[dict] = Depends(require_tts_tok
     if fmt not in ("wav", "pcm"):
         raise HTTPException(400, "response_format must be 'wav' or 'pcm'")
 
-    loop = asyncio.get_event_loop()
-    try:
-        samples, sample_rate = await loop.run_in_executor(
-            None, _synthesize_blocking, text, req.voice, req.speed, req.language
-        )
-    except Exception as exc:
-        _log(f"[tts] synth error ({type(exc).__name__}): {exc}")
-        raise HTTPException(500, f"synthesis failed: {exc}")
+    assert _synth_semaphore is not None
+    async with _synth_semaphore:
+        _in_flight += 1
+        t_start = time.perf_counter()
+        loop = asyncio.get_event_loop()
+        try:
+            samples, sample_rate = await loop.run_in_executor(
+                None, _synthesize_blocking, text, req.voice, req.speed, req.language
+            )
+        except Exception as exc:
+            _log_event("synth_error", error_type=type(exc).__name__, error=str(exc))
+            _in_flight -= 1
+            raise HTTPException(500, f"synthesis failed: {exc}")
+
+        synth_ms = (time.perf_counter() - t_start) * 1000.0
+        # Kokoro returns shape (1, N); samples.size gives the true frame count.
+        audio_seconds = samples.size / sample_rate
+        rtf = (synth_ms / 1000.0) / audio_seconds if audio_seconds > 0 else 0.0
+        _recent_synths.append(time.time())
+        _in_flight -= 1
+
+    _log_event(
+        "synth",
+        voice=req.voice,
+        chars=len(text),
+        synth_ms=round(synth_ms, 1),
+        audio_seconds=round(audio_seconds, 3),
+        rtf=round(rtf, 3),
+        format=fmt,
+    )
 
     pcm = _samples_to_pcm_s16le(samples)
     if fmt == "pcm":

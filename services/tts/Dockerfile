@@ -30,4 +30,12 @@ COPY app.py .
 
 ENV PORT=8080
 ENV MODELS_DIR=/app/models/kokoro
+# Pin CPU thread count for ONNX Runtime, OpenMP, OpenBLAS, MKL.
+# Kokoro inference on Railway hardware is single-threaded per call; extra threads
+# fight each other on context switches. Concurrency is gated at the FastAPI layer
+# via the synth semaphore (TTS_MAX_CONCURRENCY, default 4).
+ENV OMP_NUM_THREADS=1
+ENV OPENBLAS_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV ORT_NUM_THREADS=1
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port $PORT"]

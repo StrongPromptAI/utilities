@@ -201,7 +201,7 @@ Production on `shared-svcs` project: `JWT_SECRET` set (64 chars) on all four ser
 | stt | `d86f18dc-b843-41e2-b67a-c8ffbeca3817` | `wss://shared-svcs-stt.up.railway.app/transcribe` |
 | embed | `ab604f00-e72c-4865-b362-843f585e2051` | `https://shared-svcs-embed.up.railway.app/embed` |
 | whisper | `2fe8a99d-8e57-47de-b7e5-f7ef4371cf66` | `https://shared-svcs-whisper.up.railway.app/v1/audio/transcriptions` |
-| tts | _set after deploy_ | `https://shared-svcs-tts.up.railway.app/v1/audio/speech` |
+| tts | `02ff6d94-a49c-464e-b1e0-44f6933d5209` | `https://shared-svcs-tts.up.railway.app/v1/audio/speech` |
 
 Whisper reuses `aud="stt"` — one token type works for both streaming STT (WS) and Whisper batch (REST). TTS uses its own `aud="tts"`.
 

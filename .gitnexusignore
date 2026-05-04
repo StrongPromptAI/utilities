@@ -1,0 +1,32 @@
+# .gitnexusignore — controls what gitnexus indexes into the call graph.
+# gitnexus already inherits the repo .gitignore, so this file only ADDS
+# exclusions on top of what's already gitignored.
+#
+# Goal: keep real source (services, scripts, dashboard frontend src,
+# devops_agent, packages) in the graph; keep build output, generated
+# artifacts, and large binaries out.
+
+# ---- Frontend build / vendor (defense-in-depth — usually gitignored) ----
+**/node_modules/
+**/dist/
+**/build/
+**/.next/
+**/.turbo/
+**/.cache/
+**/coverage/
+**/.vite/
+
+# ---- Local model weights (services bake these from upstream releases) ----
+services/*/.models/
+**/*.onnx
+**/voices-*.bin
+
+# ---- Generated skill artifacts (regenerated on demand by gitnexus --skills) ----
+.claude/skills/generated/
+
+# ---- Symlink that crosses repos (gitnexus shouldn't follow it anyway) ----
+symlink_docs/
+
+# ---- DB snapshots & runtime data (already gitignored; explicit for clarity) ----
+db_snapshots/
+database/

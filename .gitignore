@@ -31,3 +31,4 @@ devops_agent/audit.jsonl
 
 # Local DB snapshots
 database/
+.gitnexus

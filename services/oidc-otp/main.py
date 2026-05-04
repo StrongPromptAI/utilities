@@ -625,7 +625,7 @@ async def token_endpoint(
         "sub": email,
         "aud": client_id,
         "iat": now,
-        "exp": now + 3600,
+        "exp": now + 2592000,
         "email": email,
         "email_verified": True,
         "name": email.split("@")[0],
@@ -637,13 +637,13 @@ async def token_endpoint(
         claims["nonce"] = row["nonce"]
     id_token = jwt.encode(claims, _raw_pem, algorithm="RS256", headers={"kid": KID})
     access_token = jwt.encode(
-        {**claims, "exp": now + 3600}, _raw_pem, algorithm="RS256", headers={"kid": KID}
+        {**claims, "exp": now + 2592000}, _raw_pem, algorithm="RS256", headers={"kid": KID}
     )
     return JSONResponse({
         "access_token": access_token,
         "id_token": id_token,
         "token_type": "Bearer",
-        "expires_in": 3600,
+        "expires_in": 2592000,
     })
 
 

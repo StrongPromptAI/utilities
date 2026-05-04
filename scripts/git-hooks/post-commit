@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# .git/hooks/post-commit — local skill-graph freshness
+# Source of truth: scripts/git-hooks/post-commit
+#                  (symlinked into .git/hooks/ by scripts/install-git-hooks.sh)
+#
+# Runs `gitnexus analyze --skills --skip-agents-md` against the just-landed
+# commit so .claude/skills/generated/ stays fresh between commits without
+# operator discipline. Non-blocking: failures log to
+# .git/gitnexus-post-commit.log; the commit is not undone.
+#
+# The --skip-agents-md flag is mandatory per project CLAUDE.md § Index
+# freshness — without it, gitnexus re-injects an MCP-syntax block into
+# the project CLAUDE.md that contradicts the CLI-only rule. Baked in here
+# so the flag is enforced by code, not memory.
+#
+# Skips during rebase/merge so a multi-commit operation produces one regen
+# at the end, not one per intermediate commit.
+
+set -u
+
+GIT_DIR="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
+
+# Quiet during in-flight git operations — regen will fire on the final commit
+[ -f "$GIT_DIR/REBASE_HEAD" ]   && exit 0
+[ -f "$GIT_DIR/MERGE_HEAD" ]    && exit 0
+[ -d "$GIT_DIR/rebase-merge" ]  && exit 0
+[ -d "$GIT_DIR/rebase-apply" ]  && exit 0
+[ -f "$GIT_DIR/CHERRY_PICK_HEAD" ] && exit 0
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+LOG="$GIT_DIR/gitnexus-post-commit.log"
+
+# Background — commit returns immediately, regen runs out of band
+{
+    cd "$REPO_ROOT"
+    echo "=== $(date '+%Y-%m-%d %H:%M:%S') commit $(git rev-parse HEAD) ==="
+    if command -v gitnexus >/dev/null 2>&1; then
+        if gitnexus analyze --skills --skip-agents-md; then
+            echo "RESULT: ok"
+        else
+            echo "RESULT: fail (exit $?)"
+        fi
+    else
+        echo "RESULT: skip (gitnexus not in PATH)"
+    fi
+} >> "$LOG" 2>&1 &
+disown

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# .git/hooks/pre-commit — fail-trap check for gitnexus regen
+#
+# Reads .git/gitnexus-post-commit.log; aborts if the last regen marker says
+# "fail". Per global CLAUDE.md "Don't Wrap High-Velocity Tools": we react to
+# what gitnexus reports, we don't probe its state. The marker line ("RESULT: ok"
+# or "RESULT: fail") is written by our post-commit wrapper, not by gitnexus
+# itself, so this check is resilient to gitnexus output-format changes.
+
+set -u
+
+GIT_DIR="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
+LOG="$GIT_DIR/gitnexus-post-commit.log"
+
+[ -f "$LOG" ] || exit 0  # no log yet (fresh clone, hook never fired)
+
+last_result=$(grep '^RESULT:' "$LOG" | tail -1)
+
+if [[ "$last_result" == RESULT:\ fail* ]]; then
+    echo ""
+    echo "Last gitnexus regen failed:"
+    echo "  log: $LOG"
+    echo ""
+    grep -A 20 "^=== " "$LOG" | tail -n 25 | sed 's/^/    /'
+    echo ""
+    echo "Fix the underlying issue, or re-run manually:"
+    echo "  gitnexus analyze --skills --skip-agents-md"
+    echo ""
+    echo "Bypass once with: git commit --no-verify"
+    exit 1
+fi
+
+exit 0

@@ -32,3 +32,6 @@ devops_agent/audit.jsonl
 # Local DB snapshots
 database/
 .gitnexus
+
+# gitnexus-generated cluster skills (regen via post-commit hook)
+.claude/skills/generated/

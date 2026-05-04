@@ -209,6 +209,20 @@ Whisper reuses `aud="stt"` — one token type works for both streaming STT (WS) 
 
 ---
 
+## Index Freshness
+
+GitNexus call-graph + cluster skills are kept current by a post-commit hook. Run once per fresh clone:
+
+```bash
+bash scripts/install-git-hooks.sh
+```
+
+This installs `.git/hooks/post-commit`, which runs `gitnexus analyze --skills --skip-agents-md` in the background after every commit. Generated cluster skills land in `.claude/skills/generated/` (gitignored). The pre-commit hook reads the `RESULT:` marker from the regen log and aborts on regen failure.
+
+Manual fallback if the hook is uninstalled: `gitnexus analyze --skills --skip-agents-md`.
+
+---
+
 ## oxp-kb (OpenWebUI on Railway)
 
 Self-hosted OpenWebUI stack on Railway project `oxp-kb`. Public surface: `oxp.chat`. Full stack guide: `~/repo_docs/utilities/guides/26-4-17_GUIDE_oxp-kb-stack.md`.

@@ -688,17 +688,15 @@ async def sftpgo_prelogin(request: Request):
         return JSONResponse({}, status_code=200)
 
     # SFTPGo's pre-login validator runs the full User schema check before
-    # creating the record. Mirror the shape of the working hand-created user
-    # record: explicit permissions + filesystem.provider + home_dir placeholder.
-    # Group inheritance via type=1 primary group brings in S3 fs at runtime.
+    # creating the record. We deliberately omit `home_dir` and `filesystem`
+    # so the oidc-users primary group's S3 config (key_prefix=shared/) takes
+    # over — without that omission the user lands on ephemeral local disk.
     spec = {
         "username": username,
         "email": username,
         "status": 1,
-        "home_dir": f"/srv/sftpgo/data/{username}",
         "groups": [{"name": "oidc-users", "type": 1}],
         "permissions": {"/": ["list", "download", "upload", "overwrite", "delete"]},
-        "filesystem": {"provider": 0},
     }
     logger.info("sftpgo prelogin: returning spec for %s", username)
     return JSONResponse(spec)

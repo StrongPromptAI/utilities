@@ -22,6 +22,7 @@ _CSS = """
 :root {
   --brand-red: #c71a2f;
   --brand-warm: #fee7b5;
+  --brand-green: #3fb950;
   --base-bg: #0a0b0d;
   --panel-bg: rgba(20, 21, 24, 0.72);
   --panel-border: rgba(255, 255, 255, 0.06);
@@ -329,6 +330,8 @@ table.files .actions a:hover { border-bottom-color: var(--brand-warm); }
 table.files .actions a.danger { color: var(--brand-red); border-bottom-color: rgba(199, 26, 47, 0.3); }
 table.files .actions a.danger:hover { border-bottom-color: var(--brand-red); }
 
+table.files .actions a.play { color: var(--brand-green); }
+
 table.files .actions a.icon {
   border-bottom: none;
   padding-bottom: 0;
@@ -396,6 +399,23 @@ def error_html(title: str, message: str) -> str:
     return _page(title, body)
 
 
+_ICON_PLAY = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" '
+    'stroke="currentColor" stroke-width="1" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-hidden="true">'
+    '<polygon points="6 4 20 12 6 20 6 4"/>'
+    '</svg>'
+)
+
+_ICON_RENAME = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>'
+    '<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>'
+    '</svg>'
+)
+
 _ICON_DOWNLOAD = (
     '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" '
     'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
@@ -442,7 +462,10 @@ def file_browser_html(email: str, files: list[dict]) -> str:
         size = _fmt_size(f["size"])
         modified = _fmt_time(f["last_modified"])
         is_wav = raw_name.lower().endswith(".wav")
-        play_link = f'<a href="#" data-play="{name}">Play</a>' if is_wav else ''
+        play_link = (
+            f'<a class="icon play" href="#" data-play="{name}" title="Play" aria-label="Play {name}">{_ICON_PLAY}</a>'
+            if is_wav else ''
+        )
         rows.append(
             f'<tr>'
             f'<td class="name">{name}</td>'
@@ -450,7 +473,7 @@ def file_browser_html(email: str, files: list[dict]) -> str:
             f'<td class="meta">{modified}</td>'
             f'<td class="actions">'
             f'{play_link}'
-            f'<a href="#" data-rename="{name}">Rename</a>'
+            f'<a class="icon" href="#" data-rename="{name}" title="Rename" aria-label="Rename {name}">{_ICON_RENAME}</a>'
             f'<a class="icon" href="/api/files/download/{name}" title="Download" aria-label="Download {name}">{_ICON_DOWNLOAD}</a>'
             f'<a class="icon danger" href="#" data-delete="{name}" title="Delete" aria-label="Delete {name}">{_ICON_TRASH}</a>'
             f'</td>'

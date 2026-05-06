@@ -238,9 +238,8 @@ Self-hosted OpenWebUI stack on Railway project `oxp-kb`. Public surface: `oxp.ch
 | openwebui | `d373f3ec-d7b9-4939-b399-37a8cdcebf1d` |
 | caddy | `6a3e8be7-db29-42a3-aded-b86c3029941a` |
 | postgres | `6e3ccd17-d0fd-42c5-8edd-bef785445c57` |
-| sftpgo | `8a083805-554f-44e5-9562-9cddd86ca419` — Tigris-backed shared folder, all OIDC users see same root |
-| sftpgo-bridge | `16786a24-4ba3-43de-8ed0-746e59ae69cc` — **mothballed 2026-05-05** (deployment stopped, SFTPGo event action removed). Revival recipe in guide. |
-| oidc-otp | `bbefc796-5871-428c-ab82-4b44e29d112b` |
+| oxp-files-app | `56aebab1-320e-48d2-9053-44cacc82c241` — FastAPI files app at `services/files/`, replaces SFTPGo (deleted 2026-05-06). Single shared folder backed by Tigris bucket `modular-packet-cuxv1ti4ca` prefix `shared/`. Browser uploads/downloads via presigned PUT/GET URLs (body bypasses Caddy). |
+| oidc-otp | `bbefc796-5871-428c-ab82-4b44e29d112b` — IdP. Sets `oxp_sso` cookie on its host for cross-service silent re-auth across oxp.chat + oxp.files (30-day TTL). |
 | tika | `38bc46e6-1a8f-4c72-b6e8-f34e62faab45` |
 
 ### Document extraction (Tika)

@@ -329,6 +329,25 @@ table.files .actions a:hover { border-bottom-color: var(--brand-warm); }
 table.files .actions a.danger { color: var(--brand-red); border-bottom-color: rgba(199, 26, 47, 0.3); }
 table.files .actions a.danger:hover { border-bottom-color: var(--brand-red); }
 
+table.files .actions a.icon {
+  border-bottom: none;
+  padding-bottom: 0;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  opacity: 0.75;
+  transition: opacity 150ms ease, color 150ms ease;
+}
+
+table.files .actions a.icon:hover {
+  opacity: 1;
+  border-bottom: none;
+}
+
+table.files .actions a.icon svg {
+  display: block;
+}
+
 .empty {
   text-align: center;
   padding: 60px 0;
@@ -377,6 +396,29 @@ def error_html(title: str, message: str) -> str:
     return _page(title, body)
 
 
+_ICON_DOWNLOAD = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+    '<polyline points="7 10 12 15 17 10"/>'
+    '<line x1="12" y1="15" x2="12" y2="3"/>'
+    '</svg>'
+)
+
+_ICON_TRASH = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-hidden="true">'
+    '<polyline points="3 6 5 6 21 6"/>'
+    '<path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>'
+    '<line x1="10" y1="11" x2="10" y2="17"/>'
+    '<line x1="14" y1="11" x2="14" y2="17"/>'
+    '<path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>'
+    '</svg>'
+)
+
+
 def _fmt_size(n: int) -> str:
     if n >= 1 << 30:
         return f"{n / (1 << 30):.2f} GB"
@@ -395,20 +437,33 @@ def file_browser_html(email: str, files: list[dict]) -> str:
     """`files` shape: [{name, size, last_modified}]. last_modified is a datetime."""
     rows: list[str] = []
     for f in files:
-        name = escape(f["name"])
+        raw_name = f["name"]
+        name = escape(raw_name)
         size = _fmt_size(f["size"])
         modified = _fmt_time(f["last_modified"])
+        is_wav = raw_name.lower().endswith(".wav")
+        play_link = f'<a href="#" data-play="{name}">Play</a>' if is_wav else ''
         rows.append(
             f'<tr>'
             f'<td class="name">{name}</td>'
             f'<td class="meta">{size}</td>'
             f'<td class="meta">{modified}</td>'
             f'<td class="actions">'
-            f'<a href="/api/files/download/{name}">Download</a>'
-            f'<a href="#" class="danger" data-delete="{name}">Delete</a>'
+            f'{play_link}'
+            f'<a href="#" data-rename="{name}">Rename</a>'
+            f'<a class="icon" href="/api/files/download/{name}" title="Download" aria-label="Download {name}">{_ICON_DOWNLOAD}</a>'
+            f'<a class="icon danger" href="#" data-delete="{name}" title="Delete" aria-label="Delete {name}">{_ICON_TRASH}</a>'
             f'</td>'
             f'</tr>'
         )
+        if is_wav:
+            rows.append(
+                f'<tr class="player-row" data-player-for="{name}" style="display:none">'
+                f'<td colspan="4" style="padding:8px 14px;border-bottom:1px solid var(--input-line);background:rgba(255,255,255,0.02);">'
+                f'<audio controls preload="none" style="width:100%;height:32px;"></audio>'
+                f'</td>'
+                f'</tr>'
+            )
 
     table_or_empty = (
         f'<table class="files"><thead><tr>'
@@ -517,6 +572,41 @@ def file_browser_html(email: str, files: list[dict]) -> str:
             const r = await fetch('/api/files/' + encodeURIComponent(name), {{ method: 'DELETE' }});
             if (r.ok) window.location.reload();
             else alert('Delete failed: ' + r.status);
+          }});
+        }});
+
+        document.querySelectorAll('a[data-rename]').forEach(a => {{
+          a.addEventListener('click', async (e) => {{
+            e.preventDefault();
+            const oldName = a.getAttribute('data-rename');
+            const newName = prompt('Rename file', oldName);
+            if (!newName || newName === oldName) return;
+            const r = await fetch('/api/files/rename', {{
+              method: 'POST',
+              headers: {{ 'Content-Type': 'application/json' }},
+              body: JSON.stringify({{ old: oldName, new: newName }}),
+            }});
+            if (r.ok) window.location.reload();
+            else alert('Rename failed: ' + r.status + ' ' + (await r.text()));
+          }});
+        }});
+
+        document.querySelectorAll('a[data-play]').forEach(a => {{
+          a.addEventListener('click', (e) => {{
+            e.preventDefault();
+            const name = a.getAttribute('data-play');
+            const sel = 'tr.player-row[data-player-for="' + CSS.escape(name) + '"]';
+            const row = document.querySelector(sel);
+            if (!row) return;
+            const audio = row.querySelector('audio');
+            if (row.style.display === 'none') {{
+              if (!audio.src) audio.src = '/api/files/stream/' + encodeURIComponent(name);
+              row.style.display = 'table-row';
+              audio.play().catch(() => {{}});
+            }} else {{
+              audio.pause();
+              row.style.display = 'none';
+            }}
           }});
         }});
       }})();

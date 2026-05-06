@@ -426,6 +426,81 @@ async def api_download(filename: str, _: str = Depends(require_user)):
     return RedirectResponse(url, status_code=307)
 
 
+_INLINE_CONTENT_TYPES = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
+}
+
+
+@app.get("/api/files/stream/{filename:path}")
+async def api_stream(filename: str, _: str = Depends(require_user)):
+    """Inline-disposition presigned URL — used by the in-page <audio> element."""
+    name = _safe_filename(filename)
+    key = f"{S3_PREFIX}{name}"
+    ext = name.lower().rsplit(".", 1)
+    content_type = _INLINE_CONTENT_TYPES.get(f".{ext[1]}" if len(ext) == 2 else "", "application/octet-stream")
+    try:
+        url = s3.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": S3_BUCKET,
+                "Key": key,
+                "ResponseContentDisposition": f'inline; filename="{name}"',
+                "ResponseContentType": content_type,
+            },
+            ExpiresIn=PRESIGN_EXPIRES,
+            HttpMethod="GET",
+        )
+    except ClientError as exc:
+        log.exception("presign stream failed")
+        raise HTTPException(500, f"presign failed: {exc}")
+    return RedirectResponse(url, status_code=307)
+
+
+class RenameRequest(BaseModel):
+    old: str
+    new: str
+
+
+@app.post("/api/files/rename")
+async def api_rename(req: RenameRequest, user: str = Depends(require_user)):
+    old_name = _safe_filename(req.old)
+    new_name = _safe_filename(req.new)
+    if old_name == new_name:
+        return {"renamed": new_name}
+
+    old_key = f"{S3_PREFIX}{old_name}"
+    new_key = f"{S3_PREFIX}{new_name}"
+
+    try:
+        s3.head_object(Bucket=S3_BUCKET, Key=new_key)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if code not in ("404", "NoSuchKey", "NotFound") and status != 404:
+            log.exception("head_object failed during rename")
+            raise HTTPException(500, f"rename precheck failed: {exc}")
+    else:
+        raise HTTPException(409, f"a file named {new_name} already exists")
+
+    try:
+        s3.copy_object(
+            Bucket=S3_BUCKET,
+            Key=new_key,
+            CopySource={"Bucket": S3_BUCKET, "Key": old_key},
+        )
+        s3.delete_object(Bucket=S3_BUCKET, Key=old_key)
+    except ClientError as exc:
+        log.exception("rename failed")
+        raise HTTPException(500, f"rename failed: {exc}")
+
+    log.info("renamed by %s***: %s -> %s", user[:3], old_name, new_name)
+    return {"renamed": new_name}
+
+
 @app.delete("/api/files/{filename:path}")
 async def api_delete(filename: str, user: str = Depends(require_user)):
     name = _safe_filename(filename)

@@ -99,9 +99,22 @@ CREATE TABLE IF NOT EXISTS oidc_auth_codes (
     expires_at   TIMESTAMPTZ NOT NULL,
     created_at   TIMESTAMPTZ DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS oidc_sso_sessions (
+    token        TEXT PRIMARY KEY,
+    email        TEXT NOT NULL,
+    expires_at   TIMESTAMPTZ NOT NULL,
+    created_at   TIMESTAMPTZ DEFAULT now(),
+    last_used_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_oidc_sso_sessions_email ON oidc_sso_sessions(email);
+CREATE INDEX IF NOT EXISTS idx_oidc_sso_sessions_expires ON oidc_sso_sessions(expires_at);
 ALTER TABLE oidc_sessions   ADD COLUMN IF NOT EXISTS nonce TEXT;
 ALTER TABLE oidc_auth_codes ADD COLUMN IF NOT EXISTS nonce TEXT;
 """
+
+# SSO cookie config
+SSO_COOKIE_NAME = "oxp_sso"
+SSO_COOKIE_TTL_SECONDS = 30 * 24 * 3600  # 30 days
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
@@ -450,10 +463,71 @@ def _otp_form(session_id, error="", restart_url="", client_id=""):
     return _page(f"Verify — {title}", body)
 
 
+# ── SSO + auth-code helpers ───────────────────────────────────────────────────
+
+async def _issue_auth_code(conn, email: str, client_id: str, redirect_uri: str, nonce: str) -> str:
+    """Insert a fresh auth code for (email, client_id) and return it."""
+    auth_code = secrets.token_urlsafe(32)
+    auth_expires = datetime.now(timezone.utc) + timedelta(minutes=5)
+    await conn.execute(
+        """INSERT INTO oidc_auth_codes (code, email, client_id, redirect_uri, nonce, expires_at)
+           VALUES ($1,$2,$3,$4,$5,$6)""",
+        auth_code, email, client_id, redirect_uri, nonce, auth_expires,
+    )
+    return auth_code
+
+
+def _redirect_with_code(redirect_uri: str, auth_code: str, state: str) -> RedirectResponse:
+    sep = "&" if "?" in redirect_uri else "?"
+    return RedirectResponse(f"{redirect_uri}{sep}code={auth_code}&state={state}", status_code=303)
+
+
+def _set_sso_cookie(response, token: str) -> None:
+    response.set_cookie(
+        key=SSO_COOKIE_NAME,
+        value=token,
+        max_age=SSO_COOKIE_TTL_SECONDS,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+
+
+async def _sso_email_from_cookie(token: str | None) -> str | None:
+    """Return the email associated with a valid SSO token, or None.
+
+    Wrapped in a broad try/except so any DB hiccup falls through to the email
+    form rather than erroring out the entire login surface.
+    """
+    if not token:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT email FROM oidc_sso_sessions WHERE token=$1 AND expires_at > now()",
+                token,
+            )
+            if row:
+                # Refresh last_used_at; non-critical, don't await failures
+                try:
+                    await conn.execute(
+                        "UPDATE oidc_sso_sessions SET last_used_at = now() WHERE token=$1",
+                        token,
+                    )
+                except Exception:
+                    pass
+                return row["email"]
+    except Exception as exc:
+        logger.warning("SSO cookie check failed: %s", exc)
+    return None
+
+
 # ── Authorize ─────────────────────────────────────────────────────────────────
 
-@app.get("/authorize", response_class=HTMLResponse)
+@app.get("/authorize")
 async def authorize_get(
+    request: Request,
     client_id: str,
     redirect_uri: str,
     response_type: str = "code",
@@ -465,6 +539,17 @@ async def authorize_get(
         raise HTTPException(400, "unknown client_id")
     if CLIENTS[client_id]["redirect_uri"] != redirect_uri:
         raise HTTPException(400, "invalid redirect_uri")
+
+    # SSO short-circuit: if the user has a valid SSO cookie at this IdP host,
+    # skip the email form and issue an auth code immediately.
+    sso_token = request.cookies.get(SSO_COOKIE_NAME)
+    email = await _sso_email_from_cookie(sso_token)
+    if email:
+        async with pool.acquire() as conn:
+            auth_code = await _issue_auth_code(conn, email, client_id, redirect_uri, nonce)
+        logger.info("SSO auth code issued for %s*** client=%s", email[:3], client_id)
+        return _redirect_with_code(redirect_uri, auth_code, state)
+
     return HTMLResponse(_email_form(client_id, redirect_uri, state, response_type, scope, nonce))
 
 
@@ -565,22 +650,58 @@ async def otp_post(
                 status_code=400,
             )
 
-        auth_code = secrets.token_urlsafe(32)
-        auth_expires = datetime.now(timezone.utc) + timedelta(minutes=5)
-        await conn.execute(
-            """INSERT INTO oidc_auth_codes (code, email, client_id, redirect_uri, nonce, expires_at)
-               VALUES ($1,$2,$3,$4,$5,$6)""",
-            auth_code, row["email"], row["client_id"], row["redirect_uri"], row["nonce"], auth_expires,
+        auth_code = await _issue_auth_code(
+            conn, row["email"], row["client_id"], row["redirect_uri"], row["nonce"],
         )
         await conn.execute("DELETE FROM oidc_sessions WHERE session_id=$1", session_id)
+        # Mint SSO token tied to this email; the cookie is set on the response below.
+        sso_token = secrets.token_urlsafe(32)
+        sso_expires = datetime.now(timezone.utc) + timedelta(seconds=SSO_COOKIE_TTL_SECONDS)
+        await conn.execute(
+            """INSERT INTO oidc_sso_sessions (token, email, expires_at)
+               VALUES ($1,$2,$3)""",
+            sso_token, row["email"], sso_expires,
+        )
         redirect_uri = row["redirect_uri"]
         state = row["state"] or ""
         logger.info("Auth code issued for %s*** client=%s", row["email"][:3], row["client_id"])
 
-    sep = "&" if "?" in redirect_uri else "?"
-    return RedirectResponse(
-        f"{redirect_uri}{sep}code={auth_code}&state={state}", status_code=303
-    )
+    response = _redirect_with_code(redirect_uri, auth_code, state)
+    _set_sso_cookie(response, sso_token)
+    return response
+
+
+# ── Logout ────────────────────────────────────────────────────────────────────
+
+@app.get("/logout")
+async def logout(request: Request, redirect_uri: str = ""):
+    """Clear the SSO cookie and delete the server-side session row.
+
+    `redirect_uri` is optional; if provided it must match a registered client's
+    redirect_uri (basic whitelist to prevent open-redirect abuse).
+    """
+    sso_token = request.cookies.get(SSO_COOKIE_NAME)
+    if sso_token:
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute("DELETE FROM oidc_sso_sessions WHERE token=$1", sso_token)
+        except Exception as exc:
+            logger.warning("logout DB delete failed: %s", exc)
+
+    # Pick a destination — registered client redirect_uri, or a no-op text response
+    target = ""
+    if redirect_uri:
+        for cfg in CLIENTS.values():
+            if cfg["redirect_uri"] == redirect_uri:
+                target = redirect_uri
+                break
+
+    if target:
+        response = RedirectResponse(target, status_code=303)
+    else:
+        response = HTMLResponse("<html><body><p>Signed out.</p></body></html>")
+    response.delete_cookie(SSO_COOKIE_NAME, path="/")
+    return response
 
 
 # ── Token ─────────────────────────────────────────────────────────────────────

@@ -38,23 +38,17 @@ http://oxp.chat.strongprompt.ai:{$PORT:8080} {
     }
 }
 
-# ── SFTPGo — oxp.files.strongprompt.ai ───────────────────────────────────────
-# Large file uploads need generous read/write timeouts.
+# ── oxp.files (FastAPI app) — oxp.files.strongprompt.ai ──────────────────────
+# Replaced SFTPGo on 2026-05-06 (see plans/26-5-5_oxp-files-fastapi-rewrite.md).
+# File bodies bypass Caddy entirely via presigned URLs to Tigris, so the proxy
+# only carries small auth-flow / API requests; default timeouts are fine.
 
 http://oxp.files.strongprompt.ai:{$PORT:8080} {
     import common
 
-    # OTP-only UX: skip the now-empty SFTPGo password page and bounce
-    # straight into the OIDC redirect handler (which 302s to oidc-otp).
-    redir /web/client/login /web/client/oidclogin 302
-
-    reverse_proxy sftpgo.railway.internal:8080 {
+    reverse_proxy oxp-files-app.railway.internal:8080 {
         header_up X-Forwarded-Proto https
         header_up X-Forwarded-Host oxp.files.strongprompt.ai
-        transport http {
-            read_timeout 300s
-            write_timeout 300s
-        }
     }
 }
 

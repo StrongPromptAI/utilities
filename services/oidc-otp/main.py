@@ -30,16 +30,28 @@ if not _raw_pem.strip().startswith("-----"):
     # stored as base64 fallback
     _raw_pem = base64.b64decode(_raw_pem).decode()
 
-CLIENTS = {
-    os.environ["OIDC_CLIENT_OPENWEBUI_ID"]: {
-        "secret": os.environ["OIDC_CLIENT_OPENWEBUI_SECRET"],
-        "redirect_uri": os.environ["OIDC_CLIENT_OPENWEBUI_REDIRECT"],
-    },
-    os.environ["OIDC_CLIENT_SFTPGO_ID"]: {
-        "secret": os.environ["OIDC_CLIENT_SFTPGO_SECRET"],
-        "redirect_uri": os.environ["OIDC_CLIENT_SFTPGO_REDIRECT"],
-    },
-}
+def _load_clients() -> dict:
+    """Load OIDC client registrations from env vars. Each name N requires
+    OIDC_CLIENT_N_ID, OIDC_CLIENT_N_SECRET, OIDC_CLIENT_N_REDIRECT — any
+    name with all three present is registered. Unknown names are skipped.
+
+    Names:
+      OPENWEBUI — oxp.chat
+      SFTPGO    — legacy oxp.files (decommissioned 2026-05-06; env vars may
+                   still be present and are tolerated for backward compat)
+      FILES     — new FastAPI oxp.files app
+    """
+    clients = {}
+    for name in ("OPENWEBUI", "SFTPGO", "FILES"):
+        cid = os.environ.get(f"OIDC_CLIENT_{name}_ID")
+        secret = os.environ.get(f"OIDC_CLIENT_{name}_SECRET")
+        redirect = os.environ.get(f"OIDC_CLIENT_{name}_REDIRECT")
+        if cid and secret and redirect:
+            clients[cid] = {"secret": secret, "redirect_uri": redirect}
+    return clients
+
+
+CLIENTS = _load_clients()
 
 # ── Key setup ────────────────────────────────────────────────────────────────
 
@@ -177,6 +189,7 @@ _LOGO_DATA_URI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAALsAAACnCAYAAABJ
 
 _CLIENT_TITLES = {
     "sftpgo": "OXP File Drop",
+    "files": "OXP File Drop",
     "openwebui": "OXP Chat",
 }
 

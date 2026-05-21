@@ -266,16 +266,30 @@ If you only do (1), the redeploy looks healthy but behavior is unchanged. The Op
 
 Stakeholder intelligence system. User asks natural language questions, you run `kb` commands via Bash tool.
 
+Pipeline (plan 26-5-21): ingest CSV → outline → summarize → review.
+
 **Common requests:**
 - "Search kb for [topic]"
 - "Show me all stakeholders"
 - "What calls did I have with [name]?"
 - "Tell me about [stakeholder name]"
-- "Analyze call [id] using Peterson framework"
+- "Summarize call [id] using my outline" (or "draft an outline for call [id], then summarize")
+- "Scrub PHI from [file]" (standalone Presidio utility)
+
+**Core commands** (full list: `kb --help`):
+- `kb ingest <csv>` — load a Dialpad CSV
+- `kb outline <call_id> [--content FILE | --edit]` — write/edit the bullet outline that drives the summary
+- `kb summarize <call_id> [--phi]` — generate outline-aligned markdown summary via primary LLM (Opus 4.7) with backup (Gemini 3.5 Flash) on transient errors
+- `kb show-summary <call_id>` — print stored summary
+- `kb scrub <input> -o <output> [--mapping <json>]` — standalone Presidio scrub, works on any text file
+
+**LLM routing**: `kb_config.primary_llm_*` and `backup_llm_*` columns pin the providers. Defaults: `anthropic/claude-opus-4.7` primary + `google/gemini-3.5-flash` backup, both via OpenRouter. Switch by updating the row.
+
+**PHI**: per-call opt-in via `--phi`. Default off (most meetings don't need it). Token map is per-call, deterministic, stable across all chunks.
 
 **When user asks about kb:**
-1. Read `symlink_docs/plans/kb-guide.md` for available commands and usage patterns
+1. Read `symlink_docs/plans/kb-guide.md` for full command reference
 2. Run appropriate `uv run python scripts/kb` commands
 3. Present results in conversational format
 
-**Guide location:** `symlink_docs/plans/kb-guide.md` — Read this when user first asks about kb, or when you need command syntax
+**Guide location:** `symlink_docs/plans/kb-guide.md`

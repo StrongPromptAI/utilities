@@ -18,38 +18,25 @@ from scripts.kb_core import (
     get_org_context,
     get_call_contacts,
     suggested_next_step,
-    extract_call_quotes,
-    rank_quotes,
-    get_candidate_quotes,
-    get_approved_quotes,
-    bulk_approve_quotes,
-    bulk_reject_quotes,
-    draft_letter,
-    harvest_call,
-    build_harvest_review,
-    list_decisions,
-    get_decision,
-    confirm_decision,
-    reject_decision,
-    update_decision_status,
-    list_open_questions,
-    get_candidate_questions,
-    resolve_question,
-    abandon_question,
-    get_candidate_actions,
-    confirm_action,
-    reject_action,
     update_user_notes,
     store_clusters,
     get_cluster_details,
     expand_by_cluster,
-    synthesize_call,
-    apply_additions,
-    _build_seed_template,
-    ensure_model,
-    generate_call_batch_summaries,
-    get_call_batch_summaries,
 )
+from scripts.kb_core.summarize import (
+    generate_summary,
+    get_summary,
+    update_summary_content,
+)
+
+
+def _print_llm_banner():
+    """Show the active LLM provider/model so the user knows which backend is in use."""
+    from scripts.kb_core.config import PRIMARY_LLM_MODEL, PRIMARY_LLM_PROVIDER
+    if PRIMARY_LLM_MODEL:
+        click.secho(f"LLM: {PRIMARY_LLM_PROVIDER} · {PRIMARY_LLM_MODEL}", fg="blue", dim=True)
+    else:
+        click.secho("LLM: (not configured — run migration 003)", fg="yellow", dim=True)
 
 
 @click.group()
@@ -349,104 +336,129 @@ def add_notes(call_id, notes, append):
         sys.exit(1)
 
 
-@cli.command(name="summarize")
+@cli.command(name="summary")
 @click.argument("call_id", type=int)
-def summarize(call_id):
-    """(Re)generate batch summaries for a call via LLM."""
+@click.option("--phi", is_flag=True, help="Scrub PHI before LLM call; rehydrate output")
+@click.option("--max-tokens", type=int, default=8000, help="LLM output cap (default: 8000)")
+@click.option("--edit", is_flag=True, help="Open the most-recent stored summary in $EDITOR for in-place editing (UPDATEs the row on save)")
+@click.option("--id", "summary_id", type=int, help="With --edit: edit a specific summary id instead of most-recent")
+def summary_cmd(call_id, phi, max_tokens, edit, summary_id):
+    """Generate or edit a meeting summary.
+
+    Default: generate a comprehensive markdown summary for the call
+    (Participants + Decisions/Themes + Action items + Open threads).
+    Routes to primary LLM (Opus 4.7) with backup fallback (Gemini 3.5 Flash).
+
+    With --phi: transcript scrubbed before LLM call, output rehydrated before
+    storage. Default is non-PHI (most business meetings don't need it).
+
+    With --edit: opens the most-recent stored summary in $EDITOR for direct
+    edits. No LLM call. UPDATEs meeting_summaries.content in place on save.
+    Use --id to edit a specific summary id.
+    """
+    import os
+    import subprocess
+    import tempfile
+
     try:
-        click.secho(f"Loading model...", fg="blue")
-        ensure_model()
-
-        click.secho(f"Generating summaries for call {call_id}...", fg="blue")
-        result = generate_call_batch_summaries(call_id)
-
-        if "error" in result:
-            click.secho(result["error"], fg="yellow")
+        if edit:
+            if phi:
+                click.secho("Error: --edit and --phi are mutually exclusive (no LLM call in edit mode)", fg="red")
+                sys.exit(1)
+            summary = get_summary(call_id, summary_id=summary_id)
+            if not summary:
+                click.secho(f"No summary for call {call_id}.", fg="red")
+                click.secho("Run: kb summary <id>  (without --edit) to generate one first.", dim=True)
+                sys.exit(1)
+            editor = os.environ.get("EDITOR", "vi")
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+                f.write(summary["content"])
+                tmp_path = f.name
+            try:
+                subprocess.run([editor, tmp_path], check=True)
+                new_content = Path(tmp_path).read_text()
+                if new_content == summary["content"]:
+                    click.secho("No changes — summary unchanged.", fg="yellow")
+                    return
+                update_summary_content(summary["id"], new_content)
+                click.secho(
+                    f"Updated meeting_summaries.id={summary['id']} ({len(new_content)} chars)",
+                    fg="green",
+                )
+            finally:
+                os.unlink(tmp_path)
             return
 
-        click.secho(f"\n{result['batches_created']} batch summaries generated ({result['chunks_processed']} chunks):\n", fg="green")
-
-        summaries = get_call_batch_summaries(call_id)
-        for s in summaries:
-            click.secho(f"  Batch {s['batch_idx']} (chunks {s['start_chunk_idx']}-{s['end_chunk_idx']}):", fg="cyan")
-            click.echo(f"    {s['summary']}\n")
-
+        _print_llm_banner()
+        if phi:
+            click.secho("PHI mode: transcript will be scrubbed before LLM call", fg="yellow")
+        click.secho(f"Generating summary for call {call_id}...", fg="blue")
+        new_id = generate_summary(call_id, phi=phi, max_tokens=max_tokens)
+        summary = get_summary(call_id, summary_id=new_id)
+        click.secho(
+            f"\nSaved meeting_summaries.id={new_id} "
+            f"(model={summary['model_used']}, phi_scrubbed={summary['phi_scrubbed']})",
+            fg="green",
+        )
     except Exception as e:
         click.secho(f"Error: {e}", fg="red")
         sys.exit(1)
 
 
-@cli.command(name="show-summaries")
+@cli.command(name="show-summary")
 @click.argument("call_id", type=int)
-def show_summaries(call_id):
-    """Show existing batch summaries and notes status for a call."""
+@click.option("--id", "summary_id", type=int, help="Specific summary id (default: most recent)")
+def show_summary_cmd(call_id, summary_id):
+    """Print the stored meeting summary for a call (most recent by default)."""
     try:
-        from scripts.kb_core.db import get_db
-
-        # Get notes status
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_notes FROM calls WHERE id = %s", (call_id,))
-                row = cur.fetchone()
-                if not row:
-                    click.secho(f"Call {call_id} not found", fg="red")
-                    sys.exit(1)
-                user_notes = row["user_notes"]
-
-        if user_notes:
-            click.secho(f"\nUser notes:", fg="blue", bold=True)
-            click.echo(f"  {user_notes}\n")
-        else:
-            click.secho(f"\nNo user notes set\n", fg="yellow")
-
-        summaries = get_call_batch_summaries(call_id)
-
-        if not summaries:
-            click.secho("No batch summaries found", fg="yellow")
-            return
-
-        click.secho(f"{len(summaries)} batch summaries:\n", fg="green")
-        for s in summaries:
-            click.secho(f"  Batch {s['batch_idx']} (chunks {s['start_chunk_idx']}-{s['end_chunk_idx']}):", fg="cyan")
-            click.echo(f"    {s['summary']}\n")
-
+        summary = get_summary(call_id, summary_id=summary_id)
+        if not summary:
+            click.secho(f"No summary for call {call_id}.", fg="yellow")
+            click.secho("Run: kb outline <id> && kb summarize <id>", dim=True)
+            sys.exit(1)
+        click.secho(
+            f"# Summary id={summary['id']} · model={summary['model_used']} · "
+            f"phi_scrubbed={summary['phi_scrubbed']} · {summary['created_at']:%Y-%m-%d %H:%M}",
+            fg="cyan",
+        )
+        click.echo()
+        click.echo(summary["content"])
     except Exception as e:
         click.secho(f"Error: {e}", fg="red")
         sys.exit(1)
 
 
-@cli.command(name="peterson-analyze")
-@click.argument("call_id", type=int)
-@click.option("--letter", "-l", help="Path to letter/email to review")
-def peterson_analyze(call_id, letter):
-    """Analyze a call using Peterson's Power Messaging framework."""
+@cli.command(name="scrub")
+@click.argument("input_file", type=click.Path(exists=True))
+@click.option("--output", "-o", type=click.Path(), required=True, help="Write scrubbed text here")
+@click.option("--mapping", type=click.Path(), help="Write token map (JSON) here for later rehydration")
+def scrub_cmd(input_file, output, mapping):
+    """Run PHI scrubber (Presidio) over a text file.
+
+    Standalone utility — usable on any text, not just KB transcripts.
+    Writes scrubbed text to --output. With --mapping, also writes the
+    {token: original} JSON map so you can rehydrate later.
+
+    \b
+    Example:
+      kb scrub session_notes.txt -o scrubbed.txt --mapping map.json
+    """
+    import json as _json
+    from scripts.kb_core.scrub import scrub
+
     try:
-        click.secho(f"\nAnalyzing call {call_id}...\n", fg="blue")
-
-        result = suggested_next_step(call_id, letter_path=letter)
-
-        # Display the formatted prompt
-        click.secho("=" * 80, fg="cyan")
-        click.echo(result['analysis_prompt'])
-        click.secho("=" * 80, fg="cyan")
-
-        # Additional context
-        click.echo()
-        click.secho("Analysis Context:", fg="blue", bold=True)
-        click.secho(f"   * Agentic search results: {len(result['agentic_search_results'])}", dim=True)
-        click.secho(f"   * Total client calls: {result['client_context']['total_calls']}", dim=True)
-        click.secho(f"   * Total chunks: {result['client_context']['total_chunks']}", dim=True)
-        click.secho(f"   * Approved quotes: {len(result.get('quotes', []))}", dim=True)
-        if result.get('letter'):
-            click.secho(f"   * Letter included: Yes", dim=True)
-        click.echo()
-
-    except ValueError as e:
-        click.secho(f"Error: {e}", fg="red")
-        sys.exit(1)
+        text = Path(input_file).read_text()
+        scrubbed, token_map = scrub(text)
+        Path(output).write_text(scrubbed)
+        click.secho(f"Scrubbed {len(text)} chars → {output}", fg="green")
+        click.secho(f"  {len(token_map)} entities replaced", dim=True)
+        if mapping:
+            Path(mapping).write_text(_json.dumps(token_map, indent=2))
+            click.secho(f"  Token map → {mapping}", dim=True)
     except Exception as e:
         click.secho(f"Error: {e}", fg="red")
         sys.exit(1)
+
 
 
 @cli.command()
@@ -521,629 +533,13 @@ def context(org_name, query, limit):
         sys.exit(1)
 
 
-@cli.command(name="pick-quotes")
-@click.argument("call_id", type=int)
-@click.option("--review", is_flag=True, help="Review existing candidates only (skip extraction)")
-@click.option("--show", is_flag=True, help="Show approved quotes only")
-@click.option("--no-rank", is_flag=True, help="Skip PROJECT.md-aware ranking, show all candidates")
-@click.option("--top", default=10, help="Number of top quotes to present (default: 10)")
-def pick_quotes(call_id, review, show, no_rank, top):
-    """Extract, rank by project context, and curate notable quotes from a call."""
-    try:
-        # Show mode: display approved quotes
-        if show:
-            quotes = get_approved_quotes(call_id)
-            if not quotes:
-                click.secho(f"No approved quotes for call {call_id}", fg="yellow")
-                return
 
-            click.secho(f"\nApproved quotes for call {call_id}:", fg="green", bold=True)
-            click.echo()
-            for q in quotes:
-                _display_quote(q, show_id=False)
-            return
 
-        # Extract new candidates (unless --review)
-        if not review:
-            click.secho(f"\nExtracting quotes from call {call_id}...", fg="blue")
-            result = extract_call_quotes(call_id)
 
-            if "error" in result:
-                click.secho(result["error"], fg="red")
-                sys.exit(1)
 
-            click.secho(
-                f"\n  Processed {result['batches_processed']} batches, "
-                f"found {result['quotes_extracted']} candidate quotes\n",
-                fg="cyan"
-            )
 
-        # Rank candidates using PROJECT.md context (unless --no-rank)
-        if no_rank:
-            candidates = get_candidate_quotes(call_id)
-        else:
-            click.secho("Ranking quotes against PROJECT.md...", fg="blue")
-            candidates = rank_quotes(call_id, top_n=top)
 
-        if not candidates:
-            click.secho("No candidate quotes to review.", fg="yellow")
 
-            # Check for approved quotes
-            approved = get_approved_quotes(call_id)
-            if approved:
-                click.secho(f"  ({len(approved)} quotes already approved)", dim=True)
-            return
-
-        label = f"Top {len(candidates)} ranked quotes" if not no_rank else f"Found {len(candidates)} candidate quotes"
-        click.secho(f"{label}:\n", fg="blue", bold=True)
-
-        # Build ID mapping for user input
-        id_map = {}
-        for idx, q in enumerate(candidates, 1):
-            id_map[idx] = q["id"]
-            _display_quote(q, display_num=idx)
-
-        # Interactive approval loop
-        click.echo()
-        click.secho("Actions:", fg="cyan", bold=True)
-        click.secho('  Enter numbers to approve (e.g., "1 3 5")', dim=True)
-        click.secho('  "all" - approve all', dim=True)
-        click.secho('  "none" - reject all', dim=True)
-        click.secho('  "done" - finish and save', dim=True)
-        click.secho('  "quit" - exit without saving', dim=True)
-        click.echo()
-
-        approved_ids = []
-        rejected_ids = []
-        pending_ids = [q["id"] for q in candidates]
-
-        while pending_ids:
-            action = click.prompt(">", default="done").strip().lower()
-
-            if action == "quit":
-                click.secho("Exited without saving.", fg="yellow")
-                return
-
-            if action == "done":
-                break
-
-            if action == "all":
-                approved_ids.extend(pending_ids)
-                pending_ids = []
-                click.secho(f"Approved all {len(approved_ids)} quotes", fg="green")
-                break
-
-            if action == "none":
-                rejected_ids.extend(pending_ids)
-                pending_ids = []
-                click.secho("Rejected all quotes", fg="yellow")
-                break
-
-            # Parse numbers
-            try:
-                nums = [int(n) for n in action.split()]
-                for n in nums:
-                    if n in id_map and id_map[n] in pending_ids:
-                        approved_ids.append(id_map[n])
-                        pending_ids.remove(id_map[n])
-                        click.secho(f"  Approved [{n}]", fg="green")
-                    elif n not in id_map:
-                        click.secho(f"  Invalid number: {n}", fg="red")
-            except ValueError:
-                click.secho("  Enter numbers separated by spaces, or 'all'/'none'/'done'/'quit'", fg="red")
-
-            if pending_ids:
-                remaining = [k for k, v in id_map.items() if v in pending_ids]
-                click.secho(f"  Remaining: {remaining}", dim=True)
-
-        # Save approvals/rejections
-        if approved_ids:
-            count = bulk_approve_quotes(approved_ids)
-            click.secho(f"\nApproved {count} quotes", fg="green", bold=True)
-
-        # Reject remaining pending
-        remaining_to_reject = [pid for pid in pending_ids if pid not in approved_ids]
-        if remaining_to_reject:
-            bulk_reject_quotes(remaining_to_reject)
-
-        if rejected_ids:
-            bulk_reject_quotes(rejected_ids)
-            click.secho(f"  Rejected {len(rejected_ids)} quotes", dim=True)
-
-        # Show final count
-        final_approved = get_approved_quotes(call_id)
-        click.secho(f"\nTotal approved quotes for call {call_id}: {len(final_approved)}", fg="cyan")
-
-    except Exception as e:
-        click.secho(f"Error: {e}", fg="red")
-        sys.exit(1)
-
-
-def _display_quote(quote: dict, display_num: int = None, show_id: bool = True):
-    """Display a single quote in formatted output."""
-    if display_num:
-        click.secho(f"[{display_num}] ", fg="cyan", nl=False)
-
-    click.secho(f'"{quote["quote_text"]}"', fg="white", bold=True)
-
-    meta = []
-    if quote.get("speaker"):
-        meta.append(f"Speaker: {quote['speaker']}")
-    if quote.get("category"):
-        meta.append(f"Category: {quote['category']}")
-
-    if meta:
-        click.secho(f"    {' | '.join(meta)}", fg="magenta")
-
-    if quote.get("context"):
-        click.secho(f"    Context: {quote['context']}", dim=True)
-
-    if quote.get("llm_reason"):
-        click.secho(f"    Ranked: {quote['llm_reason']}", fg="yellow")
-
-    click.echo()
-
-
-@cli.command(name="draft-letter")
-@click.argument("call_id", type=int)
-@click.option("--instructions", "-i", help="Custom instructions for the letter")
-@click.option("--no-quotes", is_flag=True, help="Exclude approved quotes from letter")
-@click.option("--output", "-o", help="Output file path (default: ~/Desktop/letter-name-date.md)")
-@click.option("--stdout", is_flag=True, help="Print to stdout instead of file")
-def draft_letter_cmd(call_id, instructions, no_quotes, output, stdout):
-    """Generate a markdown follow-up letter for a call."""
-    try:
-        click.secho(f"Drafting letter for call {call_id}...", fg="blue")
-
-        result = draft_letter(
-            call_id=call_id,
-            instructions=instructions,
-            include_quotes=not no_quotes
-        )
-
-        if "error" in result:
-            click.secho(result["error"], fg="red")
-            sys.exit(1)
-
-        markdown = result["markdown"]
-
-        if stdout:
-            click.echo(markdown)
-        else:
-            # Determine output path
-            if output:
-                out_path = Path(output).expanduser()
-            else:
-                # Default to symlink_docs/comms/ in current project
-                comms_dir = Path("symlink_docs/comms")
-                if not comms_dir.exists():
-                    comms_dir.mkdir(parents=True, exist_ok=True)
-                out_path = comms_dir / result["filename"]
-
-            out_path.write_text(markdown)
-            click.secho(f"\nLetter saved to: {out_path}", fg="green", bold=True)
-            click.secho(f"  Recipient: {result['recipient']}", dim=True)
-            click.secho(f"  Call date: {result['call_date']}", dim=True)
-
-    except Exception as e:
-        click.secho(f"Error: {e}", fg="red")
-        sys.exit(1)
-
-
-@cli.command()
-@click.argument("call_id", type=int)
-@click.option("--project", "-p", required=True, help="Project name")
-@click.option("--review", is_flag=True, help="Review existing candidates only (skip extraction)")
-@click.option("--thoughts", "-t", help="Your analysis/feedback on the call (grounds extraction in your perspective)")
-def harvest(call_id, project, review, thoughts):
-    """Extract decisions, open questions, and action items from a call."""
-    try:
-        from scripts.kb_core.crud.projects import get_project
-
-        proj = get_project(project)
-        if not proj:
-            click.secho(f"Project not found: {project}", fg="red")
-            click.secho("Available projects:", dim=True)
-            from scripts.kb_core import list_projects
-            for p in list_projects():
-                click.secho(f"  * {p['name']}", dim=True)
-            sys.exit(1)
-
-        project_id = proj["id"]
-
-        # Extract (unless --review)
-        if not review:
-            click.secho(f"\nHarvesting from call {call_id} for project '{project}'...", fg="blue")
-
-            user_thoughts = ""
-            # If thoughts provided via flag, use them
-            if thoughts:
-                user_thoughts = thoughts.strip()
-                click.secho(f"✓ Using provided feedback ({len(user_thoughts)} chars)", fg="green", dim=True)
-            # Otherwise, try to prompt for thoughts (only in interactive mode)
-            elif sys.stdin.isatty():
-                click.secho("\nWhat are your thoughts on this call?", fg="cyan", dim=True)
-                click.secho("(Press Ctrl+D when done, or Ctrl+C to skip)", dim=True)
-                try:
-                    user_thoughts = click.edit(text="")
-                    if user_thoughts:
-                        user_thoughts = user_thoughts.strip()
-                        click.secho(f"✓ Captured {len(user_thoughts)} chars of feedback", fg="green", dim=True)
-                except (click.Abort, KeyboardInterrupt):
-                    user_thoughts = ""
-
-            result = harvest_call(call_id, project_id, user_thoughts=user_thoughts)
-
-            if "error" in result:
-                click.secho(result["error"], fg="red")
-                sys.exit(1)
-
-            click.secho(
-                f"\n  Found {result['questions_extracted']} questions/decisions, "
-                f"{result['actions_extracted']} action items\n",
-                fg="cyan",
-            )
-
-        # Display candidates for review
-        questions = get_candidate_questions(project_id, call_id)
-        actions = get_candidate_actions(project_id, call_id)
-
-        if not questions and not actions:
-            click.secho("No candidates to review.", fg="yellow")
-            return
-
-        # Build unified number → (type, db_id) mapping
-        num_map = {}
-        idx = 1
-
-        # Display questions/decisions (unified)
-        if questions:
-            click.secho("QUESTIONS & DECISIONS:", fg="blue", bold=True)
-            click.echo()
-            for q in questions:
-                num_map[idx] = ("question", q["id"])
-                status = q.get("status", "open")
-                status_color = "green" if status == "decided" else "yellow"
-                click.secho(f"[{idx}] ", fg="cyan", nl=False)
-                click.secho(f"({status}) ", fg=status_color, nl=False)
-                click.secho(q["topic"], fg="white", bold=True)
-                click.secho(f"    {q['question']}", fg="white")
-                if q.get("resolution"):
-                    click.secho(f"    Resolution: {q['resolution']}", fg="green")
-                if q.get("context"):
-                    click.secho(f"    Why: {q['context']}", dim=True)
-                if q.get("decided_by"):
-                    names = ", ".join(c["name"] for c in q["decided_by"])
-                    click.secho(f"    Decided by: {names}", dim=True)
-                if q.get("owner_name") and status == "open":
-                    click.secho(f"    Owner: {q['owner_name']}", fg="magenta")
-                click.echo()
-                idx += 1
-
-        # Display action items
-        if actions:
-            click.secho("ACTION ITEMS:", fg="blue", bold=True)
-            click.echo()
-            for a in actions:
-                num_map[idx] = ("action", a["id"])
-                click.secho(f"[{idx}] ", fg="cyan", nl=False)
-                click.secho(a["title"], fg="white", bold=True)
-                if a.get("description"):
-                    click.secho(f"    {a['description']}", fg="white")
-                if a.get("assigned_name"):
-                    click.secho(f"    Assigned: {a['assigned_name']}", fg="magenta")
-                click.echo()
-                idx += 1
-
-        # Interactive approval
-        click.secho("Approve/Reject:", fg="cyan", bold=True)
-        click.secho('  Enter numbers to approve (e.g., "1 3 5")', dim=True)
-        click.secho('  "all" - approve all', dim=True)
-        click.secho('  "none" - reject all', dim=True)
-        click.secho('  "done" - finish (approve selected, reject rest)', dim=True)
-        click.secho('  "quit" - exit without saving', dim=True)
-        click.echo()
-
-        approved = set()
-
-        while True:
-            action = click.prompt(">", default="done").strip().lower()
-
-            if action == "quit":
-                click.secho("Exited without saving.", fg="yellow")
-                return
-
-            if action == "done":
-                break
-
-            if action == "all":
-                approved = set(num_map.keys())
-                click.secho(f"Approved all {len(approved)} items", fg="green")
-                break
-
-            if action == "none":
-                click.secho("Rejected all candidates", fg="yellow")
-                break
-
-            try:
-                nums = [int(n) for n in action.split()]
-                for n in nums:
-                    if n in num_map and n not in approved:
-                        approved.add(n)
-                        item_type = num_map[n][0]
-                        click.secho(f"  Approved {item_type} [{n}]", fg="green")
-                    elif n not in num_map:
-                        click.secho(f"  Invalid number: {n}", fg="red")
-            except ValueError:
-                click.secho("  Enter numbers, or 'all'/'none'/'done'/'quit'", fg="red")
-
-        # Apply approvals/rejections
-        from scripts.kb_core.crud.questions import decide_question
-
-        q_approved = a_approved = 0
-        for num, (item_type, db_id) in num_map.items():
-            if num in approved:
-                if item_type == "question":
-                    # For decided items, confirm the decision; for open, keep as-is
-                    q_approved += 1
-                elif item_type == "action":
-                    confirm_action(db_id)
-                    a_approved += 1
-            else:
-                if item_type == "question":
-                    abandon_question(db_id)
-                elif item_type == "action":
-                    reject_action(db_id)
-
-        click.secho(
-            f"\nKept {q_approved} questions/decisions, kept {a_approved} actions",
-            fg="green", bold=True,
-        )
-
-        click.echo()
-        click.secho(f"Tip: Run 'kb synthesize {project}' to update stakeholder docs", dim=True)
-
-    except Exception as e:
-        click.secho(f"Error: {e}", fg="red")
-        sys.exit(1)
-
-
-@cli.command(name="harvest-review")
-@click.argument("call_id", type=int)
-@click.option("--project", "-p", required=True, help="Project name")
-def harvest_review(call_id, project):
-    """Build a harvest review artifact for Claude Code (Opus) analysis."""
-    try:
-        from scripts.kb_core.crud.projects import get_project
-
-        proj = get_project(project)
-        if not proj:
-            click.secho(f"Project not found: {project}", fg="red")
-            click.secho("Available projects:", dim=True)
-            from scripts.kb_core import list_projects
-            for p in list_projects():
-                click.secho(f"  * {p['name']}", dim=True)
-            sys.exit(1)
-
-        project_id = proj["id"]
-
-        click.secho(f"\nBuilding harvest review for call {call_id}...", fg="blue")
-        result = build_harvest_review(call_id, project_id)
-
-        if "error" in result:
-            click.secho(result["error"], fg="red")
-            sys.exit(1)
-
-        # Write review prompt to /tmp/
-        out_path = f"/tmp/kb-harvest-review-{call_id}.md"
-        with open(out_path, "w") as f:
-            f.write(result["review_prompt"])
-
-        click.secho(f"\n  Review artifact written to: {out_path}", fg="green", bold=True)
-        click.secho(
-            f"  Questions/Decisions: {len(result['questions'])} | "
-            f"Actions: {len(result['actions'])} | "
-            f"Quotes: {len(result['quotes'])}",
-            dim=True,
-        )
-        click.echo()
-        click.secho(
-            f"  Next: Open Claude Code and say 'review harvest for call {call_id}'",
-            dim=True,
-        )
-
-    except Exception as e:
-        click.secho(f"Error: {e}", fg="red")
-        sys.exit(1)
-
-
-@cli.command()
-@click.argument("project")
-@click.option("--status", "-s", help="Filter: open, confirmed, superseded")
-def decisions(project, status):
-    """List decisions for a project."""
-    try:
-        from scripts.kb_core.crud.projects import get_project
-
-        proj = get_project(project)
-        if not proj:
-            click.secho(f"Project not found: {project}", fg="red")
-            sys.exit(1)
-
-        items = list_decisions(proj["id"], status=status)
-
-        if not items:
-            click.secho(f"No decisions found for '{project}'", fg="yellow")
-            if status:
-                click.secho(f"  (filtered by status: {status})", dim=True)
-            return
-
-        click.secho(f"\nDecisions for '{project}':", fg="blue", bold=True)
-        if status:
-            click.secho(f"  Status: {status}", dim=True)
-        click.echo()
-
-        status_colors = {"open": "yellow", "decided": "green", "confirmed": "green", "abandoned": "red"}
-
-        for d in items:
-            color = status_colors.get(d["status"], "white")
-            click.secho(f"[{d['id']}] ", fg="cyan", nl=False)
-            click.secho(f"({d['status']}) ", fg=color, nl=False)
-            click.secho(d["topic"], fg="white", bold=True)
-            click.secho(f"    {d.get('summary') or d.get('question', '')}", fg="white")
-            if d.get("decided_by"):
-                names = ", ".join(c["name"] if isinstance(c, dict) else c for c in d["decided_by"])
-                click.secho(f"    Decided by: {names}", dim=True)
-            if d.get("source_call_id"):
-                click.secho(f"    Source call: {d['source_call_id']}", dim=True)
-            click.echo()
-
-    except Exception as e:
-        click.secho(f"Error: {e}", fg="red")
-        sys.exit(1)
-
-
-@cli.command()
-@click.argument("project")
-@click.option("--status", "-s", default="open", help="Filter: open, answered, abandoned")
-def questions(project, status):
-    """List open questions for a project."""
-    try:
-        from scripts.kb_core.crud.projects import get_project
-
-        proj = get_project(project)
-        if not proj:
-            click.secho(f"Project not found: {project}", fg="red")
-            sys.exit(1)
-
-        items = list_open_questions(proj["id"], status=status)
-
-        if not items:
-            click.secho(f"No questions found for '{project}'", fg="yellow")
-            if status:
-                click.secho(f"  (filtered by status: {status})", dim=True)
-            return
-
-        click.secho(f"\nOpen questions for '{project}':", fg="blue", bold=True)
-        if status:
-            click.secho(f"  Status: {status}", dim=True)
-        click.echo()
-
-        status_colors = {"open": "yellow", "answered": "green", "abandoned": "red"}
-
-        for q in items:
-            color = status_colors.get(q["status"], "white")
-            click.secho(f"[{q['id']}] ", fg="cyan", nl=False)
-            click.secho(f"({q['status']}) ", fg=color, nl=False)
-            click.secho(q["topic"], fg="white", bold=True)
-            click.secho(f"    {q['question']}", fg="white")
-            if q.get("context"):
-                click.secho(f"    Why: {q['context']}", dim=True)
-            if q.get("owner"):
-                click.secho(f"    Owner: {q['owner']}", fg="magenta")
-            if q.get("resolution"):
-                click.secho(f"    Resolution: {q['resolution']}", fg="green")
-            if q.get("source_call_id"):
-                click.secho(f"    Source call: {q['source_call_id']}", dim=True)
-            click.echo()
-
-    except Exception as e:
-        click.secho(f"Error: {e}", fg="red")
-        sys.exit(1)
-
-
-@cli.command()
-@click.argument("question_id", type=int)
-@click.option("--resolution", "-r", required=True, help="The answer/resolution")
-def resolve(question_id, resolution):
-    """Mark an open question as answered."""
-    try:
-        from scripts.kb_core.crud.questions import get_open_question
-
-        q = get_open_question(question_id)
-        if not q:
-            click.secho(f"Question {question_id} not found", fg="red")
-            sys.exit(1)
-
-        if q["status"] != "open":
-            click.secho(f"Question {question_id} is already '{q['status']}'", fg="yellow")
-            return
-
-        resolve_question(question_id, resolution)
-        click.secho(f"Resolved question {question_id}: {q['topic']}", fg="green", bold=True)
-        click.secho(f"  Resolution: {resolution}", dim=True)
-
-    except Exception as e:
-        click.secho(f"Error: {e}", fg="red")
-        sys.exit(1)
-
-
-@cli.command(name="update-decision")
-@click.argument("decision_id", type=int)
-@click.option("--status", "-s", type=click.Choice(["open", "confirmed", "superseded"]), help="New status")
-@click.option("--summary", "-m", help="Updated summary text")
-def update_decision_cmd(decision_id, status, summary):
-    """Update a decision's status and/or summary."""
-    try:
-        d = get_decision(decision_id)
-        if not d:
-            click.secho(f"Decision {decision_id} not found", fg="red")
-            sys.exit(1)
-
-        if not status and not summary:
-            click.secho(f"[{d['id']}] ({d['status']}) {d['topic']}", fg="cyan", bold=True)
-            click.secho(f"    {d['summary']}", fg="white")
-            if d.get("decided_by"):
-                click.secho(f"    Decided by: {', '.join(c['name'] if isinstance(c, dict) else c for c in d['decided_by'])}", dim=True)
-            if d.get("source_call_id"):
-                click.secho(f"    Source call: {d['source_call_id']}", dim=True)
-            click.echo()
-            click.secho("Use --status and/or --summary to update", dim=True)
-            return
-
-        new_status = status or d["status"]
-        update_decision_status(decision_id, new_status, summary=summary)
-
-        click.secho(f"Updated decision {decision_id}: {d['topic']}", fg="green", bold=True)
-        if status:
-            click.secho(f"  Status: {d['status']} -> {status}", dim=True)
-        if summary:
-            preview = summary[:120] + "..." if len(summary) > 120 else summary
-            click.secho(f"  Summary: {preview}", dim=True)
-
-    except Exception as e:
-        click.secho(f"Error: {e}", fg="red")
-        sys.exit(1)
-
-
-@cli.command(name="dismiss-question")
-@click.argument("question_id", type=int)
-@click.option("--reason", "-r", help="Why this question is being dismissed")
-def dismiss_question_cmd(question_id, reason):
-    """Dismiss an open question (out of scope, not applicable, etc.)."""
-    try:
-        from scripts.kb_core.crud.questions import get_open_question
-
-        q = get_open_question(question_id)
-        if not q:
-            click.secho(f"Question {question_id} not found", fg="red")
-            sys.exit(1)
-
-        if q["status"] != "open":
-            click.secho(f"Question {question_id} is already '{q['status']}'", fg="yellow")
-            return
-
-        if reason:
-            resolve_question(question_id, reason)
-            click.secho(f"Dismissed question {question_id}: {q['topic']}", fg="green", bold=True)
-            click.secho(f"  Reason: {reason}", dim=True)
-        else:
-            abandon_question(question_id)
-            click.secho(f"Abandoned question {question_id}: {q['topic']}", fg="yellow", bold=True)
-
-    except Exception as e:
-        click.secho(f"Error: {e}", fg="red")
-        sys.exit(1)
 
 
 @cli.command()
@@ -1220,130 +616,6 @@ def cluster(call_id, threshold, min_size, recompute):
         click.secho(f"Error: {e}", fg="red")
         sys.exit(1)
 
-
-@cli.command()
-@click.argument("project")
-@click.argument("call_id", type=int)
-@click.option("--type", "-t", "stakeholder_type", help="Single stakeholder type to synthesize")
-@click.option("--dry-run", is_flag=True, help="Show proposed additions only, don't write files")
-def synthesize(project, call_id, stakeholder_type, dry_run):
-    """Distill stakeholder intelligence from a call into living .md docs.
-
-    Reads call summaries, proposes additions per stakeholder type.
-    Each stakeholder type gets a persistent doc that grows over time.
-
-    \b
-    Examples:
-      kb synthesize POP_Demo 27              # all stakeholder types
-      kb synthesize POP_Demo 27 -t Patient   # single type
-      kb synthesize POP_Demo 27 --dry-run    # preview only
-    """
-    try:
-        click.secho(f"\nDistilling call {call_id} for '{project}'...", fg="blue")
-        if stakeholder_type:
-            click.secho(f"  Type filter: {stakeholder_type}", dim=True)
-        click.echo()
-
-        results = synthesize_call(project, call_id, stakeholder_type=stakeholder_type)
-
-        # Check for errors (top-level errors have only 'error' key)
-        if results and results[0].get("error") and "stakeholder_type" not in results[0]:
-            click.secho(results[0]["error"], fg="red")
-            sys.exit(1)
-
-        # Get call date for attribution
-        from scripts.kb_core.db import get_db
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT call_date FROM calls WHERE id = %s", (call_id,))
-                row = cur.fetchone()
-                call_date = str(row["call_date"]) if row else "unknown"
-
-        for r in results:
-            st = r["stakeholder_type"]
-            slug = r["slug"]
-            additions = r["proposed_additions"]
-
-            if r.get("error"):
-                click.secho(f"== {st} == ERROR: {r['error']}", fg="red")
-                continue
-
-            is_new = r["existing_doc"] is None
-            status = "NEW" if is_new else "UPDATE"
-            click.secho(f"== {st} == ", fg="blue", bold=True, nl=False)
-            click.secho(f"[{status}]", fg="green" if is_new else "yellow")
-
-            if not additions:
-                click.secho("   No new insights for this stakeholder type.", dim=True)
-                click.echo()
-                continue
-
-            click.secho(f"   {len(additions)} proposed additions:\n", dim=True)
-
-            # Display proposed additions with numbers
-            num_map = {}
-            for idx, a in enumerate(additions, 1):
-                num_map[idx] = a
-                click.secho(f"   [{idx}] ", fg="cyan", nl=False)
-                click.secho(f"{a['section']}", fg="magenta", nl=False)
-                click.echo(f": {a['content']}")
-                if a.get("evidence"):
-                    click.secho(f"       Evidence: {a['evidence']}", dim=True)
-
-            click.echo()
-
-            if dry_run:
-                continue
-
-            # Interactive approval
-            click.secho("   Approve additions:", fg="cyan", bold=True)
-            click.secho('   Enter numbers (e.g., "1 3 5"), "all", "none", or "quit"', dim=True)
-
-            action = click.prompt("   >", default="all").strip().lower()
-
-            if action == "quit":
-                click.secho("   Skipped.", fg="yellow")
-                continue
-
-            if action == "none":
-                click.secho("   No additions applied.", fg="yellow")
-                click.echo()
-                continue
-
-            # Determine approved additions
-            if action == "all":
-                approved = list(additions)
-            else:
-                try:
-                    nums = [int(n) for n in action.split()]
-                    approved = [num_map[n] for n in nums if n in num_map]
-                except ValueError:
-                    click.secho("   Invalid input, skipping.", fg="red")
-                    continue
-
-            if not approved:
-                click.secho("   No additions selected.", fg="yellow")
-                click.echo()
-                continue
-
-            # Build or update document
-            file_path = r["file_path"]
-            if is_new:
-                existing = _build_seed_template(st, project)
-            else:
-                existing = r["existing_doc"]
-
-            updated_doc = apply_additions(existing, approved, call_date)
-
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(updated_doc)
-
-            click.secho(f"   Applied {len(approved)} additions to {file_path}", fg="green", bold=True)
-            click.echo()
-
-    except Exception as e:
-        click.secho(f"Error: {e}", fg="red")
-        sys.exit(1)
 
 
 @cli.command()

@@ -26,7 +26,7 @@ _CACHED_URL: Optional[str] = None
 
 def _gql(query: str) -> dict:
     """POST a GraphQL query with the Railway token; returns data."""
-    token = json.load(open(os.path.expanduser("~/.config/keys.json")))["railway"]
+    token = json.load(open(os.path.expanduser("~/.config/keys.json")))["railway_main"]
     result = subprocess.run(
         ["curl", "-s", "-X", "POST", "https://backboard.railway.com/graphql/v2",
          "-H", f"Authorization: Bearer {token}",

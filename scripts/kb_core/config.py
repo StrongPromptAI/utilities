@@ -16,7 +16,7 @@ _KB_POSTGRES_SERVICE_ID = "ae33aa6f-3890-4af7-aec6-13904be1c242"
 def _get_railway_db_url() -> str:
     """Fetch DATABASE_PUBLIC_URL from Railway GraphQL API."""
     keys_path = os.path.expanduser("~/.config/keys.json")
-    token = json.load(open(keys_path))["railway"]
+    token = json.load(open(keys_path))["railway_main"]
     query = (
         '{"query":"query { variables(projectId: \\"'
         + _KB_PROJECT_ID
@@ -73,11 +73,22 @@ def _load_singleton() -> dict | None:
 
 _config = _load_singleton()
 
-# LM Studio (for LLM inference) — only available with local DB + LM Studio
+# Legacy LM Studio constants (deleted in plan 26-5-21 Phase 4 — kept for
+# transcripts.py until that path migrates off the local LLM).
 LM_STUDIO_URL = _config["llm_url"] if _config else ""
 SUMMARY_MODEL = _config["llm_model"] if _config else ""
 
-# LLM context length (set via LM Studio SDK at pipeline start)
+# Primary/backup LLM config (plan 26-5-21 Phase 1 migration adds these columns).
+# Empty strings if columns don't exist yet — `complete_with_fallback()` will
+# raise a clear "run the migration" error in that case.
+PRIMARY_LLM_URL = (_config.get("primary_llm_url") if _config else "") or ""
+PRIMARY_LLM_MODEL = (_config.get("primary_llm_model") if _config else "") or ""
+PRIMARY_LLM_PROVIDER = (_config.get("primary_llm_provider") if _config else "") or ""
+BACKUP_LLM_URL = (_config.get("backup_llm_url") if _config else "") or ""
+BACKUP_LLM_MODEL = (_config.get("backup_llm_model") if _config else "") or ""
+BACKUP_LLM_PROVIDER = (_config.get("backup_llm_provider") if _config else "") or ""
+
+# LLM context length (set via LM Studio SDK at pipeline start — legacy)
 LLM_CONTEXT_LENGTH = 32768
 
 # Embedding (sentence-transformers, local)
@@ -90,7 +101,11 @@ def ensure_model():
 
     Call once at pipeline start (harvest, harvest-review), not per LLM call.
     Idempotent — skips if model already loaded with sufficient context.
+    No-op when LM_STUDIO_URL points at a remote provider (e.g. z.ai).
     """
+    if "api.z.ai" in (LM_STUDIO_URL or ""):
+        return
+
     import lmstudio as lms
 
     loaded = lms.list_loaded_models("llm")

@@ -2,16 +2,25 @@
 
 Browser flow:
   /                            file browser (auth-gated, redirects to /oidc/login if no session)
+  /?folder=<name>              same browser, scoped to one folder
   /oidc/login → /oidc/callback OAuth dance against oidc-otp
-  /api/files                   list (JSON)
+  /api/files[?folder=<name>]   list (JSON: {files, folders, current_folder})
   /api/files/upload-url        POST → presigned PUT URL (browser uploads direct to Tigris)
   /api/files/download/{name}   307 redirect to presigned GET URL
+  /api/files/stream/{name}     307 redirect with inline disposition (for <audio>)
+  /api/files/rename            POST → server-side rename within a folder
+  /api/files/move              POST → server-side move across folders
   /api/files/{name}            DELETE
+  /api/folders                 POST → create folder, body {name}
+  /api/folders/{name}          DELETE (only if empty)
+  /api/folders/rename          POST → rename folder + all child keys
   /logout                      clear local session + redirect to oidc-otp /logout
 
-Storage: single shared folder at `shared/` prefix. Every authenticated user
-sees and can modify every other user's files (intentional, small allowlist).
-Bucket versioning is enabled at startup so deletes are recoverable for 30 days.
+Storage: shared/ prefix with optional one-level folders (shared/<folder>/<file>).
+Empty folders are persisted via a sentinel marker object so they survive listing.
+Every authenticated user sees and can modify every other user's files
+(intentional, small allowlist). Bucket versioning is enabled at startup so
+deletes are recoverable for 30 days.
 """
 
 from __future__ import annotations
@@ -233,13 +242,21 @@ def require_user(request: Request) -> str:
 # ── HTML routes ───────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
+async def home(request: Request, folder: str = ""):
     email = _verify_session_jwt(request.cookies.get(SESSION_COOKIE_NAME))
     if not email:
         return RedirectResponse("/oidc/login", status_code=303)
 
+    folder = folder.strip()
+    if folder:
+        try:
+            _safe_folder(folder)
+        except HTTPException:
+            return RedirectResponse("/", status_code=303)
+
+    prefix = _prefix_for(folder or None)
     try:
-        resp = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=S3_PREFIX)
+        files, child_folders = _list_one_level(prefix)
     except ClientError as exc:
         log.exception("list_objects_v2 failed")
         return HTMLResponse(
@@ -247,21 +264,24 @@ async def home(request: Request):
             status_code=500,
         )
 
-    files = []
-    for obj in resp.get("Contents", []):
-        key = obj["Key"]
-        if key == S3_PREFIX or key.endswith("/"):
-            continue
-        files.append(
-            {
-                "name": key[len(S3_PREFIX):],
-                "size": obj["Size"],
-                "last_modified": obj["LastModified"],
-            }
-        )
-    files.sort(key=lambda f: f["last_modified"], reverse=True)
+    # Inside a folder we never recurse, but we still need the full top-level
+    # folder list so the "move to…" picker has somewhere to send things.
+    if folder:
+        try:
+            _, all_folders = _list_one_level(S3_PREFIX)
+        except ClientError:
+            all_folders = []
+    else:
+        all_folders = child_folders
 
-    return HTMLResponse(templates.file_browser_html(email, files))
+    return HTMLResponse(
+        templates.file_browser_html(
+            email=email,
+            files=files,
+            folders=all_folders,
+            current_folder=folder,
+        )
+    )
 
 
 # ── OIDC dance ────────────────────────────────────────────────────────────────
@@ -347,8 +367,12 @@ async def logout():
 
 # ── File API ──────────────────────────────────────────────────────────────────
 
+FOLDER_MARKER = ".keep"
+
+
 def _safe_filename(name: str) -> str:
-    """Reject path traversal and slashes — files live flat under shared/."""
+    """Reject path traversal and slashes — filenames are basename-only,
+    the folder segment is passed separately."""
     if not name or "/" in name or "\\" in name or ".." in name or name.startswith("."):
         raise HTTPException(400, "invalid filename")
     if len(name) > 255:
@@ -356,38 +380,97 @@ def _safe_filename(name: str) -> str:
     return name
 
 
+def _safe_folder(name: str) -> str:
+    """Validate a folder segment. One level only; no traversal, no slashes,
+    no hidden names, no control chars, ≤64 chars."""
+    if not name:
+        raise HTTPException(400, "folder name required")
+    if "/" in name or "\\" in name or ".." in name or name.startswith("."):
+        raise HTTPException(400, "invalid folder name")
+    if len(name) > 64:
+        raise HTTPException(400, "folder name too long")
+    if any(ord(c) < 32 for c in name):
+        raise HTTPException(400, "folder name has control characters")
+    return name
+
+
+def _prefix_for(folder: Optional[str]) -> str:
+    """Resolve the S3 prefix for an optional folder. Empty / None = root."""
+    if not folder:
+        return S3_PREFIX
+    return f"{S3_PREFIX}{_safe_folder(folder)}/"
+
+
+def _list_one_level(prefix: str) -> tuple[list[dict], list[str]]:
+    """One-level list. Returns (files, child_folders).
+
+    child_folders is meaningful only when prefix == S3_PREFIX (root view).
+    The folder marker (.keep) is filtered out of files. Folders without any
+    files still appear in child_folders because the marker keeps the prefix
+    alive at the delimiter boundary."""
+    resp = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix, Delimiter="/")
+    files: list[dict] = []
+    for obj in resp.get("Contents", []) or []:
+        key = obj["Key"]
+        if key == prefix or key.endswith("/"):
+            continue
+        name = key[len(prefix):]
+        if name == FOLDER_MARKER or "/" in name:
+            continue
+        files.append(
+            {
+                "name": name,
+                "size": obj["Size"],
+                "last_modified": obj["LastModified"],
+            }
+        )
+    folders: list[str] = []
+    for cp in resp.get("CommonPrefixes", []) or []:
+        p = cp.get("Prefix", "")
+        if not p.startswith(prefix):
+            continue
+        rest = p[len(prefix):].rstrip("/")
+        if rest and "/" not in rest:
+            folders.append(rest)
+    folders.sort()
+    files.sort(key=lambda f: f["last_modified"], reverse=True)
+    return files, folders
+
+
 @app.get("/api/files")
-async def api_list_files(_: str = Depends(require_user)):
+async def api_list_files(folder: str = "", _: str = Depends(require_user)):
+    folder = folder.strip()
+    prefix = _prefix_for(folder or None)
     try:
-        resp = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=S3_PREFIX)
+        files, child_folders = _list_one_level(prefix)
     except ClientError as exc:
         log.exception("list failed")
         raise HTTPException(500, f"list failed: {exc}")
 
-    files = []
-    for obj in resp.get("Contents", []):
-        key = obj["Key"]
-        if key == S3_PREFIX or key.endswith("/"):
-            continue
-        files.append(
+    return {
+        "current_folder": folder,
+        "folders": [] if folder else child_folders,
+        "files": [
             {
-                "name": key[len(S3_PREFIX):],
-                "size": obj["Size"],
-                "last_modified": obj["LastModified"].isoformat(),
+                "name": f["name"],
+                "size": f["size"],
+                "last_modified": f["last_modified"].isoformat(),
             }
-        )
-    files.sort(key=lambda f: f["last_modified"], reverse=True)
-    return files
+            for f in files
+        ],
+    }
 
 
 class UploadURLRequest(BaseModel):
     filename: str
+    folder: Optional[str] = None
 
 
 @app.post("/api/files/upload-url")
 async def api_upload_url(req: UploadURLRequest, _: str = Depends(require_user)):
     name = _safe_filename(req.filename)
-    key = f"{S3_PREFIX}{name}"
+    prefix = _prefix_for(req.folder or None)
+    key = f"{prefix}{name}"
     try:
         # NOTE: deliberately omit ContentType from Params so the signature
         # only covers Bucket+Key. The browser can then send any Content-Type
@@ -406,9 +489,10 @@ async def api_upload_url(req: UploadURLRequest, _: str = Depends(require_user)):
 
 
 @app.get("/api/files/download/{filename:path}")
-async def api_download(filename: str, _: str = Depends(require_user)):
+async def api_download(filename: str, folder: str = "", _: str = Depends(require_user)):
     name = _safe_filename(filename)
-    key = f"{S3_PREFIX}{name}"
+    prefix = _prefix_for(folder or None)
+    key = f"{prefix}{name}"
     try:
         url = s3.generate_presigned_url(
             "get_object",
@@ -436,10 +520,11 @@ _INLINE_CONTENT_TYPES = {
 
 
 @app.get("/api/files/stream/{filename:path}")
-async def api_stream(filename: str, _: str = Depends(require_user)):
+async def api_stream(filename: str, folder: str = "", _: str = Depends(require_user)):
     """Inline-disposition presigned URL — used by the in-page <audio> element."""
     name = _safe_filename(filename)
-    key = f"{S3_PREFIX}{name}"
+    prefix = _prefix_for(folder or None)
+    key = f"{prefix}{name}"
     ext = name.lower().rsplit(".", 1)
     content_type = _INLINE_CONTENT_TYPES.get(f".{ext[1]}" if len(ext) == 2 else "", "application/octet-stream")
     try:
@@ -463,6 +548,7 @@ async def api_stream(filename: str, _: str = Depends(require_user)):
 class RenameRequest(BaseModel):
     old: str
     new: str
+    folder: Optional[str] = None
 
 
 @app.post("/api/files/rename")
@@ -472,8 +558,9 @@ async def api_rename(req: RenameRequest, user: str = Depends(require_user)):
     if old_name == new_name:
         return {"renamed": new_name}
 
-    old_key = f"{S3_PREFIX}{old_name}"
-    new_key = f"{S3_PREFIX}{new_name}"
+    prefix = _prefix_for(req.folder or None)
+    old_key = f"{prefix}{old_name}"
+    new_key = f"{prefix}{new_name}"
 
     try:
         s3.head_object(Bucket=S3_BUCKET, Key=new_key)
@@ -501,10 +588,62 @@ async def api_rename(req: RenameRequest, user: str = Depends(require_user)):
     return {"renamed": new_name}
 
 
+class MoveRequest(BaseModel):
+    filename: str
+    from_folder: Optional[str] = None
+    to_folder: Optional[str] = None
+
+
+@app.post("/api/files/move")
+async def api_move(req: MoveRequest, user: str = Depends(require_user)):
+    name = _safe_filename(req.filename)
+    src_prefix = _prefix_for(req.from_folder or None)
+    dst_prefix = _prefix_for(req.to_folder or None)
+    if src_prefix == dst_prefix:
+        return {"moved": name, "to_folder": req.to_folder or ""}
+
+    src_key = f"{src_prefix}{name}"
+    dst_key = f"{dst_prefix}{name}"
+
+    try:
+        s3.head_object(Bucket=S3_BUCKET, Key=dst_key)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if code not in ("404", "NoSuchKey", "NotFound") and status != 404:
+            log.exception("head_object failed during move")
+            raise HTTPException(500, f"move precheck failed: {exc}")
+    else:
+        raise HTTPException(
+            409, f"a file named {name} already exists in destination"
+        )
+
+    try:
+        s3.copy_object(
+            Bucket=S3_BUCKET,
+            Key=dst_key,
+            CopySource={"Bucket": S3_BUCKET, "Key": src_key},
+        )
+        s3.delete_object(Bucket=S3_BUCKET, Key=src_key)
+    except ClientError as exc:
+        log.exception("move failed")
+        raise HTTPException(500, f"move failed: {exc}")
+
+    log.info(
+        "moved by %s***: %s [%s -> %s]",
+        user[:3],
+        name,
+        req.from_folder or "/",
+        req.to_folder or "/",
+    )
+    return {"moved": name, "to_folder": req.to_folder or ""}
+
+
 @app.delete("/api/files/{filename:path}")
-async def api_delete(filename: str, user: str = Depends(require_user)):
+async def api_delete(filename: str, folder: str = "", user: str = Depends(require_user)):
     name = _safe_filename(filename)
-    key = f"{S3_PREFIX}{name}"
+    prefix = _prefix_for(folder or None)
+    key = f"{prefix}{name}"
     try:
         # Bucket versioning is on, so this creates a delete marker — the
         # actual data is recoverable for 30 days via the lifecycle rule.
@@ -512,5 +651,123 @@ async def api_delete(filename: str, user: str = Depends(require_user)):
     except ClientError as exc:
         log.exception("delete failed")
         raise HTTPException(500, f"delete failed: {exc}")
-    log.info("deleted by %s***: %s", user[:3], name)
+    log.info("deleted by %s***: %s", user[:3], key)
     return {"deleted": name, "recoverable_until_days": 30}
+
+
+# ── Folder API ────────────────────────────────────────────────────────────────
+
+
+class FolderCreateRequest(BaseModel):
+    name: str
+
+
+@app.post("/api/folders")
+async def api_folder_create(req: FolderCreateRequest, user: str = Depends(require_user)):
+    name = _safe_folder(req.name)
+    prefix = f"{S3_PREFIX}{name}/"
+    try:
+        existing = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix, MaxKeys=1)
+    except ClientError as exc:
+        log.exception("folder existence check failed")
+        raise HTTPException(500, f"folder create failed: {exc}")
+    if existing.get("KeyCount", 0) > 0:
+        raise HTTPException(409, f"folder {name} already exists")
+
+    try:
+        s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}{FOLDER_MARKER}", Body=b"")
+    except ClientError as exc:
+        log.exception("folder create failed")
+        raise HTTPException(500, f"folder create failed: {exc}")
+
+    log.info("folder created by %s***: %s", user[:3], name)
+    return {"created": name}
+
+
+@app.delete("/api/folders/{name}")
+async def api_folder_delete(name: str, user: str = Depends(require_user)):
+    folder = _safe_folder(name)
+    prefix = f"{S3_PREFIX}{folder}/"
+
+    try:
+        resp = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
+    except ClientError as exc:
+        log.exception("folder list failed during delete")
+        raise HTTPException(500, f"folder delete failed: {exc}")
+
+    contents = resp.get("Contents", []) or []
+    real_files = [
+        o for o in contents
+        if not o["Key"].endswith(f"/{FOLDER_MARKER}") and o["Key"] != prefix
+    ]
+    if real_files:
+        raise HTTPException(
+            409, f"folder is not empty ({len(real_files)} files)"
+        )
+
+    for obj in contents:
+        try:
+            s3.delete_object(Bucket=S3_BUCKET, Key=obj["Key"])
+        except ClientError as exc:
+            log.warning(
+                "folder delete: failed to remove %s: %s", obj["Key"], exc
+            )
+
+    log.info("folder deleted by %s***: %s", user[:3], folder)
+    return {"deleted": folder}
+
+
+class FolderRenameRequest(BaseModel):
+    old: str
+    new: str
+
+
+@app.post("/api/folders/rename")
+async def api_folder_rename(
+    req: FolderRenameRequest, user: str = Depends(require_user)
+):
+    old = _safe_folder(req.old)
+    new = _safe_folder(req.new)
+    if old == new:
+        return {"renamed": new}
+
+    old_prefix = f"{S3_PREFIX}{old}/"
+    new_prefix = f"{S3_PREFIX}{new}/"
+
+    try:
+        clash = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=new_prefix, MaxKeys=1)
+    except ClientError as exc:
+        log.exception("folder rename precheck failed")
+        raise HTTPException(500, f"folder rename failed: {exc}")
+    if clash.get("KeyCount", 0) > 0:
+        raise HTTPException(409, f"folder {new} already exists")
+
+    try:
+        resp = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=old_prefix)
+    except ClientError as exc:
+        log.exception("folder list failed during rename")
+        raise HTTPException(500, f"folder rename failed: {exc}")
+
+    contents = resp.get("Contents", []) or []
+    if not contents:
+        raise HTTPException(404, f"folder {old} not found")
+
+    for obj in contents:
+        old_key = obj["Key"]
+        rest = old_key[len(old_prefix):]
+        new_key = f"{new_prefix}{rest}"
+        try:
+            s3.copy_object(
+                Bucket=S3_BUCKET,
+                Key=new_key,
+                CopySource={"Bucket": S3_BUCKET, "Key": old_key},
+            )
+            s3.delete_object(Bucket=S3_BUCKET, Key=old_key)
+        except ClientError as exc:
+            log.exception("folder rename failed mid-way at %s", old_key)
+            raise HTTPException(
+                500, f"folder rename failed mid-way at {rest}: {exc}"
+            )
+
+    log.info("folder renamed by %s***: %s -> %s", user[:3], old, new)
+    return {"renamed": new}

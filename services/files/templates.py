@@ -30,6 +30,38 @@ _CSS = """
   --text-primary: #f5f1e8;
   --text-muted: #8a8a8a;
   --input-line: #2a2b2f;
+  --row-hover: rgba(255, 255, 255, 0.02);
+  --menu-bg: rgba(16, 17, 20, 0.96);
+  --menu-border: rgba(255, 255, 255, 0.08);
+  --menu-hover: rgba(255, 255, 255, 0.05);
+  --noise-opacity: 0.05;
+  --noise-blend: overlay;
+  --body-gradient-from: #0a0b0d;
+  --body-gradient-to: #131418;
+  --body-glow: rgba(199, 26, 47, 0.18);
+  --foot-color: rgba(245, 241, 232, 0.18);
+}
+
+html[data-theme="light"] {
+  --brand-red: #c71a2f;
+  --brand-warm: #b8870f;
+  --brand-green: #2e7d3a;
+  --base-bg: #f4f1ea;
+  --panel-bg: rgba(255, 252, 245, 0.92);
+  --panel-border: rgba(20, 21, 24, 0.08);
+  --text-primary: #16181c;
+  --text-muted: #5b5e66;
+  --input-line: #d8d2c4;
+  --row-hover: rgba(0, 0, 0, 0.03);
+  --menu-bg: #ffffff;
+  --menu-border: rgba(20, 21, 24, 0.1);
+  --menu-hover: rgba(0, 0, 0, 0.04);
+  --noise-opacity: 0.03;
+  --noise-blend: multiply;
+  --body-gradient-from: #f4f1ea;
+  --body-gradient-to: #ece7da;
+  --body-glow: rgba(199, 26, 47, 0.08);
+  --foot-color: rgba(20, 21, 24, 0.4);
 }
 
 * { box-sizing: border-box; }
@@ -46,8 +78,8 @@ html, body {
 
 body {
   background:
-    radial-gradient(ellipse at 50% 35%, rgba(199, 26, 47, 0.18) 0%, transparent 55%),
-    linear-gradient(180deg, #0a0b0d 0%, #131418 100%);
+    radial-gradient(ellipse at 50% 35%, var(--body-glow) 0%, transparent 55%),
+    linear-gradient(180deg, var(--body-gradient-from) 0%, var(--body-gradient-to) 100%);
   position: relative;
   overflow-x: hidden;
   display: flex;
@@ -74,9 +106,9 @@ body::after {
   position: fixed;
   inset: 0;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' /><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.45 0' /></filter><rect width='100%' height='100%' filter='url(%23n)' /></svg>");
-  opacity: 0.05;
+  opacity: var(--noise-opacity);
   pointer-events: none;
-  mix-blend-mode: overlay;
+  mix-blend-mode: var(--noise-blend);
   z-index: 0;
 }
 
@@ -192,7 +224,7 @@ button.ghost:hover {
   font-size: 9px;
   letter-spacing: 0.32em;
   text-transform: uppercase;
-  color: rgba(245, 241, 232, 0.18);
+  color: var(--foot-color);
   font-weight: 500;
 }
 
@@ -292,7 +324,7 @@ table.files tbody td {
 }
 
 table.files tbody tr:hover td {
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--row-hover);
 }
 
 table.files .name {
@@ -448,18 +480,232 @@ tr.folder-row:hover td { background: rgba(254, 231, 181, 0.03); }
   letter-spacing: 0.04em;
 }
 
+/* Account button + dropdown */
+
+.account {
+  position: relative;
+  display: inline-block;
+}
+
+.account-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--brand-red);
+  color: #fff;
+  font-family: 'Manrope', sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+  padding: 0;
+  text-transform: uppercase;
+  transition: transform 120ms ease, box-shadow 200ms ease;
+}
+
+.account-btn:hover {
+  background: var(--brand-red);
+  box-shadow: 0 4px 16px -4px rgba(199, 26, 47, 0.45);
+  transform: translateY(-1px);
+}
+
+.account-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 220px;
+  background: var(--menu-bg);
+  border: 1px solid var(--menu-border);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  box-shadow: 0 18px 48px -12px rgba(0, 0, 0, 0.4);
+  display: none;
+  flex-direction: column;
+  z-index: 20;
+  padding: 6px 0;
+}
+
+.account-menu.open { display: flex; }
+
+.account-menu-email {
+  padding: 10px 16px 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  border-bottom: 1px solid var(--menu-border);
+  word-break: break-all;
+}
+
+.account-menu a,
+.account-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 16px;
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  font-family: 'Manrope', sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  text-decoration: none;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.account-menu a:hover,
+.account-menu button:hover {
+  background: var(--menu-hover);
+  box-shadow: none;
+  transform: none;
+}
+
+.account-menu a svg,
+.account-menu button svg {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.account-menu .divider {
+  height: 1px;
+  background: var(--menu-border);
+  margin: 4px 0;
+}
+
+/* Activity log table */
+
+.activity-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 6px 0 18px;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.activity-toolbar .day-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.activity-toolbar select {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--input-line);
+  padding: 6px 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  border-radius: 0;
+}
+
+table.activity {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+table.activity thead th {
+  text-align: left;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 500;
+  padding: 0 14px 12px;
+  border-bottom: 1px solid var(--input-line);
+}
+
+table.activity tbody td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--input-line);
+  vertical-align: top;
+}
+
+table.activity tbody tr:hover td { background: var(--row-hover); }
+
+table.activity .ts {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+table.activity .user {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--brand-warm);
+  word-break: break-all;
+}
+
+table.activity .action {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+table.activity .action.upload { color: var(--brand-green); }
+table.activity .action.delete { color: var(--brand-red); }
+
+table.activity .file {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+table.activity .folder {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+table.activity .ip {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 @media (max-width: 600px) {
   main, main.wide { padding: 32px 20px; border-radius: 0; max-width: 100%; }
   table.files .meta { display: none; }
+  table.activity .ip, table.activity .folder { display: none; }
 }
 """
 
 
-def _page(title: str, body_html: str) -> str:
+def _page(title: str, body_html: str, theme: str = "dark") -> str:
+    theme_attr = "light" if theme == "light" else "dark"
+    # Inline early-paint script reads the theme cookie and applies it before
+    # the rest of CSS evaluates — avoids flash when the cookie disagrees with
+    # the server-rendered default (e.g. on /activity after a theme flip in a
+    # sibling tab).
+    inline_theme_js = (
+        "(function(){try{var m=document.cookie.match(/oxp_files_theme=(light|dark)/);"
+        "if(m){document.documentElement.setAttribute('data-theme',m[1]);}}catch(e){}})();"
+    )
     return (
-        f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        f'<!DOCTYPE html><html lang="en" data-theme="{theme_attr}"><head><meta charset="utf-8">'
         f'<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f'<title>{escape(title)}</title><style>{_CSS}</style></head>'
+        f'<title>{escape(title)}</title>'
+        f'<script>{inline_theme_js}</script>'
+        f'<style>{_CSS}</style></head>'
         f'<body>{body_html}</body></html>'
     )
 
@@ -558,6 +804,254 @@ _ICON_FOLDER_PLUS = (
     '</svg>'
 )
 
+_ICON_PREVIEW = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>'
+    '<circle cx="12" cy="12" r="3"/>'
+    '</svg>'
+)
+
+_ICON_LOGOUT = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>'
+    '<polyline points="16 17 21 12 16 7"/>'
+    '<line x1="21" y1="12" x2="9" y2="12"/>'
+    '</svg>'
+)
+
+_ICON_SUN = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-hidden="true">'
+    '<circle cx="12" cy="12" r="4"/>'
+    '<line x1="12" y1="2" x2="12" y2="5"/>'
+    '<line x1="12" y1="19" x2="12" y2="22"/>'
+    '<line x1="2" y1="12" x2="5" y2="12"/>'
+    '<line x1="19" y1="12" x2="22" y2="12"/>'
+    '<line x1="4.93" y1="4.93" x2="7.05" y2="7.05"/>'
+    '<line x1="16.95" y1="16.95" x2="19.07" y2="19.07"/>'
+    '<line x1="4.93" y1="19.07" x2="7.05" y2="16.95"/>'
+    '<line x1="16.95" y1="7.05" x2="19.07" y2="4.93"/>'
+    '</svg>'
+)
+
+_ICON_MOON = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>'
+    '</svg>'
+)
+
+_ICON_LIST = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-hidden="true">'
+    '<line x1="8" y1="6" x2="21" y2="6"/>'
+    '<line x1="8" y1="12" x2="21" y2="12"/>'
+    '<line x1="8" y1="18" x2="21" y2="18"/>'
+    '<line x1="3" y1="6" x2="3.01" y2="6"/>'
+    '<line x1="3" y1="12" x2="3.01" y2="12"/>'
+    '<line x1="3" y1="18" x2="3.01" y2="18"/>'
+    '</svg>'
+)
+
+
+def _account_menu_html(email: str) -> str:
+    """Account button + dropdown menu. Used in both file browser and activity pages."""
+    initial = escape((email[:1] or "?").upper())
+    return f"""
+      <div class="account">
+        <button class="account-btn" type="button" id="account-btn"
+                aria-haspopup="true" aria-expanded="false"
+                aria-label="Account menu">{initial}</button>
+        <div class="account-menu" id="account-menu" role="menu">
+          <div class="account-menu-email">{escape(email)}</div>
+          <a href="/activity" target="_blank" rel="noopener" role="menuitem">
+            {_ICON_LIST}<span>View Activity Log</span>
+          </a>
+          <button type="button" id="theme-toggle-btn" role="menuitem">
+            <span id="theme-icon">{_ICON_SUN}</span>
+            <span id="theme-label">Light mode</span>
+          </button>
+          <div class="divider"></div>
+          <a href="/logout" role="menuitem">{_ICON_LOGOUT}<span>Sign out</span></a>
+        </div>
+      </div>
+    """
+
+
+_ACCOUNT_MENU_JS = """
+(function() {
+  const btn = document.getElementById('account-btn');
+  const menu = document.getElementById('account-menu');
+  const themeBtn = document.getElementById('theme-toggle-btn');
+  const themeIcon = document.getElementById('theme-icon');
+  const themeLabel = document.getElementById('theme-label');
+  const ICON_SUN = __ICON_SUN__;
+  const ICON_MOON = __ICON_MOON__;
+
+  if (!btn || !menu) return;
+
+  function currentTheme() {
+    return document.documentElement.getAttribute('data-theme') || 'dark';
+  }
+
+  function syncThemeUI() {
+    const t = currentTheme();
+    if (t === 'light') {
+      themeIcon.innerHTML = ICON_MOON;
+      themeLabel.textContent = 'Dark mode';
+    } else {
+      themeIcon.innerHTML = ICON_SUN;
+      themeLabel.textContent = 'Light mode';
+    }
+  }
+  syncThemeUI();
+
+  function close() {
+    menu.classList.remove('open');
+    btn.setAttribute('aria-expanded', 'false');
+  }
+  function open() {
+    menu.classList.add('open');
+    btn.setAttribute('aria-expanded', 'true');
+  }
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (menu.classList.contains('open')) close(); else open();
+  });
+  document.addEventListener('click', (e) => {
+    if (!menu.contains(e.target) && e.target !== btn) close();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') close();
+  });
+
+  if (themeBtn) {
+    themeBtn.addEventListener('click', async () => {
+      const next = currentTheme() === 'light' ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', next);
+      syncThemeUI();
+      try {
+        await fetch('/api/theme', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ theme: next }),
+        });
+      } catch (e) {
+        // Cookie write failed — preference persists for this tab only.
+      }
+    });
+  }
+})();
+"""
+
+
+def _account_menu_js() -> str:
+    return (
+        _ACCOUNT_MENU_JS
+        .replace("__ICON_SUN__", repr(_ICON_SUN))
+        .replace("__ICON_MOON__", repr(_ICON_MOON))
+    )
+
+
+_ACTION_LABELS = {
+    "login": "Sign in",
+    "logout": "Sign out",
+    "upload": "Upload",
+    "download": "Download",
+    "delete": "Delete",
+    "rename": "Rename",
+    "move": "Move",
+}
+
+
+def activity_html(
+    email: str,
+    events: list[dict],
+    current_day: str,
+    available_days: list[str],
+    theme: str = "dark",
+) -> str:
+    """Activity log page. `events` already sorted newest-first; each row is
+    {ts, user, action, file, folder, ip}."""
+    if current_day not in available_days:
+        available_days = [current_day, *available_days]
+
+    day_options = "".join(
+        f'<option value="{escape(d)}"{" selected" if d == current_day else ""}>{escape(d)}</option>'
+        for d in available_days
+    )
+
+    if events:
+        rows: list[str] = []
+        for ev in events:
+            ts = ev.get("ts", "")
+            try:
+                ts_display = datetime.fromisoformat(ts.replace("Z", "+00:00")).strftime("%H:%M:%S")
+            except ValueError:
+                ts_display = ts
+            action = ev.get("action", "")
+            action_label = _ACTION_LABELS.get(action, action.capitalize())
+            file_val = ev.get("file") or ""
+            folder_val = ev.get("folder") or ""
+            ip_val = ev.get("ip") or ""
+            rows.append(
+                f'<tr>'
+                f'<td class="ts">{escape(ts_display)}</td>'
+                f'<td class="user">{escape(ev.get("user", ""))}</td>'
+                f'<td><span class="action {escape(action)}">{escape(action_label)}</span></td>'
+                f'<td class="file">{escape(file_val)}</td>'
+                f'<td class="folder">{escape(folder_val) if folder_val else "&mdash;"}</td>'
+                f'<td class="ip">{escape(ip_val)}</td>'
+                f'</tr>'
+            )
+        table_html = (
+            f'<table class="activity"><thead><tr>'
+            f'<th>Time (UTC)</th><th>User</th><th>Action</th><th>File</th><th>Folder</th><th>IP</th>'
+            f'</tr></thead><tbody>{"".join(rows)}</tbody></table>'
+        )
+    else:
+        table_html = '<div class="empty">No activity recorded for this day.</div>'
+
+    body = f"""
+      <main class="wide">
+        <div class="toolbar">
+          <div>
+            <h1 class="title" style="font-size:24px;margin:0">Activity Log</h1>
+          </div>
+          <div>
+            {_account_menu_html(email)}
+          </div>
+        </div>
+        <hr class="bar">
+
+        <div class="activity-toolbar">
+          <div class="crumbs">
+            <a href="/">&larr; Files</a>
+          </div>
+          <form class="day-picker" method="get" action="/activity">
+            <label for="day-select" style="margin:0">Day:</label>
+            <select id="day-select" name="day" onchange="this.form.submit()">
+              {day_options}
+            </select>
+          </form>
+        </div>
+
+        {table_html}
+
+        <p class="brand-foot">Orthokinetix &middot; OrthoXpress</p>
+      </main>
+      <script>{_account_menu_js()}</script>
+    """
+    return _page("Activity Log — OXP File Drop", body, theme=theme)
+
 
 def _fmt_size(n: int) -> str:
     if n >= 1 << 30:
@@ -578,6 +1072,7 @@ def file_browser_html(
     files: list[dict],
     folders: list[str],
     current_folder: str,
+    theme: str = "dark",
 ) -> str:
     """`files`: [{name, size, last_modified}], `folders`: [str], `current_folder`: "" = root."""
     import json as _json
@@ -621,10 +1116,20 @@ def file_browser_html(
             name = escape(raw_name)
             size = _fmt_size(f["size"])
             modified = _fmt_time(f["last_modified"])
-            is_wav = raw_name.lower().endswith(".wav")
+            lower = raw_name.lower()
+            is_wav = lower.endswith(".wav")
+            is_pdf = lower.endswith(".pdf")
             play_link = (
                 f'<a class="icon play" href="#" data-play="{name}" title="Play" aria-label="Play {name}">{_ICON_PLAY}</a>'
                 if is_wav else ''
+            )
+            stream_href = f'/api/files/stream/{quote(raw_name, safe="")}'
+            if in_folder:
+                stream_href += f'?folder={cf_quoted}'
+            preview_link = (
+                f'<a class="icon preview" href="{stream_href}" target="_blank" rel="noopener" '
+                f'data-preview="{name}" title="Preview" aria-label="Preview {name}">{_ICON_PREVIEW}</a>'
+                if is_pdf else ''
             )
             download_href = f'/api/files/download/{quote(raw_name, safe="")}'
             if in_folder:
@@ -636,6 +1141,7 @@ def file_browser_html(
                 f'<td class="meta">{modified}</td>'
                 f'<td class="actions">'
                 f'{play_link}'
+                f'{preview_link}'
                 f'<a class="icon" href="#" data-rename="{name}" title="Rename" aria-label="Rename {name}">{_ICON_RENAME}</a>'
                 f'<a class="icon" href="#" data-move="{name}" title="Move to folder" aria-label="Move {name}">{_ICON_MOVE}</a>'
                 f'<a class="icon" href="{download_href}" title="Download" aria-label="Download {name}">{_ICON_DOWNLOAD}</a>'
@@ -700,8 +1206,7 @@ def file_browser_html(
             <h1 class="title" style="font-size:24px;margin:0">OXP File Drop</h1>
           </div>
           <div>
-            <span class="who">{escape(email)}</span>
-            <a href="/logout"><button class="ghost" type="button">Sign out</button></a>
+            {_account_menu_html(email)}
           </div>
         </div>
         <hr class="bar">
@@ -724,6 +1229,7 @@ def file_browser_html(
       </main>
 
       <script id="folders-data" type="application/json">{folders_json}</script>
+      <script>{_account_menu_js()}</script>
       <script>
       (function() {{
         const CURRENT_FOLDER = {_json.dumps(current_folder)};
@@ -766,8 +1272,17 @@ def file_browser_html(
               bar.style.width = ((e.loaded / e.total) * 100).toFixed(1) + '%';
             }}
           }};
-          xhr.onload = () => {{
+          xhr.onload = async () => {{
             if (xhr.status >= 200 && xhr.status < 300) {{
+              try {{
+                await fetch('/api/files/uploaded', {{
+                  method: 'POST',
+                  headers: {{ 'Content-Type': 'application/json' }},
+                  body: JSON.stringify({{ filename: file.name, folder: CURRENT_FOLDER || null }}),
+                }});
+              }} catch (e) {{
+                // Activity log failure shouldn't block the user — the file did upload.
+              }}
               window.location.reload();
             }} else {{
               alert('Upload to storage failed: ' + xhr.status + ' ' + xhr.responseText);
@@ -919,4 +1434,4 @@ def file_browser_html(
       }})();
       </script>
     """
-    return _page("OXP File Drop", body)
+    return _page("OXP File Drop", body, theme=theme)

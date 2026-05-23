@@ -25,6 +25,8 @@ deletes are recoverable for 30 days.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import secrets
@@ -55,6 +57,11 @@ SESSION_COOKIE_TTL = 30 * 24 * 3600
 STATE_COOKIE_NAME = "oxp_files_oauth_state"
 STATE_COOKIE_TTL = 600
 
+THEME_COOKIE_NAME = "oxp_files_theme"
+THEME_COOKIE_TTL = 365 * 24 * 3600
+THEME_VALID = {"dark", "light"}
+THEME_DEFAULT = "dark"
+
 JWT_SECRET = os.environ["JWT_SECRET"]
 OIDC_ISSUER = os.environ["OIDC_ISSUER"].rstrip("/")
 OIDC_CLIENT_ID = os.environ["OIDC_CLIENT_ID"]
@@ -76,6 +83,11 @@ ALLOWED_ORIGINS = [
 ]
 
 PRESIGN_EXPIRES = 3600  # 1 hour
+
+ACTIVITY_PREFIX = "_activity/"
+ACTIVITY_ACTIONS = {
+    "login", "logout", "upload", "download", "delete", "rename", "move",
+}
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -239,6 +251,78 @@ def require_user(request: Request) -> str:
     return email
 
 
+# ── Theme ─────────────────────────────────────────────────────────────────────
+
+def _read_theme(request: Request) -> str:
+    val = request.cookies.get(THEME_COOKIE_NAME, "")
+    return val if val in THEME_VALID else THEME_DEFAULT
+
+
+# ── Activity log ──────────────────────────────────────────────────────────────
+#
+# One JSON object per event under _activity/YYYY-MM-DD/<ts>-<rand>.json. S3 has
+# no atomic append, so a single-file JSONL would clobber under concurrent
+# writes; per-event objects are race-free and the key prefix sorts
+# chronologically. The _activity/ prefix lives outside S3_PREFIX (shared/) so
+# events never appear in user-facing listings.
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",", 1)[0].strip()
+    if request.client:
+        return request.client.host
+    return ""
+
+
+def _log_activity_blocking(
+    *, user: str, action: str, file: Optional[str], folder: Optional[str], ip: str
+) -> None:
+    now = datetime.now(timezone.utc)
+    event = {
+        "ts": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "user": user,
+        "action": action,
+        "file": file,
+        "folder": folder or "",
+        "ip": ip,
+    }
+    key = (
+        f"{ACTIVITY_PREFIX}{now.strftime('%Y-%m-%d')}/"
+        f"{now.strftime('%H%M%S')}-{secrets.token_hex(4)}.json"
+    )
+    try:
+        s3.put_object(
+            Bucket=S3_BUCKET,
+            Key=key,
+            Body=json.dumps(event).encode("utf-8"),
+            ContentType="application/json",
+        )
+    except ClientError as exc:
+        log.warning("activity log write failed (%s by %s): %s", action, user[:3], exc)
+
+
+def log_activity(
+    *,
+    user: str,
+    action: str,
+    request: Optional[Request] = None,
+    file: Optional[str] = None,
+    folder: Optional[str] = None,
+) -> None:
+    """Fire-and-forget activity write. Never raises; never blocks the caller."""
+    if action not in ACTIVITY_ACTIONS:
+        log.warning("log_activity: unknown action %r", action)
+        return
+    ip = _client_ip(request) if request else ""
+    asyncio.create_task(
+        asyncio.to_thread(
+            _log_activity_blocking,
+            user=user, action=action, file=file, folder=folder, ip=ip,
+        )
+    )
+
+
 # ── HTML routes ───────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -280,6 +364,7 @@ async def home(request: Request, folder: str = ""):
             files=files,
             folders=all_folders,
             current_folder=folder,
+            theme=_read_theme(request),
         )
     )
 
@@ -351,12 +436,99 @@ async def oidc_callback(request: Request, code: str = "", state: str = ""):
     response.delete_cookie(STATE_COOKIE_NAME, path="/")
     _set_session_cookie(response, email)
     log.info("logged in: %s***", email[:3])
+    log_activity(user=email, action="login", request=request)
     return response
 
 
+class ThemeRequest(BaseModel):
+    theme: str
+
+
+@app.post("/api/theme")
+async def api_set_theme(req: ThemeRequest, user: str = Depends(require_user)):
+    if req.theme not in THEME_VALID:
+        raise HTTPException(400, "invalid theme")
+    response = JSONResponse({"theme": req.theme})
+    response.set_cookie(
+        THEME_COOKIE_NAME,
+        req.theme,
+        max_age=THEME_COOKIE_TTL,
+        httponly=False,  # client JS reads this for instant pre-paint swap
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+    return response
+
+
+@app.get("/activity", response_class=HTMLResponse)
+async def activity_page(request: Request, day: str = ""):
+    email = _verify_session_jwt(request.cookies.get(SESSION_COOKIE_NAME))
+    if not email:
+        return RedirectResponse("/oidc/login", status_code=303)
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    chosen = (day or today).strip()
+    try:
+        datetime.strptime(chosen, "%Y-%m-%d")
+    except ValueError:
+        chosen = today
+
+    events: list[dict] = []
+    try:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(
+            Bucket=S3_BUCKET, Prefix=f"{ACTIVITY_PREFIX}{chosen}/"
+        ):
+            for obj in page.get("Contents", []) or []:
+                try:
+                    body = s3.get_object(Bucket=S3_BUCKET, Key=obj["Key"])["Body"].read()
+                    events.append(json.loads(body))
+                except (ClientError, json.JSONDecodeError) as exc:
+                    log.warning("activity read skipped %s: %s", obj["Key"], exc)
+    except ClientError as exc:
+        log.exception("activity list failed")
+        return HTMLResponse(
+            templates.error_html("OXP Activity Log", f"Failed to list activity: {exc}"),
+            status_code=500,
+        )
+
+    # Discover the most recent ~30 days that have any activity, for the picker.
+    available_days: list[str] = []
+    try:
+        resp = s3.list_objects_v2(
+            Bucket=S3_BUCKET, Prefix=ACTIVITY_PREFIX, Delimiter="/"
+        )
+        for cp in resp.get("CommonPrefixes", []) or []:
+            p = cp.get("Prefix", "")
+            d = p[len(ACTIVITY_PREFIX):].rstrip("/")
+            if len(d) == 10 and d.count("-") == 2:
+                available_days.append(d)
+        available_days.sort(reverse=True)
+        available_days = available_days[:30]
+    except ClientError:
+        available_days = [chosen]
+
+    events.sort(key=lambda e: e.get("ts", ""), reverse=True)
+
+    theme = _read_theme(request)
+    return HTMLResponse(
+        templates.activity_html(
+            email=email,
+            events=events,
+            current_day=chosen,
+            available_days=available_days,
+            theme=theme,
+        )
+    )
+
+
 @app.get("/logout")
-async def logout():
+async def logout(request: Request):
     """Clear local session + bounce through IdP /logout to clear the SSO cookie too."""
+    email = _verify_session_jwt(request.cookies.get(SESSION_COOKIE_NAME))
+    if email:
+        log_activity(user=email, action="logout", request=request)
     target = f"{OIDC_ISSUER}/logout"
     if PUBLIC_BASE_URL:
         target += f"?redirect_uri={PUBLIC_BASE_URL}/"
@@ -488,8 +660,28 @@ async def api_upload_url(req: UploadURLRequest, _: str = Depends(require_user)):
     return {"url": url, "key": key, "expires_in": PRESIGN_EXPIRES}
 
 
+class UploadedRequest(BaseModel):
+    filename: str
+    folder: Optional[str] = None
+
+
+@app.post("/api/files/uploaded")
+async def api_uploaded(
+    req: UploadedRequest, request: Request, user: str = Depends(require_user)
+):
+    """Client confirms a presigned upload landed in Tigris. Activity-log-only."""
+    name = _safe_filename(req.filename)
+    log_activity(
+        user=user, action="upload", request=request,
+        file=name, folder=req.folder or "",
+    )
+    return {"logged": name}
+
+
 @app.get("/api/files/download/{filename:path}")
-async def api_download(filename: str, folder: str = "", _: str = Depends(require_user)):
+async def api_download(
+    filename: str, request: Request, folder: str = "", user: str = Depends(require_user)
+):
     name = _safe_filename(filename)
     prefix = _prefix_for(folder or None)
     key = f"{prefix}{name}"
@@ -507,6 +699,10 @@ async def api_download(filename: str, folder: str = "", _: str = Depends(require
     except ClientError as exc:
         log.exception("presign download failed")
         raise HTTPException(500, f"presign failed: {exc}")
+    log_activity(
+        user=user, action="download", request=request,
+        file=name, folder=folder or "",
+    )
     return RedirectResponse(url, status_code=307)
 
 
@@ -516,6 +712,7 @@ _INLINE_CONTENT_TYPES = {
     ".m4a": "audio/mp4",
     ".ogg": "audio/ogg",
     ".flac": "audio/flac",
+    ".pdf": "application/pdf",
 }
 
 
@@ -552,7 +749,9 @@ class RenameRequest(BaseModel):
 
 
 @app.post("/api/files/rename")
-async def api_rename(req: RenameRequest, user: str = Depends(require_user)):
+async def api_rename(
+    req: RenameRequest, request: Request, user: str = Depends(require_user)
+):
     old_name = _safe_filename(req.old)
     new_name = _safe_filename(req.new)
     if old_name == new_name:
@@ -585,6 +784,10 @@ async def api_rename(req: RenameRequest, user: str = Depends(require_user)):
         raise HTTPException(500, f"rename failed: {exc}")
 
     log.info("renamed by %s***: %s -> %s", user[:3], old_name, new_name)
+    log_activity(
+        user=user, action="rename", request=request,
+        file=f"{old_name} -> {new_name}", folder=req.folder or "",
+    )
     return {"renamed": new_name}
 
 
@@ -595,7 +798,9 @@ class MoveRequest(BaseModel):
 
 
 @app.post("/api/files/move")
-async def api_move(req: MoveRequest, user: str = Depends(require_user)):
+async def api_move(
+    req: MoveRequest, request: Request, user: str = Depends(require_user)
+):
     name = _safe_filename(req.filename)
     src_prefix = _prefix_for(req.from_folder or None)
     dst_prefix = _prefix_for(req.to_folder or None)
@@ -636,11 +841,18 @@ async def api_move(req: MoveRequest, user: str = Depends(require_user)):
         req.from_folder or "/",
         req.to_folder or "/",
     )
+    log_activity(
+        user=user, action="move", request=request,
+        file=name,
+        folder=f"{req.from_folder or '/'} -> {req.to_folder or '/'}",
+    )
     return {"moved": name, "to_folder": req.to_folder or ""}
 
 
 @app.delete("/api/files/{filename:path}")
-async def api_delete(filename: str, folder: str = "", user: str = Depends(require_user)):
+async def api_delete(
+    filename: str, request: Request, folder: str = "", user: str = Depends(require_user)
+):
     name = _safe_filename(filename)
     prefix = _prefix_for(folder or None)
     key = f"{prefix}{name}"
@@ -652,6 +864,10 @@ async def api_delete(filename: str, folder: str = "", user: str = Depends(requir
         log.exception("delete failed")
         raise HTTPException(500, f"delete failed: {exc}")
     log.info("deleted by %s***: %s", user[:3], key)
+    log_activity(
+        user=user, action="delete", request=request,
+        file=name, folder=folder or "",
+    )
     return {"deleted": name, "recoverable_until_days": 30}
 
 

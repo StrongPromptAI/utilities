@@ -245,10 +245,28 @@ async def _verify_id_token(id_token: str) -> dict:
 
 
 def require_user(request: Request) -> str:
+    """
+    Resolve the authenticated email from either the browser cookie or a
+    Bearer JWT. Both paths verify against the same HS256 JWT_SECRET.
+
+    Smoke (CLI path), with a script-minted JWT in $TOK:
+        curl -fsSL -H "Authorization: Bearer $TOK" \\
+             https://oxp.files.strongprompt.ai/api/files?folder=
+    Expected: 200 + JSON file list. Omitting the header returns 401.
+    """
+    # Cookie path — browser sessions set oxp_sso via OIDC login.
     email = _verify_session_jwt(request.cookies.get(SESSION_COOKIE_NAME))
-    if not email:
-        raise HTTPException(status_code=401, detail="not authenticated")
-    return email
+    if email:
+        return email
+    # Bearer path — CLI/script callers (e.g., thj ingest_from_oxp.sh) mint
+    # the same HS256 JWT from JWT_SECRET and present it via Authorization
+    # header. Same trust boundary, different transport.
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        email = _verify_session_jwt(auth_header[len("Bearer ") :])
+        if email:
+            return email
+    raise HTTPException(status_code=401, detail="not authenticated")
 
 
 # ── Theme ─────────────────────────────────────────────────────────────────────

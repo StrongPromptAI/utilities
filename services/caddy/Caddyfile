@@ -39,7 +39,6 @@ http://oxp.chat.strongprompt.ai:{$PORT:8080} {
 }
 
 # ── oxp.files (FastAPI app) — oxp.files.strongprompt.ai ──────────────────────
-# Replaced SFTPGo on 2026-05-06 (see plans/26-5-5_oxp-files-fastapi-rewrite.md).
 # File bodies bypass Caddy entirely via presigned URLs to Tigris, so the proxy
 # only carries small auth-flow / API requests; default timeouts are fine.
 

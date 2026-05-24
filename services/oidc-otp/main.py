@@ -37,12 +37,10 @@ def _load_clients() -> dict:
 
     Names:
       OPENWEBUI — oxp.chat
-      SFTPGO    — legacy oxp.files (decommissioned 2026-05-06; env vars may
-                   still be present and are tolerated for backward compat)
-      FILES     — new FastAPI oxp.files app
+      FILES     — FastAPI oxp.files app
     """
     clients = {}
-    for name in ("OPENWEBUI", "SFTPGO", "FILES"):
+    for name in ("OPENWEBUI", "FILES"):
         cid = os.environ.get(f"OIDC_CLIENT_{name}_ID")
         secret = os.environ.get(f"OIDC_CLIENT_{name}_SECRET")
         redirect = os.environ.get(f"OIDC_CLIENT_{name}_REDIRECT")

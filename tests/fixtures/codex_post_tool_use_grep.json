@@ -1,0 +1,14 @@
+{
+  "hook_event_name": "PostToolUse",
+  "tool": {
+    "name": "functions.exec_command"
+  },
+  "input": {
+    "command": "rg normalize_event scripts/skill_hook"
+  },
+  "output": {
+    "stdout": "scripts/skill_hook/event_adapter.py:70:def normalize_event(payload)",
+    "exitCode": 0
+  },
+  "runtime": "codex"
+}

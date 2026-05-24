@@ -1,10 +1,22 @@
 """
-Claude Code PostToolUse hook — semantic skill suggestion on errors.
+Claude Code / Codex PostToolUse hook — semantic skill suggestion on errors +
+tool-protocol enforcement (grep-on-code redirect).
 
-Fired by Claude Code after every Bash tool use. When an error is detected,
-embeds the error text and finds the closest matching skill chunk in the index.
+Fired after shell tool use.
 
-Outcomes:
+Two paths, in order:
+
+1. Grep-on-code redirect (deterministic, no embedding):
+   When the command uses grep/rg/ag to search code paths with an
+   identifier-shaped pattern, inject a Skill Radar redirect pointing at
+   gitnexus. Relational queries on source belong to the call graph, not
+   text search. Logged to ~/.claude/grep-on-code-violations.log.
+
+2. Error embedding match (existing):
+   When an error is detected, embed the error text and find the closest
+   matching skill chunk in the wisdom + what indices.
+
+Outcomes (path 2):
 - A: Match found (score >= threshold) AND skill is genuinely relevant —
      guidance injected into context. Also logged to SKILL_INJECT_LOG.md.
 - B: No match (all scores below threshold) — logged to SKILL_DEBT.md for
@@ -13,30 +25,59 @@ Outcomes:
      guidance injected (may be noise), ALSO logged to SKILL_INJECT_LOG.md.
      Reviewing the inject log periodically is how Outcome C is detected.
 
-Exits silently (code 0) on any failure — never blocks Claude Code.
+Exits silently (code 0) on any failure — never blocks the agent runtime.
 """
 
 import json
 import re
+import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Local import — shared-svcs embed client (Railway-hosted, JWT-authed).
+# Local import — Skill Radar embed client, backed by the utilities ONNX service.
 sys.path.insert(0, str(Path(__file__).parent))
 from embed_client import embed as _shared_embed
+from event_adapter import ToolEvent, normalize_event
+from output_adapter import render_additional_context
 
 INDEX_WISDOM_PATH = Path.home() / ".claude/skill_index_wisdom.json"
 INDEX_WHAT_PATH = Path.home() / ".claude/skill_index_what.json"
 SKILL_DEBT_PATH = Path.home() / "repo_docs/skills/SKILL_DEBT.md"
 SKILL_INJECT_LOG_PATH = Path.home() / "repo_docs/skills/SKILL_INJECT_LOG.md"
+GREP_VIOLATION_LOG_PATH = Path.home() / ".claude/grep-on-code-violations.log"
 QUERY_PREFIX = "search_query: "
+
+# --- Grep-on-code detection (tool-protocol enforcement) -------------------
+# Captures the case where Claude reaches for grep/rg/ag to scan source code
+# for a symbol — a job gitnexus does better. Heuristic: code-path/extension
+# signal AND identifier-shaped pattern. False-positive cost is one extra
+# round-trip; false-negative cost is context pollution.
+GREP_TOOLS_RE = re.compile(r"(?:^|[\s|;&(])(grep|rg|ag)(?=\s)")
+
+# Code path/extension signals — any one is enough.
+CODE_PATH_RE = re.compile(
+    r"--include[= ]\*?\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|cs|cpp|c|h)\b"
+    r"|(?:^|[\s/'\"])(?:app|src|backend|frontend|services|routes|components|"
+    r"hooks|tests|scripts|migrations|lib|core|pages|utils)/"
+    r"|\b\S+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|cs|cpp|c|h)(?=\s|$|['\"])"
+)
+
+# Identifier shape: snake_case / camelCase / PascalCase, optionally
+# alternated with `\|`. We require at least one lowercase letter and
+# length >= 5 to filter common literal markers (TODO, FIXME, ENV vars).
+IDENTIFIER_PATTERN_RE = re.compile(
+    r"^[a-zA-Z_][a-zA-Z0-9_]*(?:\\?\|[a-zA-Z_][a-zA-Z0-9_]*)*$"
+)
 
 # Per-dimension thresholds — error text usually wants a code/cluster match
 # (what) more than a wisdom narrative, but wisdom can also fire (e.g.
 # ConnectionRefused → networking skill). Bars are tuned per-distribution.
+# WHAT raised from 0.65 → 0.72 on 2026-05-13 after SKILL_INJECT_LOG analysis
+# (same rationale as prompt_hook.py — cluster digests are identifier soup
+# that embeds broadly; near-threshold matches don't teach anything new).
 THRESHOLD_WISDOM = 0.70
-THRESHOLD_WHAT = 0.65
+THRESHOLD_WHAT = 0.72
 
 # Top-1 from each dimension — same discipline as prompt_hook: side-by-side
 # beats stacked-within-one-pool for noise control.
@@ -182,6 +223,179 @@ def log_skill_inject(error_text: str, matches: list[dict]) -> None:
         pass  # never block Claude Code
 
 
+def _extract_grep_pattern(segment: str) -> str | None:
+    """Best-effort extraction of the search pattern from a grep/rg/ag command.
+
+    Naive: shlex-split, find the tool token, skip flags (and flags that take
+    a value), return the first non-flag token. Handles single/double quotes
+    via shlex. Returns None when extraction fails.
+    """
+    try:
+        tokens = shlex.split(segment, posix=True)
+    except ValueError:
+        return None
+    saw_grep = False
+    skip_next = False
+    flags_with_value = {"-e", "-f", "--regexp", "--file", "--include",
+                        "--exclude", "--include-dir", "--exclude-dir"}
+    for tok in tokens:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok in ("grep", "rg", "ag"):
+            saw_grep = True
+            continue
+        if not saw_grep:
+            continue
+        if tok in flags_with_value:
+            skip_next = True
+            continue
+        if "=" in tok and tok.split("=")[0] in flags_with_value:
+            continue
+        if tok.startswith("-"):
+            continue
+        return tok
+    return None
+
+
+def detect_grep_on_code(command: str) -> tuple[str, str] | None:
+    """Detect grep-on-code violation. Returns (pattern, path_signal) on
+    violation, None when the command is fine.
+
+    Tight rule: must hit ALL of:
+      1. Command uses grep/rg/ag as a tool word
+      2. Command has a code-path or code-extension signal
+      3. Pattern is identifier-shaped (or alternation of identifiers)
+      4. Pattern has at least one lowercase letter
+      5. Pattern is at least 5 chars long
+      6. Command is NOT a same-file lookup (single file path, no recursion
+         flag, no glob) — that's the doctrine's "narrow same-file lookup"
+         exemption per ~/repo_docs/skills/gitnexus/SKILL.md.
+    """
+    if not GREP_TOOLS_RE.search(command):
+        return None
+
+    # Operate on the first ~600 chars of the command (most fit; long pipelines
+    # we sample the head to keep regex cost predictable)
+    head = command[:600]
+
+    code_match = CODE_PATH_RE.search(head)
+    if not code_match:
+        return None
+
+    pattern = _extract_grep_pattern(head)
+    if not pattern:
+        return None
+
+    if not IDENTIFIER_PATTERN_RE.match(pattern):
+        return None
+    if not any(c.islower() for c in pattern):
+        return None  # all-caps tokens (DATABASE_URL, RESULT) — usually literals
+    if len(pattern) < 5:
+        return None  # short tokens (TODO, item) — usually literals
+
+    # Same-file lookup exemption — the doctrine explicitly allows narrow
+    # same-file lookups (line numbers within a known file). Exempt when the
+    # command targets exactly one file with no recursion flag and no glob.
+    if _is_same_file_lookup(head):
+        return None
+
+    return (pattern, code_match.group(0).strip())
+
+
+_RECURSION_FLAG_RE = re.compile(r"(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b")
+_GLOB_OUTSIDE_QUOTES_RE = re.compile(r"(?<!\\)\*")
+_SINGLE_FILE_PATH_RE = re.compile(
+    r"\b\S+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|cs|cpp|c|h)(?=\s|$|['\"])"
+)
+
+
+def _is_same_file_lookup(head: str) -> bool:
+    """Same-file lookup detection. Single file path, no recursion, no glob.
+
+    The doctrine: ``grep -n "pattern" /path/to/specific-file.py`` is a
+    literal-text lookup within ONE file, not a relational query. Don't
+    redirect those to gitnexus.
+
+    We don't inspect ``matched_signal`` — the CODE_PATH_RE may match a
+    directory-name substring inside an absolute file path (e.g.
+    ``/repo/backend/foo.py`` matches the ``backend/`` dir-name alternative
+    even though the COMMAND targets a single file). Counting actual file
+    arguments + checking for recursion/glob flags is the structural read.
+    """
+    # Recursion flag → directory scan; not same-file.
+    if _RECURSION_FLAG_RE.search(head):
+        return False
+    # --include filter → directory-scoped grep with extension filter.
+    if "--include" in head:
+        return False
+    # Glob outside quotes → directory scan; not same-file.
+    stripped = re.sub(r'"[^"]*"', "", head)
+    stripped = re.sub(r"'[^']*'", "", stripped)
+    if _GLOB_OUTSIDE_QUOTES_RE.search(stripped):
+        return False
+    # Exactly one file path in the command. Multiple file paths → enumerated
+    # directory scan; zero file paths with no recursion flag → likely a bare
+    # directory arg (rare; treat conservatively as not-same-file).
+    file_paths = _SINGLE_FILE_PATH_RE.findall(head)
+    if len(file_paths) != 1:
+        return False
+    return True
+
+
+def log_grep_violation(command: str, pattern: str, path_signal: str) -> None:
+    """Append a one-line violation entry to ~/.claude/grep-on-code-violations.log.
+    Fields: timestamp \\t cwd \\t pattern \\t path \\t cmd_truncated."""
+    try:
+        ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+        import os
+        cwd = os.getcwd()
+        cmd_trunc = command[:240].replace("\n", "\\n").replace("\t", " ")
+        line = f"{ts}\t{cwd}\t{pattern}\t{path_signal}\t{cmd_trunc}\n"
+        GREP_VIOLATION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with GREP_VIOLATION_LOG_PATH.open("a") as f:
+            f.write(line)
+    except Exception:
+        pass  # never block Claude Code
+
+
+def emit_grep_redirect(pattern: str, path_signal: str, event: ToolEvent) -> None:
+    """Print the Skill Radar JSON envelope with a gitnexus redirect message."""
+    msg = (
+        "Skill Radar — tool-protocol redirect (grep-on-code):\n"
+        "\n"
+        f"You used grep/rg/ag to search code (`{path_signal}`) for an "
+        f"identifier-shaped pattern (`{pattern}`). Relational queries on "
+        "source code belong to the call graph, not text search.\n"
+        "\n"
+        "Try instead:\n"
+        f"  gitnexus context {pattern}              — callers/callees/file/line\n"
+        f"  gitnexus impact {pattern} -d upstream   — blast radius before edit\n"
+        "  gitnexus query \"<concept>\"               — process-grouped flow search\n"
+        "\n"
+        "If grep already ran, the right next action is to rerun the relational "
+        "part via gitnexus context/impact/query — NOT \"I already have what I "
+        "need.\" The grep result is text co-occurrence; the gitnexus result is "
+        "the call graph. They are not the same answer.\n"
+        "\n"
+        "grep is correct for literal text in markdown / JSON / SQL / configs / "
+        "logs, or for narrow same-file lookups. The signal that fired this "
+        "redirect: code-path filter + identifier-shaped pattern. If the pattern "
+        "is genuinely a literal that happens to look like an identifier, "
+        "narrow the path to a non-code file or add `--include` with a non-code "
+        "extension.\n"
+        "\n"
+        "See ~/repo_docs/skills/gitnexus/SKILL.md § \"When the grep-on-code "
+        "redirect fires\" for the full doctrine.\n"
+        "Logged to ~/.claude/grep-on-code-violations.log."
+    )
+    print(render_additional_context(
+        msg,
+        hook_event_name=event.hook_event_name,
+        runtime=event.runtime,
+    ))
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -189,11 +403,22 @@ def main():
     except Exception:
         sys.exit(0)
 
-    if payload.get("tool_name") != "Bash":
+    event = normalize_event(payload)
+    if not isinstance(event, ToolEvent):
         sys.exit(0)
 
-    resp = payload.get("tool_response", "")
-    output = resp if isinstance(resp, str) else json.dumps(resp)
+    # ---- Path 1: grep-on-code redirect (deterministic, no embedding) ----
+    command = event.command or ""
+    if command:
+        violation = detect_grep_on_code(command)
+        if violation:
+            pattern, path_signal = violation
+            log_grep_violation(command, pattern, path_signal)
+            emit_grep_redirect(pattern, path_signal, event)
+            sys.exit(0)
+
+    # ---- Path 2: error embedding match (existing) ----
+    output = event.output
 
     error_text = extract_error(output)
     if not error_text:
@@ -259,12 +484,11 @@ def main():
             lines.append(text[:CONTEXT_CHARS])
             lines.append("")
 
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "additionalContext": "\n".join(lines),
-        }
-    }))
+    print(render_additional_context(
+        "\n".join(lines),
+        hook_event_name=event.hook_event_name,
+        runtime=event.runtime,
+    ))
 
 
 if __name__ == "__main__":

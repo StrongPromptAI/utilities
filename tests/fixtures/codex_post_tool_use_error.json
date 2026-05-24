@@ -1,0 +1,13 @@
+{
+  "hook_event_name": "PostToolUse",
+  "tool_name": "functions.exec_command",
+  "tool_input": {
+    "cmd": "uv run pytest tests/test_missing.py -q"
+  },
+  "tool_response": {
+    "stdout": "",
+    "stderr": "ERROR: file or directory not found: tests/test_missing.py",
+    "exit_code": 4
+  },
+  "runtime": "codex"
+}

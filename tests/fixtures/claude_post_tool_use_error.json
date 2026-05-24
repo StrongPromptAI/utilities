@@ -1,0 +1,8 @@
+{
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "uv run pytest tests/test_missing.py -q"
+  },
+  "tool_response": "ERROR: file or directory not found: tests/test_missing.py\nexit code 4",
+  "runtime": "claude"
+}

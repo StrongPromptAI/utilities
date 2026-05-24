@@ -1,8 +1,8 @@
 """
-Claude Code UserPromptSubmit hook — semantic skill suggestion on prompt intent.
+Claude Code / Codex UserPromptSubmit hook — semantic skill suggestion on prompt intent.
 
 Fires before Claude processes each user message. Embeds the prompt and finds
-the closest matching skill chunks in ~/.claude/skill_index.json. Surfaces a
+the closest matching skill chunks in the bifurcated Skill Radar indexes. Surfaces a
 skill section at the "perfect moment" — when Claude is about to strategize
 on a fix, pick a direction, or answer a domain question.
 
@@ -17,7 +17,7 @@ Design choices (differ from hook.py):
   DOES log injections to SKILL_INJECT_LOG.md so Outcome C (false positives)
   stays detectable.
 
-Exits silently (code 0) on any failure — never blocks Claude Code.
+Exits silently (code 0) on any failure — never blocks the agent runtime.
 """
 
 import json
@@ -26,9 +26,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Local import — shared-svcs embed client (Railway-hosted, JWT-authed).
+# Local import — Skill Radar embed client, backed by the utilities ONNX service.
 sys.path.insert(0, str(Path(__file__).parent))
 from embed_client import embed as _shared_embed
+from event_adapter import PromptEvent, normalize_event
+from output_adapter import render_additional_context
 
 INDEX_WISDOM_PATH = Path.home() / ".claude/skill_index_wisdom.json"
 INDEX_WHAT_PATH = Path.home() / ".claude/skill_index_what.json"
@@ -38,10 +40,15 @@ QUERY_PREFIX = "search_query: "
 # Bifurcated radar: two content classes, two distributions, two thresholds.
 # - WISDOM (Layers 1+4): narrative, high semantic signal, conservative bar.
 # - WHAT  (Layer 3 cluster digests): structural tables/symbol lists, lower
-#   semantic signal against natural-language prompts; bar tuned for the
-#   distribution observed at build-time.
+#   semantic signal against natural-language prompts.
+# WHAT raised from 0.65 → 0.72 on 2026-05-13 after SKILL_INJECT_LOG analysis
+# showed cluster-digest chunks (`<cluster> › Entry Points / How to Explore /
+# Key Files`) over-firing in the 0.65-0.71 band — identifier-soup content
+# embeds broadly against most project prompts. Aligning to the wisdom bar
+# preserves high-confidence cluster matches and drops the noisy near-threshold
+# fires that don't teach anything the routing table doesn't already say.
 THRESHOLD_WISDOM = 0.72
-THRESHOLD_WHAT = 0.65
+THRESHOLD_WHAT = 0.72
 
 # Top-1 from each dimension: prompts are usually single-intent on each axis.
 # Two surfaces firing at once is fine; two within one surface doubles noise.
@@ -183,11 +190,11 @@ def main():
     except Exception:
         sys.exit(0)
 
-    prompt = payload.get("prompt") or payload.get("user_prompt") or ""
-    if not isinstance(prompt, str):
+    event = normalize_event(payload)
+    if not isinstance(event, PromptEvent):
         sys.exit(0)
 
-    prompt = prompt.strip()
+    prompt = event.prompt.strip()
     if len(prompt) < MIN_PROMPT_CHARS:
         sys.exit(0)
 
@@ -260,12 +267,11 @@ def main():
             lines.append(text[:CONTEXT_CHARS])
             lines.append("")
 
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": "\n".join(lines),
-        }
-    }))
+    print(render_additional_context(
+        "\n".join(lines),
+        hook_event_name=event.hook_event_name,
+        runtime=event.runtime,
+    ))
 
 
 if __name__ == "__main__":

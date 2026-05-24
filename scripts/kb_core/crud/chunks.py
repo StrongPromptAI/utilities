@@ -1,9 +1,9 @@
 """Chunk CRUD operations and batch summaries."""
 
-from openai import OpenAI
 from ..db import get_db
 from ..embeddings import get_embedding
-from ..config import LM_STUDIO_URL, SUMMARY_MODEL, BATCH_SIZE
+from ..config import BATCH_SIZE
+from ..llm import complete
 
 
 def insert_chunks(call_id: int, chunks: list, show_progress: bool = True) -> int:
@@ -77,12 +77,7 @@ For other segments, summarize normally but more briefly.
 
 """
 
-    client = OpenAI(base_url=LM_STUDIO_URL, api_key="not-needed")
-    response = client.chat.completions.create(
-        model=SUMMARY_MODEL,
-        messages=[{
-            "role": "user",
-            "content": f"""{briefing}Summarize this business call segment in 3-5 sentences. Capture:
+    prompt = f"""{briefing}Summarize this business call segment in 3-5 sentences. Capture:
 - Key decisions, action items, and important context
 - Who drove the conversation and who was passive
 - Agreement vs tension — note hedging, confidence, or pushback
@@ -94,11 +89,8 @@ TRANSCRIPT:
 {combined}
 
 SUMMARY:"""
-        }],
-        max_tokens=400,
-        temperature=0.3
-    )
-    return response.choices[0].message.content.strip()
+
+    return complete(prompt, max_tokens=400, temperature=0.3)
 
 
 def generate_call_batch_summaries(call_id: int, batch_size: int = BATCH_SIZE, show_progress: bool = True) -> dict:

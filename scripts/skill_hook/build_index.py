@@ -22,7 +22,7 @@ Both indexes share one manifest at ~/.claude/skill_index_manifest.json:
       }
     }
 
-Embed backend: see embed_client.py — local sidecar by default.
+Embed backend: see embed_client.py — local utilities ONNX service by default.
 
 Usage:
     uv run python scripts/skill_hook/build_index.py
@@ -52,7 +52,7 @@ CONFIG_SIGNATURE = f"v4|min={MIN_CHUNK_CHARS}|max={MAX_CHUNK_CHARS}|prefix={DOCU
 
 
 def embed(texts: list[str]) -> list[list[float]]:
-    """Delegate to shared-svcs embed client (Railway-hosted, JWT-authed)."""
+    """Delegate to the Skill Radar embed client."""
     return _embed(texts, timeout=30.0)
 
 

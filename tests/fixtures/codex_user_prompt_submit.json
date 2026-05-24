@@ -1,0 +1,5 @@
+{
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "review the skill radar logic and update the skill-agent-curation docs",
+  "runtime": "codex"
+}

@@ -1117,11 +1117,11 @@ def file_browser_html(
             size = _fmt_size(f["size"])
             modified = _fmt_time(f["last_modified"])
             lower = raw_name.lower()
-            is_wav = lower.endswith(".wav")
+            is_audio = any(lower.endswith(ext) for ext in (".wav", ".mp3", ".m4a", ".ogg", ".flac"))
             is_pdf = lower.endswith(".pdf")
             play_link = (
                 f'<a class="icon play" href="#" data-play="{name}" title="Play" aria-label="Play {name}">{_ICON_PLAY}</a>'
-                if is_wav else ''
+                if is_audio else ''
             )
             stream_href = f'/api/files/stream/{quote(raw_name, safe="")}'
             if in_folder:
@@ -1149,7 +1149,7 @@ def file_browser_html(
                 f'</td>'
                 f'</tr>'
             )
-            if is_wav:
+            if is_audio:
                 file_rows.append(
                     f'<tr class="player-row" data-player-for="{name}" style="display:none">'
                     f'<td colspan="4" style="padding:8px 14px;border-bottom:1px solid var(--input-line);background:rgba(255,255,255,0.02);">'

@@ -384,6 +384,76 @@ table.files .actions a.icon svg {
   display: block;
 }
 
+/* Kebab menu — overflow actions per file row */
+table.files .actions .kebab-wrap {
+  position: relative;
+  display: inline-block;
+  vertical-align: middle;
+}
+table.files .actions button.kebab-trigger {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 4px;
+  display: inline-flex;
+  align-items: center;
+  opacity: 0.75;
+  border-radius: 3px;
+  transition: opacity 150ms ease, background 150ms ease;
+}
+table.files .actions button.kebab-trigger:hover,
+table.files .actions button.kebab-trigger[aria-expanded="true"] {
+  opacity: 1;
+  background: var(--row-hover);
+}
+table.files .actions button.kebab-trigger svg { display: block; }
+
+.kebab-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 50;
+  min-width: 180px;
+  background: var(--panel-bg);
+  border: 1px solid var(--input-line);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  padding: 4px;
+  display: none;
+}
+.kebab-menu.open { display: block; }
+.kebab-menu button.kebab-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.kebab-menu button.kebab-item:hover {
+  background: var(--row-hover);
+}
+.kebab-menu button.kebab-item svg {
+  flex-shrink: 0;
+  opacity: 0.75;
+}
+.kebab-menu button.kebab-item.danger { color: var(--brand-red); }
+.kebab-menu button.kebab-item.danger:hover { background: rgba(199, 26, 47, 0.1); }
+.kebab-menu .kebab-sep {
+  height: 1px;
+  background: var(--input-line);
+  margin: 4px 6px;
+}
+
 .empty {
   text-align: center;
   padding: 60px 0;
@@ -813,6 +883,24 @@ _ICON_PREVIEW = (
     '</svg>'
 )
 
+_ICON_KEBAB = (
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" '
+    'aria-hidden="true">'
+    '<circle cx="12" cy="5" r="2"/>'
+    '<circle cx="12" cy="12" r="2"/>'
+    '<circle cx="12" cy="19" r="2"/>'
+    '</svg>'
+)
+
+_ICON_LINK = (
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" '
+    'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.72"/>'
+    '<path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.72-1.72"/>'
+    '</svg>'
+)
+
 _ICON_LOGOUT = (
     '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" '
     'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
@@ -1134,6 +1222,20 @@ def file_browser_html(
             download_href = f'/api/files/download/{quote(raw_name, safe="")}'
             if in_folder:
                 download_href += f'?folder={cf_quoted}'
+            kebab_html = (
+                f'<span class="kebab-wrap">'
+                f'<button type="button" class="kebab-trigger" data-kebab="{name}" '
+                f'aria-haspopup="menu" aria-expanded="false" '
+                f'title="More actions" aria-label="More actions for {name}">{_ICON_KEBAB}</button>'
+                f'<div class="kebab-menu" role="menu" aria-label="Actions for {name}">'
+                f'<button type="button" class="kebab-item" role="menuitem" data-copy-url="{name}">{_ICON_LINK}<span>Copy download URL</span></button>'
+                f'<button type="button" class="kebab-item" role="menuitem" data-rename="{name}">{_ICON_RENAME}<span>Rename</span></button>'
+                f'<button type="button" class="kebab-item" role="menuitem" data-move="{name}">{_ICON_MOVE}<span>Move to folder</span></button>'
+                f'<div class="kebab-sep"></div>'
+                f'<button type="button" class="kebab-item danger" role="menuitem" data-delete="{name}">{_ICON_TRASH}<span>Delete</span></button>'
+                f'</div>'
+                f'</span>'
+            )
             file_rows.append(
                 f'<tr>'
                 f'<td class="name">{name}</td>'
@@ -1142,10 +1244,8 @@ def file_browser_html(
                 f'<td class="actions">'
                 f'{play_link}'
                 f'{preview_link}'
-                f'<a class="icon" href="#" data-rename="{name}" title="Rename" aria-label="Rename {name}">{_ICON_RENAME}</a>'
-                f'<a class="icon" href="#" data-move="{name}" title="Move to folder" aria-label="Move {name}">{_ICON_MOVE}</a>'
                 f'<a class="icon" href="{download_href}" title="Download" aria-label="Download {name}">{_ICON_DOWNLOAD}</a>'
-                f'<a class="icon danger" href="#" data-delete="{name}" title="Delete" aria-label="Delete {name}">{_ICON_TRASH}</a>'
+                f'{kebab_html}'
                 f'</td>'
                 f'</tr>'
             )
@@ -1310,11 +1410,70 @@ def file_browser_html(
           if (e.dataTransfer.files.length) upload(e.dataTransfer.files[0]);
         }});
 
-        // ── File actions ────────────────────────────────────────────────
-        document.querySelectorAll('a[data-delete]').forEach(a => {{
-          a.addEventListener('click', async (e) => {{
+        // ── Kebab menu (per-row overflow actions) ──────────────────────
+        function closeAllKebabMenus(except) {{
+          document.querySelectorAll('.kebab-menu.open').forEach(m => {{
+            if (m !== except) {{
+              m.classList.remove('open');
+              const trigger = m.parentElement && m.parentElement.querySelector('.kebab-trigger');
+              if (trigger) trigger.setAttribute('aria-expanded', 'false');
+            }}
+          }});
+        }}
+        document.querySelectorAll('button.kebab-trigger').forEach(btn => {{
+          btn.addEventListener('click', (e) => {{
             e.preventDefault();
-            const name = a.getAttribute('data-delete');
+            e.stopPropagation();
+            const menu = btn.parentElement.querySelector('.kebab-menu');
+            const willOpen = !menu.classList.contains('open');
+            closeAllKebabMenus(willOpen ? menu : null);
+            menu.classList.toggle('open', willOpen);
+            btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+          }});
+        }});
+        // Outside-click closes any open menu
+        document.addEventListener('click', (e) => {{
+          if (!e.target.closest('.kebab-wrap')) closeAllKebabMenus(null);
+        }});
+        // Esc closes
+        document.addEventListener('keydown', (e) => {{
+          if (e.key === 'Escape') closeAllKebabMenus(null);
+        }});
+
+        // ── File actions ────────────────────────────────────────────────
+        document.querySelectorAll('[data-copy-url]').forEach(el => {{
+          el.addEventListener('click', async (e) => {{
+            e.preventDefault();
+            const name = el.getAttribute('data-copy-url');
+            closeAllKebabMenus(null);
+            try {{
+              const r = await fetch('/api/files/presign/' + encodeURIComponent(name) + qsFolder());
+              if (!r.ok) {{
+                alert('Copy URL failed: ' + r.status);
+                return;
+              }}
+              const data = await r.json();
+              await navigator.clipboard.writeText(data.url);
+              const mins = Math.round((data.expires_in || 3600) / 60);
+              // Brief inline confirmation — temporarily replace the label
+              const label = el.querySelector('span');
+              if (label) {{
+                const orig = label.textContent;
+                label.textContent = 'Copied! Expires in ' + mins + 'm';
+                setTimeout(() => {{ label.textContent = orig; }}, 1500);
+              }}
+            }} catch (err) {{
+              alert('Copy failed: ' + err);
+            }}
+          }});
+        }});
+
+        document.querySelectorAll('[data-delete]').forEach(el => {{
+          if (el.hasAttribute('data-folder-delete')) return;
+          el.addEventListener('click', async (e) => {{
+            e.preventDefault();
+            const name = el.getAttribute('data-delete');
+            closeAllKebabMenus(null);
             if (!confirm('Delete ' + name + '?\\n\\n(Recoverable for 30 days via bucket versioning.)')) return;
             const r = await fetch('/api/files/' + encodeURIComponent(name) + qsFolder(), {{ method: 'DELETE' }});
             if (r.ok) window.location.reload();
@@ -1322,10 +1481,12 @@ def file_browser_html(
           }});
         }});
 
-        document.querySelectorAll('a[data-rename]').forEach(a => {{
-          a.addEventListener('click', async (e) => {{
+        document.querySelectorAll('[data-rename]').forEach(el => {{
+          if (el.hasAttribute('data-folder-rename')) return;
+          el.addEventListener('click', async (e) => {{
             e.preventDefault();
-            const oldName = a.getAttribute('data-rename');
+            const oldName = el.getAttribute('data-rename');
+            closeAllKebabMenus(null);
             const newName = prompt('Rename file', oldName);
             if (!newName || newName === oldName) return;
             const r = await fetch('/api/files/rename', {{
@@ -1338,10 +1499,11 @@ def file_browser_html(
           }});
         }});
 
-        document.querySelectorAll('a[data-move]').forEach(a => {{
-          a.addEventListener('click', async (e) => {{
+        document.querySelectorAll('[data-move]').forEach(el => {{
+          el.addEventListener('click', async (e) => {{
             e.preventDefault();
-            const filename = a.getAttribute('data-move');
+            const filename = el.getAttribute('data-move');
+            closeAllKebabMenus(null);
             const opts = [];
             if (CURRENT_FOLDER) opts.push({{ label: '(root)', value: null }});
             for (const f of FOLDERS) {{

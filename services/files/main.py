@@ -7,6 +7,7 @@ Browser flow:
   /api/files[?folder=<name>]   list (JSON: {files, folders, current_folder})
   /api/files/upload-url        POST → presigned PUT URL (browser uploads direct to Tigris)
   /api/files/download/{name}   307 redirect to presigned GET URL
+  /api/files/presign/{name}    JSON {url, expires_in} for the same presigned URL (sharable)
   /api/files/stream/{name}     307 redirect with inline disposition (for <audio>)
   /api/files/rename            POST → server-side rename within a folder
   /api/files/move              POST → server-side move across folders
@@ -87,6 +88,7 @@ PRESIGN_EXPIRES = 3600  # 1 hour
 ACTIVITY_PREFIX = "_activity/"
 ACTIVITY_ACTIONS = {
     "login", "logout", "upload", "download", "delete", "rename", "move",
+    "presign",
 }
 
 
@@ -722,6 +724,34 @@ async def api_download(
         file=name, folder=folder or "",
     )
     return RedirectResponse(url, status_code=307)
+
+
+@app.get("/api/files/presign/{filename:path}")
+async def api_presign(
+    filename: str, request: Request, folder: str = "", user: str = Depends(require_user)
+):
+    name = _safe_filename(filename)
+    prefix = _prefix_for(folder or None)
+    key = f"{prefix}{name}"
+    try:
+        url = s3.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": S3_BUCKET,
+                "Key": key,
+                "ResponseContentDisposition": f'attachment; filename="{name}"',
+            },
+            ExpiresIn=PRESIGN_EXPIRES,
+            HttpMethod="GET",
+        )
+    except ClientError as exc:
+        log.exception("presign failed")
+        raise HTTPException(500, f"presign failed: {exc}")
+    log_activity(
+        user=user, action="presign", request=request,
+        file=name, folder=folder or "",
+    )
+    return {"url": url, "expires_in": PRESIGN_EXPIRES}
 
 
 _INLINE_CONTENT_TYPES = {

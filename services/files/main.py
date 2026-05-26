@@ -77,14 +77,16 @@ S3_SECRET_KEY = os.environ["S3_SECRET_KEY"]
 S3_REGION = os.environ.get("S3_REGION", "auto")
 S3_PREFIX = os.environ.get("S3_PREFIX", "shared/")
 
-# Folders whose contents are publicly readable (anonymous s3:GetObject).
-# Files dropped into one of these folders get a permanent, no-auth URL:
-#   <S3_ENDPOINT>/<S3_BUCKET>/<S3_PREFIX><folder>/<name>
-# Default keeps "Podcast" public so the roadmap site can embed mp3s without
-# expiring presigned URLs. Empty = no folders public, no policy applied.
+# Folders whose contents are publicly readable. NOTE: Tigris does not
+# implement PutBucketPolicy (NotImplemented) and silently no-ops
+# PutObjectAcl on a private bucket — the only working mechanism is a
+# whole-bucket public-read setting at bucket creation. So a "public folder"
+# only works if oxp.files is wired to a separate public-read bucket for
+# these prefixes. Default is empty until that two-bucket setup exists;
+# set PUBLIC_FOLDERS via env when the public bucket is configured.
 PUBLIC_FOLDERS = {
     f.strip()
-    for f in os.environ.get("PUBLIC_FOLDERS", "Podcast").split(",")
+    for f in os.environ.get("PUBLIC_FOLDERS", "").split(",")
     if f.strip()
 }
 

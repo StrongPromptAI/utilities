@@ -77,6 +77,17 @@ S3_SECRET_KEY = os.environ["S3_SECRET_KEY"]
 S3_REGION = os.environ.get("S3_REGION", "auto")
 S3_PREFIX = os.environ.get("S3_PREFIX", "shared/")
 
+# Folders whose contents are publicly readable (anonymous s3:GetObject).
+# Files dropped into one of these folders get a permanent, no-auth URL:
+#   <S3_ENDPOINT>/<S3_BUCKET>/<S3_PREFIX><folder>/<name>
+# Default keeps "Podcast" public so the roadmap site can embed mp3s without
+# expiring presigned URLs. Empty = no folders public, no policy applied.
+PUBLIC_FOLDERS = {
+    f.strip()
+    for f in os.environ.get("PUBLIC_FOLDERS", "Podcast").split(",")
+    if f.strip()
+}
+
 ALLOWED_ORIGINS = [
     o.strip()
     for o in os.environ.get("ALLOWED_ORIGINS", PUBLIC_BASE_URL).split(",")
@@ -150,6 +161,38 @@ async def lifespan(app: FastAPI):
         )
     except ClientError as exc:
         log.warning("put_bucket_lifecycle_configuration failed: %s", exc)
+
+    # Public-read bucket policy — designated folders are world-readable so
+    # podcast mp3s (and similar) can be embedded in public sites with a
+    # permanent URL instead of an expiring presigned one. Full replace, so
+    # the app owns this config; do not hand-edit via Tigris console.
+    if PUBLIC_FOLDERS:
+        try:
+            resources = [
+                f"arn:aws:s3:::{S3_BUCKET}/{S3_PREFIX}{folder}/*"
+                for folder in sorted(PUBLIC_FOLDERS)
+            ]
+            policy = json.dumps({
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Sid": "PublicReadDesignatedFolders",
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": ["s3:GetObject"],
+                    "Resource": resources,
+                }],
+            })
+            s3.put_bucket_policy(Bucket=S3_BUCKET, Policy=policy)
+            log.info("public-read policy applied to: %s", sorted(PUBLIC_FOLDERS))
+        except ClientError as exc:
+            log.warning("put_bucket_policy failed: %s", exc)
+    else:
+        # If no public folders configured, strip any existing policy so we
+        # don't silently leave a stale grant in place.
+        try:
+            s3.delete_bucket_policy(Bucket=S3_BUCKET)
+        except ClientError:
+            pass
 
     # CORS — required for browser direct PUT/GET to Tigris. Full replace, so
     # the app owns this config; do not hand-edit via Tigris console.
@@ -385,6 +428,7 @@ async def home(request: Request, folder: str = ""):
             folders=all_folders,
             current_folder=folder,
             theme=_read_theme(request),
+            public_folders=sorted(PUBLIC_FOLDERS),
         )
     )
 
@@ -642,6 +686,7 @@ async def api_list_files(folder: str = "", _: str = Depends(require_user)):
     return {
         "current_folder": folder,
         "folders": [] if folder else child_folders,
+        "public_folders": sorted(PUBLIC_FOLDERS),
         "files": [
             {
                 "name": f["name"],
@@ -731,8 +776,20 @@ async def api_presign(
     filename: str, request: Request, folder: str = "", user: str = Depends(require_user)
 ):
     name = _safe_filename(filename)
+    folder = folder.strip()
     prefix = _prefix_for(folder or None)
     key = f"{prefix}{name}"
+
+    # Public folders short-circuit to a bare permanent URL — the bucket policy
+    # (see lifespan) grants anonymous s3:GetObject on this prefix.
+    if folder and folder in PUBLIC_FOLDERS:
+        url = f"{S3_ENDPOINT.rstrip('/')}/{S3_BUCKET}/{key}"
+        log_activity(
+            user=user, action="presign", request=request,
+            file=name, folder=folder,
+        )
+        return {"url": url, "kind": "public", "expires_in": None}
+
     try:
         url = s3.generate_presigned_url(
             "get_object",
@@ -751,7 +808,7 @@ async def api_presign(
         user=user, action="presign", request=request,
         file=name, folder=folder or "",
     )
-    return {"url": url, "expires_in": PRESIGN_EXPIRES}
+    return {"url": url, "kind": "presigned", "expires_in": PRESIGN_EXPIRES}
 
 
 _INLINE_CONTENT_TYPES = {

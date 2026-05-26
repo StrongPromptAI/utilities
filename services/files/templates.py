@@ -11,6 +11,7 @@ Public helpers:
 from __future__ import annotations
 from datetime import datetime
 from html import escape
+from typing import Optional
 from urllib.parse import quote
 
 
@@ -452,6 +453,35 @@ table.files .actions button.kebab-trigger svg { display: block; }
   height: 1px;
   background: var(--input-line);
   margin: 4px 6px;
+}
+
+.public-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  font-weight: 700;
+  background: var(--brand-warm);
+  color: #1a1a1a;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+
+.public-banner {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  background: rgba(254, 231, 181, 0.08);
+  border: 1px solid rgba(254, 231, 181, 0.3);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.public-banner b {
+  color: var(--brand-warm);
+  font-weight: 700;
+  letter-spacing: 0.18em;
 }
 
 .empty {
@@ -1161,10 +1191,18 @@ def file_browser_html(
     folders: list[str],
     current_folder: str,
     theme: str = "dark",
+    public_folders: Optional[list[str]] = None,
 ) -> str:
-    """`files`: [{name, size, last_modified}], `folders`: [str], `current_folder`: "" = root."""
+    """`files`: [{name, size, last_modified}], `folders`: [str], `current_folder`: "" = root.
+
+    `public_folders` lists folders whose contents are publicly readable (no auth,
+    no expiry). UI surfaces a PUBLIC badge and the kebab "Copy download URL"
+    yields a permanent bare URL instead of a 1-hour presigned one.
+    """
     import json as _json
 
+    public_set = set(public_folders or [])
+    is_public_folder = bool(current_folder and current_folder in public_set)
     in_folder = bool(current_folder)
     cf_escaped = escape(current_folder)
     cf_quoted = quote(current_folder, safe="")
@@ -1178,10 +1216,12 @@ def file_browser_html(
         for folder_name in folders:
             fn = escape(folder_name)
             fn_url = quote(folder_name, safe="")
+            is_public = folder_name in public_set
+            public_badge = ' <span class="public-badge" title="Files in this folder are publicly readable">PUBLIC</span>' if is_public else ''
             folder_rows.append(
                 f'<tr class="folder-row">'
                 f'<td class="name">'
-                f'<a class="folder-link" href="/?folder={fn_url}">{_ICON_FOLDER}<span>{fn}</span></a>'
+                f'<a class="folder-link" href="/?folder={fn_url}">{_ICON_FOLDER}<span>{fn}</span></a>{public_badge}'
                 f'</td>'
                 f'<td class="meta">folder</td>'
                 f'<td class="meta">&mdash;</td>'
@@ -1222,13 +1262,14 @@ def file_browser_html(
             download_href = f'/api/files/download/{quote(raw_name, safe="")}'
             if in_folder:
                 download_href += f'?folder={cf_quoted}'
+            cp_label = "Copy public link" if is_public_folder else "Copy download URL"
             kebab_html = (
                 f'<span class="kebab-wrap">'
                 f'<button type="button" class="kebab-trigger" data-kebab="{name}" '
                 f'aria-haspopup="menu" aria-expanded="false" '
                 f'title="More actions" aria-label="More actions for {name}">{_ICON_KEBAB}</button>'
                 f'<div class="kebab-menu" role="menu" aria-label="Actions for {name}">'
-                f'<button type="button" class="kebab-item" role="menuitem" data-copy-url="{name}">{_ICON_LINK}<span>Copy download URL</span></button>'
+                f'<button type="button" class="kebab-item" role="menuitem" data-copy-url="{name}">{_ICON_LINK}<span>{cp_label}</span></button>'
                 f'<button type="button" class="kebab-item" role="menuitem" data-rename="{name}">{_ICON_RENAME}<span>Rename</span></button>'
                 f'<button type="button" class="kebab-item" role="menuitem" data-move="{name}">{_ICON_MOVE}<span>Move to folder</span></button>'
                 f'<div class="kebab-sep"></div>'
@@ -1298,6 +1339,15 @@ def file_browser_html(
     )
 
     folders_json = _json.dumps(folders)
+    public_folders_json = _json.dumps(sorted(public_set))
+
+    public_banner_html = (
+        f'<div class="public-banner"><b>PUBLIC</b> &middot; Files in '
+        f'<code>{cf_escaped}</code> are world-readable. Anyone with the URL can download '
+        f'without signing in. Use this for content meant to be shared publicly '
+        f'(e.g. embedded media on the marketing site).</div>'
+        if is_public_folder else ''
+    )
 
     body = f"""
       <main class="wide">
@@ -1316,6 +1366,8 @@ def file_browser_html(
           {new_folder_btn}
         </div>
 
+        {public_banner_html}
+
         <div class="upload-zone" id="dropzone">
           <p>Drop a file to upload{upload_target_html}, or</p>
           <label class="pick" for="file-input">Choose file</label>
@@ -1329,11 +1381,13 @@ def file_browser_html(
       </main>
 
       <script id="folders-data" type="application/json">{folders_json}</script>
+      <script id="public-folders-data" type="application/json">{public_folders_json}</script>
       <script>{_account_menu_js()}</script>
       <script>
       (function() {{
         const CURRENT_FOLDER = {_json.dumps(current_folder)};
         const FOLDERS = JSON.parse(document.getElementById('folders-data').textContent);
+        const PUBLIC_FOLDERS = new Set(JSON.parse(document.getElementById('public-folders-data').textContent));
 
         const dz = document.getElementById('dropzone');
         const input = document.getElementById('file-input');
@@ -1454,13 +1508,17 @@ def file_browser_html(
               }}
               const data = await r.json();
               await navigator.clipboard.writeText(data.url);
-              const mins = Math.round((data.expires_in || 3600) / 60);
               // Brief inline confirmation — temporarily replace the label
               const label = el.querySelector('span');
               if (label) {{
                 const orig = label.textContent;
-                label.textContent = 'Copied! Expires in ' + mins + 'm';
-                setTimeout(() => {{ label.textContent = orig; }}, 1500);
+                if (data.kind === 'public') {{
+                  label.textContent = 'Public link copied';
+                }} else {{
+                  const mins = Math.round((data.expires_in || 3600) / 60);
+                  label.textContent = 'Copied! Expires in ' + mins + 'm';
+                }}
+                setTimeout(() => {{ label.textContent = orig; }}, 1800);
               }}
             }} catch (err) {{
               alert('Copy failed: ' + err);

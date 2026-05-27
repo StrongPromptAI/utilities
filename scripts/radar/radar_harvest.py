@@ -13,7 +13,7 @@ this script does NOT mechanize the Three Categories Test. It surfaces raw
 deduplicated candidates with evidence; the human applies the test at promotion.
 
 Run manually:
-    uv run --project ~/repos/utilities python ~/repos/utilities/scripts/skill_hook/harvest.py
+    uv run --project ~/repos/utilities python ~/repos/utilities/scripts/radar/radar_harvest.py
 
 Or scheduled (Phase 4) — weekly Sunday 09:00 local.
 
@@ -374,7 +374,7 @@ def _format_doctrine_jsonl_candidate(project: str, bucket: dict) -> str:
         f"**Evidence**: {evidence_line}\n"
         f"**Receipt**: {receipt}\n"
         f"**Promotion path**: Edit the source doc (`{rule_source}`) or "
-        f"`DOCTRINE_INDEX.md`, then delete this entry.\n"
+        f"`DOCTRINE_REGISTRY.md`, then delete this entry.\n"
         f"\n"
         f"---\n"
     )
@@ -393,7 +393,7 @@ def _format_doctrine_brief_candidate(c: dict) -> str:
         f"**Fix**: {c['fix']}\n"
         f"**Receipt**: {receipt}\n"
         f"**Promotion path**: Edit the source doc (`{c['source']}`) or "
-        f"`DOCTRINE_INDEX.md`, then delete this entry.\n"
+        f"`DOCTRINE_REGISTRY.md`, then delete this entry.\n"
         f"\n"
         f"---\n"
     )
@@ -570,7 +570,7 @@ def main() -> int:
             queue_text = queue_text + (
                 "\n\n## Doctrine Candidates\n\n"
                 "> Each entry below is an architectural decision caught in code review.\n"
-                "> Promote by editing the source doc (CLAUDE.md, DOCTRINE_INDEX.md, "
+                "> Promote by editing the source doc (CLAUDE.md, DOCTRINE_REGISTRY.md, "
                 "or the named architecture doc), then delete the entry here.\n"
                 "> Reject: delete with one-line rationale.\n\n"
                 + doctrine_marker

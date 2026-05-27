@@ -29,6 +29,7 @@ Exits silently (code 0) on any failure — never blocks the agent runtime.
 """
 
 import json
+import os
 import re
 import shlex
 import sys
@@ -40,12 +41,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from embed_client import embed as _shared_embed
 from event_adapter import ToolEvent, normalize_event
 from output_adapter import render_additional_context
+from session_log import append_event as session_log_append
 
-INDEX_WISDOM_PATH = Path.home() / ".claude/skill_index_wisdom.json"
-INDEX_WHAT_PATH = Path.home() / ".claude/skill_index_what.json"
-SKILL_DEBT_PATH = Path.home() / "repo_docs/skills/SKILL_DEBT.md"
-SKILL_INJECT_LOG_PATH = Path.home() / "repo_docs/skills/SKILL_INJECT_LOG.md"
-GREP_VIOLATION_LOG_PATH = Path.home() / ".claude/grep-on-code-violations.log"
+INDEX_WISDOM_PATH = Path.home() / ".claude/radar_skills_wisdom.json"
+INDEX_WHAT_PATH = Path.home() / ".claude/radar_skills_what.json"
+HEARTBEAT_PATH = Path.home() / ".claude" / "last-jsonl-write.txt"
 QUERY_PREFIX = "search_query: "
 
 # --- Grep-on-code detection (tool-protocol enforcement) -------------------
@@ -84,16 +84,79 @@ THRESHOLD_WHAT = 0.72
 TOP_PER_DIM = 1
 
 CONTEXT_CHARS = 800  # max chars of chunk text to inject per match
-DEBT_SNIPPET_CHARS = 400  # error snippet saved to skill debt log
-INJECT_SNIPPET_CHARS = 200  # error snippet saved to inject log
 
+# Real-error markers — anchored to structural patterns (line starts, colons,
+# exit-code numbers, exception class names) rather than bare prose words. The
+# pre-2026-05-26 pattern matched prose like "could not find a way" or "failed
+# to understand" — phrases that appear naturally in non-error tool output.
+# Audit 2026-05-26 showed 99/200 sampled inject entries were prose-noise.
 ERROR_SIGNALS = re.compile(
-    r"(traceback|error:|exception:|exit code [1-9]|no such file|command not found"
-    r"|permission denied|modulenotfounderror|importerror|syntaxerror|typeerror"
-    r"|attributeerror|keyerror|valueerror|connectionrefused|timeout|failed to|"
-    r"cannot|could not|not found)",
-    re.IGNORECASE,
+    r"(traceback \(most recent call last\)"
+    r"|^error[: ]"                            # "Error:" or "error: " at line start
+    r"|^[A-Z][A-Za-z]+Error: "                # PythonError class with colon-space
+    r"|^[a-z][a-z_.]+\.[A-Z][A-Za-z]+Error: " # asyncpg.exceptions.Error etc.
+    r"|exit code [1-9]\d*\b"
+    r"|exited with code [1-9]"
+    r"|^fatal: "
+    r"|^panic: "
+    r"|: command not found$"
+    r"|^permission denied|: permission denied"
+    r"|: no such file or directory"
+    r"|HTTP/\d\.\d [45]\d\d"
+    r"|^connection refused|connection refused$"
+    r"|connection reset by peer"
+    r"|segmentation fault"
+    r"|^killed$"
+    r"|: syntax error"
+    r"|modulenotfounderror|importerror)",
+    re.IGNORECASE | re.MULTILINE,
 )
+
+
+def _looks_like_pure_json(text: str) -> bool:
+    """Pure JSON object or array → not an error worth embedding against skills.
+    The radar embeds against natural-language skill content; JSON data has
+    different statistical shape and overfires on `{"detail":"not found"}` etc."""
+    s = text.strip()
+    if not s:
+        return False
+    if not (s.startswith("{") and s.endswith("}")) and not (s.startswith("[") and s.endswith("]")):
+        return False
+    try:
+        json.loads(s)
+        return True
+    except Exception:
+        return False
+
+
+def _looks_like_curl_progress(text: str) -> bool:
+    """curl progress-bar output matched ERROR_SIGNALS on the word 'speed' / 'left'
+    in the old pattern; the new pattern shouldn't catch it, but belt-and-braces."""
+    return "Dload  Upload   Total" in text and "% Total" in text
+
+
+_TEST_PASS_RE = re.compile(r"\[PASS\]|\[FAIL\]|PASSED|FAILED")
+_TEST_SUMMARY_RE = re.compile(
+    r"All .* tests passed"
+    r"|\d+ passed(?:, \d+ failed)?"
+    r"|All precision tests passed"
+    r"|^Section \d+:",
+    re.MULTILINE,
+)
+
+
+def _looks_like_test_output(text: str) -> bool:
+    """Test runner output describes error patterns in PASS/FAIL labels, which
+    contain the same strings ERROR_SIGNALS looks for. Recognized signals:
+    ≥ 3 [PASS]/[FAIL] markers, OR a pytest-style summary line. False-positive
+    cost is missing a real error that happens to look like a test report (very
+    rare); false-negative cost is the hook embedding "[PASS] exit code 1"
+    every time the precision suite runs."""
+    if len(_TEST_PASS_RE.findall(text)) >= 3:
+        return True
+    if _TEST_SUMMARY_RE.search(text):
+        return True
+    return False
 
 
 def dot(a: list[float], b: list[float]) -> float:
@@ -110,6 +173,25 @@ def embed(text: str) -> list[float] | None:
 
 
 def extract_error(output: str) -> str | None:
+    """Return the trailing error snippet if `output` looks like a real error,
+    None if it's clean output or prose-noise that happens to contain error words.
+
+    Precision rules (Phase 0a, 2026-05-26 audit):
+    1. Skip pure-JSON outputs — `{"detail":"not found"}` and similar are
+       payload data, not errors at the tool layer.
+    2. Skip curl progress-bar dumps.
+    3. Require a structural error marker from ERROR_SIGNALS (line-start
+       prefixes, exception class names, exit codes — NOT bare prose words).
+    4. Return only the last 600 chars; ANSI-strip.
+    """
+    if not output or not output.strip():
+        return None
+    if _looks_like_pure_json(output):
+        return None
+    if _looks_like_curl_progress(output):
+        return None
+    if _looks_like_test_output(output):
+        return None
     if not ERROR_SIGNALS.search(output):
         return None
     snippet = output.strip()[-600:]
@@ -127,100 +209,17 @@ def load_index(path: Path) -> list[dict]:
         return []
 
 
-def log_skill_debt(error_text: str, top_scored: list[dict]) -> None:
-    """Prepend a miss entry to SKILL_DEBT.md."""
+def _touch_heartbeat() -> None:
+    """Stamp the last-jsonl-write heartbeat — Phase 4.5 observability surface.
+    Stale heartbeat means the hook stopped writing; the health CLI surfaces it."""
     try:
-        if not SKILL_DEBT_PATH.exists():
-            return
-
-        ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
-        snippet = error_text[:DEBT_SNIPPET_CHARS].replace("```", "~~~")
-
-        best_lines = []
-        for s in top_scored[:3]:
-            skill = s.get("skill_name", s.get("name", "?"))
-            header = s.get("header", "")
-            best_lines.append(f"  {s['score']:.2f}  {skill} › {header}")
-
-        best_block = "\n".join(best_lines) if best_lines else "  (index empty or embed unavailable)"
-
-        entry = (
-            f"\n## {ts}\n\n"
-            f"**Best scores (below per-dim thresholds — wisdom {THRESHOLD_WISDOM}, what {THRESHOLD_WHAT}):**\n"
-            f"{best_block}\n\n"
-            f"**Error snippet:**\n"
-            f"```\n{snippet}\n```\n\n"
-            f"---\n"
+        HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        HEARTBEAT_PATH.write_text(
+            datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+            + "\n"
         )
-
-        content = SKILL_DEBT_PATH.read_text()
-        # Insert after the closing comment marker
-        marker = "<!-- New entries are prepended by hook.py — most recent at top -->"
-        if marker in content:
-            content = content.replace(marker, marker + entry, 1)
-        else:
-            content = content + entry
-
-        SKILL_DEBT_PATH.write_text(content)
     except Exception:
-        pass  # never block Claude Code
-
-
-def log_skill_inject(error_text: str, matches: list[dict]) -> None:
-    """Append an inject entry to SKILL_INJECT_LOG.md.
-
-    Covers Outcome C: matches above threshold that may be false positives.
-    Reviewing this log periodically surfaces cases where the radar injected
-    irrelevant skill content — the signal for a precision gap.
-    """
-    try:
-        ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
-        snippet = error_text[:INJECT_SNIPPET_CHARS].replace("```", "~~~")
-
-        match_lines = []
-        for m in matches:
-            skill = m.get("skill_name", m.get("name", "?"))
-            header = m.get("header", "")
-            match_lines.append(f"  {m['score']:.2f}  {skill} › {header}")
-
-        entry = (
-            f"\n## {ts}\n\n"
-            f"**Injected ({len(matches)} match{'es' if len(matches) != 1 else ''}):**\n"
-            f"{chr(10).join(match_lines)}\n\n"
-            f"**Error snippet:**\n"
-            f"```\n{snippet}\n```\n\n"
-            f"---\n"
-        )
-
-        marker = "<!-- Entries appended by hook.py — most recent at top -->"
-
-        if not SKILL_INJECT_LOG_PATH.exists():
-            header_block = (
-                "---\n"
-                "description: Errors where the Skill Radar injected skill content "
-                "(score >= threshold). Review periodically to catch false positives "
-                "(Outcome C) — cases where the injected skill was irrelevant.\n"
-                "workflow: |\n"
-                "  1. Scan entries — does the injected skill match the error domain?\n"
-                "  2. True positives: leave as-is or mark ## OK\n"
-                "  3. False positives: add a note, then improve the relevant skill\n"
-                "     chunk so future embeddings score lower for unrelated errors.\n"
-                "  4. Trim old entries when the file gets long (keep last ~30).\n"
-                "---\n\n"
-                "# Skill Inject Log\n\n"
-                f"{marker}\n"
-            )
-            SKILL_INJECT_LOG_PATH.write_text(header_block)
-
-        content = SKILL_INJECT_LOG_PATH.read_text()
-        if marker in content:
-            content = content.replace(marker, marker + entry, 1)
-        else:
-            content = content + entry
-
-        SKILL_INJECT_LOG_PATH.write_text(content)
-    except Exception:
-        pass  # never block Claude Code
+        pass
 
 
 def _extract_grep_pattern(segment: str) -> str | None:
@@ -344,19 +343,16 @@ def _is_same_file_lookup(head: str) -> bool:
 
 
 def log_grep_violation(command: str, pattern: str, path_signal: str) -> None:
-    """Append a one-line violation entry to ~/.claude/grep-on-code-violations.log.
-    Fields: timestamp \\t cwd \\t pattern \\t path \\t cmd_truncated."""
-    try:
-        ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
-        import os
-        cwd = os.getcwd()
-        cmd_trunc = command[:240].replace("\n", "\\n").replace("\t", " ")
-        line = f"{ts}\t{cwd}\t{pattern}\t{path_signal}\t{cmd_trunc}\n"
-        GREP_VIOLATION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with GREP_VIOLATION_LOG_PATH.open("a") as f:
-            f.write(line)
-    except Exception:
-        pass  # never block Claude Code
+    """Log a grep-on-code violation as a JSONL row in session-log.jsonl.
+    Replaces the pre-2026-05-26 grep-on-code-violations.log (now archived)."""
+    if session_log_append(
+        event_type="grep_on_code",
+        tool="Bash",
+        command_or_context=command[:400],
+        error_text=f"pattern={pattern} path={path_signal}",
+        outcome="violation",
+    ):
+        _touch_heartbeat()
 
 
 def emit_grep_redirect(pattern: str, path_signal: str, event: ToolEvent) -> None:
@@ -387,7 +383,7 @@ def emit_grep_redirect(pattern: str, path_signal: str, event: ToolEvent) -> None
         "\n"
         "See ~/repo_docs/skills/gitnexus/SKILL.md § \"When the grep-on-code "
         "redirect fires\" for the full doctrine.\n"
-        "Logged to ~/.claude/grep-on-code-violations.log."
+        "Logged to session-log.jsonl as event_type=grep_on_code."
     )
     print(render_additional_context(
         msg,
@@ -424,17 +420,39 @@ def main():
     if not error_text:
         sys.exit(0)
 
+    command_context = (event.command or "")[:400]
+
     wisdom_idx = load_index(INDEX_WISDOM_PATH)
     what_idx = load_index(INDEX_WHAT_PATH)
     if not wisdom_idx and not what_idx:
+        # Index empty — record the bash_error with no match so harvest can
+        # still see there's a skill-coverage gap.
+        if session_log_append(
+            event_type="bash_error",
+            tool=event.tool_name or "Bash",
+            command_or_context=command_context,
+            error_text=error_text,
+            outcome="missed",
+        ):
+            _touch_heartbeat()
         sys.exit(0)
 
     query_vec = embed(QUERY_PREFIX + error_text)
     if not query_vec:
+        # Embed unavailable — record the error so we still capture signal;
+        # harvest can decide what to do with un-matched rows.
+        if session_log_append(
+            event_type="bash_error",
+            tool=event.tool_name or "Bash",
+            command_or_context=command_context,
+            error_text=error_text,
+            outcome="missed",
+        ):
+            _touch_heartbeat()
         sys.exit(0)
 
     matches_by_dim: dict[str, list[dict]] = {"wisdom": [], "what": []}
-    top_scored_for_debt: list[dict] = []  # for SKILL_DEBT.md when nothing fires
+    top_scored: list[dict] = []  # captured for the JSONL row even when nothing fires
 
     for dim, idx, threshold in (
         ("wisdom", wisdom_idx, THRESHOLD_WISDOM),
@@ -448,19 +466,47 @@ def main():
             reverse=True,
         )
         matches_by_dim[dim] = [s for s in scored[:TOP_PER_DIM] if s["score"] >= threshold]
-        # Always remember top-2 from each dim for the debt log if everything misses
-        top_scored_for_debt.extend(scored[:2])
+        top_scored.extend(scored[:1])
 
     all_matches = matches_by_dim["wisdom"] + matches_by_dim["what"]
 
+    # JSONL row in both branches — outcome distinguishes "missed" (no match
+    # above threshold) from "injected" (match above threshold, surfaced to
+    # Claude). `skill_match` captures the top scorer either way so harvest can
+    # bucketize misses by what came closest.
+    top_scored.sort(key=lambda x: x["score"], reverse=True)
+    best = top_scored[0] if top_scored else None
+    skill_match_row = (
+        {
+            "score": round(best["score"], 3),
+            "skill": best.get("skill_name", best.get("name", "?")),
+            "header": best.get("header", ""),
+        }
+        if best
+        else None
+    )
+
     if not all_matches:
-        # Sort the debt candidates by score so the log shows actual top-3
-        top_scored_for_debt.sort(key=lambda x: x["score"], reverse=True)
-        log_skill_debt(error_text, top_scored_for_debt[:3])
+        if session_log_append(
+            event_type="bash_error",
+            tool=event.tool_name or "Bash",
+            command_or_context=command_context,
+            error_text=error_text,
+            skill_match=skill_match_row,
+            outcome="missed",
+        ):
+            _touch_heartbeat()
         sys.exit(0)
 
-    # Outcome C detection — review this log periodically.
-    log_skill_inject(error_text, all_matches)
+    if session_log_append(
+        event_type="bash_error",
+        tool=event.tool_name or "Bash",
+        command_or_context=command_context,
+        error_text=error_text,
+        skill_match=skill_match_row,
+        outcome="injected",
+    ):
+        _touch_heartbeat()
 
     lines: list[str] = []
     section_labels = {

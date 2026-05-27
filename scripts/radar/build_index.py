@@ -3,16 +3,16 @@ Build chunk-level semantic skill index from skill .md files.
 
 Writes TWO indexes — bifurcated by content class:
 
-- ~/.claude/skill_index_wisdom.json — Layers 1 (global skills) + 4 (project
+- ~/.claude/radar_skills_wisdom.json — Layers 1 (global skills) + 4 (project
   wisdom docs). Narrative content; "what we've learned." Higher threshold
   in prompt_hook.py because the embed signal is strong.
 
-- ~/.claude/skill_index_what.json — Layer 3 (gitnexus-generated cluster
+- ~/.claude/radar_skills_what.json — Layer 3 (gitnexus-generated cluster
   SKILL.md files under each project's `.claude/skills/`). Structural
   digests; "what is." Lower threshold because key-files tables and symbol
   lists embed less semantically against natural-language prompts.
 
-Both indexes share one manifest at ~/.claude/skill_index_manifest.json:
+Both indexes share one manifest at ~/.claude/radar_skills_manifest.json:
 
     {
       "config_signature": "...",
@@ -25,7 +25,7 @@ Both indexes share one manifest at ~/.claude/skill_index_manifest.json:
 Embed backend: see embed_client.py — local utilities ONNX service by default.
 
 Usage:
-    uv run python scripts/skill_hook/build_index.py
+    uv run python scripts/radar/build_index.py
 """
 
 import json
@@ -39,9 +39,9 @@ from embed_client import EMBED_URL, embed as _embed
 print(f"[build_index] Embed backend: {EMBED_URL}")
 
 REGISTRY = Path.home() / "repo_docs/skills/SKILL_REGISTRY.md"
-INDEX_WISDOM = Path.home() / ".claude/skill_index_wisdom.json"
-INDEX_WHAT = Path.home() / ".claude/skill_index_what.json"
-MANIFEST_OUT = Path.home() / ".claude/skill_index_manifest.json"
+INDEX_WISDOM = Path.home() / ".claude/radar_skills_wisdom.json"
+INDEX_WHAT = Path.home() / ".claude/radar_skills_what.json"
+MANIFEST_OUT = Path.home() / ".claude/radar_skills_manifest.json"
 DOCUMENT_PREFIX = "search_document: "
 MIN_CHUNK_CHARS = 80   # skip trivial stubs
 MAX_CHUNK_CHARS = 1200  # truncate very long sections before embedding

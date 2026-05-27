@@ -1,0 +1,608 @@
+"""
+Claude Code / Codex UserPromptSubmit hook — semantic skill suggestion on prompt intent.
+
+Fires before Claude processes each user message. Embeds the prompt and finds
+the closest matching skill chunks in the bifurcated Skill Radar indexes. Surfaces a
+skill section at the "perfect moment" — when Claude is about to strategize
+on a fix, pick a direction, or answer a domain question.
+
+Design choices (differ from hook.py):
+- Higher threshold (0.72) — prompts are chattier than error strings, false
+  positives are more annoying because they fire every turn.
+- Skip trivial prompts (< 30 chars, sentinel messages) — nothing to retrieve
+  against meaningfully.
+- Top 1 match only by default — prompts are usually single-intent; two matches
+  doubles the noise surface without doubling signal.
+- No logging to SKILL_DEBT.md (that file is for error-time coverage gaps).
+  DOES log injections to SKILL_INJECT_LOG.md so Outcome C (false positives)
+  stays detectable.
+
+Exits silently (code 0) on any failure — never blocks the agent runtime.
+"""
+
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Local import — Skill Radar embed client, backed by the utilities ONNX service.
+sys.path.insert(0, str(Path(__file__).parent))
+from embed_client import embed as _shared_embed
+from event_adapter import PromptEvent, normalize_event
+from output_adapter import render_additional_context
+from session_log import _slugify_cwd, append_event as session_log_append
+from doctrine_registry import (
+    match_doctrine_for_prompt,
+    render_doctrine_section,
+)
+
+INDEX_WISDOM_PATH = Path.home() / ".claude/radar_skills_wisdom.json"
+INDEX_WHAT_PATH = Path.home() / ".claude/radar_skills_what.json"
+HEARTBEAT_PATH = Path.home() / ".claude" / "last-jsonl-write.txt"
+QUERY_PREFIX = "search_query: "
+
+# Bifurcated radar: two content classes, two distributions, two thresholds.
+# - WISDOM (Layers 1+4): narrative, high semantic signal, conservative bar.
+# - WHAT  (Layer 3 cluster digests): structural tables/symbol lists, lower
+#   semantic signal against natural-language prompts.
+# WHAT raised from 0.65 → 0.72 on 2026-05-13 after SKILL_INJECT_LOG analysis
+# showed cluster-digest chunks (`<cluster> › Entry Points / How to Explore /
+# Key Files`) over-firing in the 0.65-0.71 band — identifier-soup content
+# embeds broadly against most project prompts. Aligning to the wisdom bar
+# preserves high-confidence cluster matches and drops the noisy near-threshold
+# fires that don't teach anything the routing table doesn't already say.
+THRESHOLD_WISDOM = 0.72
+THRESHOLD_WHAT = 0.72
+
+# Top-1 from each dimension: prompts are usually single-intent on each axis.
+# Two surfaces firing at once is fine; two within one surface doubles noise.
+TOP_PER_DIM = 1
+
+CONTEXT_CHARS = 800
+MIN_PROMPT_CHARS = 30
+
+SKIP_PATTERNS = re.compile(
+    r"^(yes|no|ok|okay|sure|thanks|thank you|continue|go|do it|proceed|"
+    r"__greeting__|__check_in__)\b",
+    re.IGNORECASE,
+)
+
+# Minimum length for a keyword trigger phrase to avoid false positives
+# on short common words that happen to appear in Load When text.
+MIN_TRIGGER_LEN = 4
+
+# Two-tier prefilter (Phase 0a, 2026-05-26 audit): a substring match alone
+# fires synthetic 1.00 scores on meta-skill names that double as common English
+# nouns (`versioning`, `implementation`, `utilities`, `skill-agent-curation`).
+# The fix: substring match candidates must ALSO clear a semantic-similarity
+# bar against the prompt, unless the trigger phrase dominates the prompt
+# (e.g. user typed "use gitnexus" — short prompt, intentional invocation).
+PREFILTER_SEMANTIC_THRESHOLD = 0.65
+PREFILTER_DOMINANCE_RATIO = 0.30  # trigger ≥ 30% of cleaned prompt → deterministic
+
+# Prior-injection contamination (Phase 0a): the Skill Radar injects
+# <system-reminder> blocks and "Skill Radar — ..." envelopes into the
+# conversation. Those reappear in subsequent prompts; the prefilter then
+# matches on skill names the radar itself injected — a feedback loop that
+# produces the 1.00 false-fires documented in the 2026-05-26 audit.
+SYSTEM_REMINDER_RE = re.compile(
+    r"<system-reminder>.*?</system-reminder>", re.DOTALL
+)
+SKILL_RADAR_INJECT_RE = re.compile(
+    r"Skill Radar\s+—.*?(?=\n\n\Z|\n\n[A-Z]|\Z)", re.DOTALL
+)
+
+
+def strip_prior_injections(prompt: str) -> str:
+    """Remove system-reminder blocks and Skill Radar injection envelopes from
+    `prompt` so the keyword prefilter doesn't match on text the radar itself
+    injected on a prior turn. The user-typed content is what we want to embed
+    against, not the radar's own output bouncing back."""
+    cleaned = SYSTEM_REMINDER_RE.sub("", prompt)
+    cleaned = SKILL_RADAR_INJECT_RE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def extract_triggers(index: list[dict]) -> list[tuple[str, dict]]:
+    """Build (lowercase_phrase, best_chunk) pairs from Load When keywords.
+
+    Extracts:
+    1. Quoted phrases from Load When text (e.g., "quick take")
+    2. Skill names themselves (e.g., "gitnexus")
+
+    Returns longest-first so "quick take" matches before "quick".
+    """
+    # Group chunks by skill_name — we'll inject the first chunk per skill
+    by_skill: dict[str, dict] = {}
+    triggers: dict[str, str] = {}  # phrase → skill_name
+
+    for entry in index:
+        sname = entry.get("skill_name", "")
+        if sname and sname not in by_skill:
+            by_skill[sname] = entry
+
+        load_when = entry.get("load_when", "")
+        if not load_when:
+            continue
+
+        # Extract quoted phrases: "quick take", "review this", etc.
+        for m in re.finditer(r'"([^"]+)"', load_when):
+            phrase = m.group(1).strip().lower()
+            if len(phrase) >= MIN_TRIGGER_LEN:
+                triggers[phrase] = sname
+
+    # Add skill names as triggers
+    for sname in by_skill:
+        if len(sname) >= MIN_TRIGGER_LEN:
+            triggers[sname.lower()] = sname
+
+    # Build (phrase, chunk) pairs, longest-first
+    pairs = []
+    for phrase, sname in sorted(triggers.items(), key=lambda t: -len(t[0])):
+        if sname in by_skill:
+            pairs.append((phrase, by_skill[sname]))
+    return pairs
+
+
+def keyword_prefilter(prompt: str, index: list[dict]) -> list[dict] | None:
+    """Two-tier prefilter (Phase 0a, 2026-05-26): a substring match against
+    skill names or quoted Load When phrases is a STRONG signal but not by
+    itself sufficient. Common-English-noun skill names (`versioning`,
+    `implementation`, `utilities`) match constantly without clinical relevance.
+
+    Rules:
+    1. Strip prior-injection text from the prompt (kills the feedback loop).
+    2. Find substring-match candidates on the cleaned prompt.
+    3. For each candidate, EITHER the trigger phrase is ≥30% of the cleaned
+       prompt (intentional invocation — keep deterministic 1.00) OR semantic
+       similarity vs the prompt must be ≥ 0.65 (contextual relevance).
+    4. Failing both, drop the candidate. Returns None if nothing survives.
+
+    Failing closed when the embed service is unavailable preserves the radar's
+    silent-no-op discipline."""
+    cleaned = strip_prior_injections(prompt)
+    if not cleaned:
+        return None
+    cleaned_lower = cleaned.lower()
+    cleaned_len = max(1, len(cleaned))
+    triggers = extract_triggers(index)
+
+    candidates: list[tuple[str, dict]] = []
+    for phrase, chunk in triggers:
+        if phrase in cleaned_lower:
+            candidates.append((phrase, chunk))
+    if not candidates:
+        return None
+
+    # Dominance carve-out — if the trigger is most of what the user typed,
+    # honor the intent without embedding.
+    deterministic: list[dict] = []
+    needs_semantic: list[tuple[str, dict]] = []
+    for phrase, chunk in candidates:
+        if len(phrase) / cleaned_len >= PREFILTER_DOMINANCE_RATIO:
+            deterministic.append({"score": 1.0, **chunk})
+        else:
+            needs_semantic.append((phrase, chunk))
+
+    if not needs_semantic:
+        return deterministic
+
+    # Semantic confirm for the rest.
+    query_vec = embed(QUERY_PREFIX + cleaned[:1000])
+    if not query_vec:
+        # Fail closed — return only the deterministic matches (or None).
+        return deterministic if deterministic else None
+
+    for phrase, chunk in needs_semantic:
+        chunk_emb = chunk.get("embedding")
+        if not chunk_emb:
+            continue
+        sim = dot(query_vec, chunk_emb)
+        if sim >= PREFILTER_SEMANTIC_THRESHOLD:
+            deterministic.append({"score": sim, **chunk})
+
+    return deterministic if deterministic else None
+
+
+def dot(a: list[float], b: list[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def embed(text: str) -> list[float] | None:
+    """Single-text embed via shared-svcs. Returns None on any failure so the
+    hook silently no-ops instead of blocking Claude Code."""
+    try:
+        return _shared_embed([text], timeout=3.0)[0]
+    except Exception:
+        return None
+
+
+def load_index(path: Path) -> list[dict]:
+    """Load one dimension's index. Empty list on any failure (silent no-op
+    discipline — never block Claude Code on a missing/malformed cache)."""
+    if not path.exists():
+        return []
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return []
+
+
+def _touch_heartbeat() -> None:
+    """Phase 4.5 observability — stamp last-jsonl-write.txt on every JSONL write."""
+    try:
+        HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        HEARTBEAT_PATH.write_text(
+            datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+            + "\n"
+        )
+    except Exception:
+        pass
+
+
+HARVEST_HEARTBEAT_PATH = Path.home() / ".claude" / "last-skill-harvest.txt"
+HARVEST_STALE_DAYS = 7  # nag threshold
+QUEUE_PATH = Path.home() / "repo_docs" / "skills" / "SKILL_QUEUE.md"
+QUEUE_BLOAT_THRESHOLD = 20  # nag when queue exceeds this
+QUEUE_STALE_DAYS = 14  # Phase 4.5 — nag when queue hasn't changed in N days
+                       # (per GLM 5.1 quick-take 2026-05-26: "pipeline runs
+                       #  but learns nothing" failure mode)
+
+
+def check_harvest_overdue() -> str | None:
+    """Phase 4 fallback path — return a nag notice if the weekly harvest
+    routine hasn't fired in HARVEST_STALE_DAYS. Reads ~/.claude/last-skill-harvest.txt;
+    missing OR stale → emit notice. Returns None when harvest is fresh."""
+    try:
+        if not HARVEST_HEARTBEAT_PATH.exists():
+            return (
+                "Skill harvest never run — `~/.claude/last-skill-harvest.txt` "
+                "is missing. Run manually:\n"
+                "  `uv run --project ~/repos/utilities python "
+                "~/repos/utilities/scripts/radar/radar_harvest.py`\n"
+                "Or set up the weekly scheduled routine via `/schedule`."
+            )
+        ts_str = HARVEST_HEARTBEAT_PATH.read_text().strip()
+        last_dt = datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%S%z")
+        age = (datetime.now(timezone.utc).astimezone() - last_dt).days
+        if age > HARVEST_STALE_DAYS:
+            return (
+                f"Skill harvest overdue — last run {age}d ago (threshold "
+                f"{HARVEST_STALE_DAYS}d). Run `uv run --project ~/repos/utilities "
+                "python ~/repos/utilities/scripts/radar/radar_harvest.py` or "
+                "accept the drift. Persistent staleness means session learnings "
+                "aren't being surfaced to SKILL_QUEUE.md."
+            )
+        return None
+    except Exception:
+        return None
+
+
+def check_queue_zero_candidates() -> str | None:
+    """Phase 4.5 — nag when SKILL_QUEUE.md hasn't changed in QUEUE_STALE_DAYS
+    even though harvest is running. The "pipeline looks healthy but learns
+    nothing" failure mode flagged by GLM 5.1 quick-take 2026-05-26."""
+    try:
+        if not QUEUE_PATH.exists():
+            return None
+        # Use file mtime as the "last change" proxy. Comparing against
+        # last-skill-harvest.txt would miss the case where harvest runs but
+        # writes no candidates (which IS the failure mode we want to catch).
+        mtime = datetime.fromtimestamp(QUEUE_PATH.stat().st_mtime, tz=timezone.utc).astimezone()
+        age = (datetime.now(timezone.utc).astimezone() - mtime).days
+        if age <= QUEUE_STALE_DAYS:
+            return None
+        # Also confirm harvest IS running (so we don't double-nag on overdue).
+        if HARVEST_HEARTBEAT_PATH.exists():
+            harvest_ts = datetime.strptime(
+                HARVEST_HEARTBEAT_PATH.read_text().strip(),
+                "%Y-%m-%dT%H:%M:%S%z",
+            )
+            harvest_age = (datetime.now(timezone.utc).astimezone() - harvest_ts).days
+            if harvest_age > HARVEST_STALE_DAYS:
+                # Harvest itself is stale — check_harvest_overdue handles this.
+                return None
+        return (
+            f"SKILL_QUEUE.md unchanged for {age}d — harvest is running but "
+            "producing zero new candidates. This is the \"pipeline looks "
+            "healthy but learns nothing\" failure: either briefs aren't being "
+            "authored, or candidates aren't crossing the dedupe threshold. "
+            "Spot-check the last session-log.jsonl rows + most recent brief."
+        )
+    except Exception:
+        return None
+
+
+def check_brief_pending(cwd: str | None = None) -> str | None:
+    """Phase 2 — return a brief-author notice if the Stop hook from a prior
+    session set a `brief-pending.txt` marker AND no brief has been authored
+    since the timestamp inside it.
+
+    The marker contains an ISO timestamp written at session-end. The marker
+    is cleared (and None returned) when any file in `<cwd>/symlink_docs/briefs/`
+    has an mtime after the marker's timestamp — that's our "brief was written"
+    detection. Returns the notice text on pending; None when nothing's owed.
+
+    Silent no-op discipline preserved — any error returns None."""
+    try:
+        cwd = cwd or os.getcwd()
+        slug = _slugify_cwd(cwd)
+        marker = Path.home() / ".claude" / "projects" / slug / "brief-pending.txt"
+        if not marker.exists():
+            return None
+
+        pending_ts_str = marker.read_text().strip()
+        if not pending_ts_str:
+            return None
+
+        pending_dt = datetime.strptime(pending_ts_str, "%Y-%m-%dT%H:%M:%S%z")
+        pending_epoch = pending_dt.timestamp()
+
+        # Find the briefs/ dir for this project.
+        briefs_dir = Path(cwd) / "symlink_docs" / "briefs"
+        if not briefs_dir.exists():
+            briefs_dir = Path(cwd) / "briefs"  # fallback for non-symlinked projects
+
+        # Brief lanes (introduced 2026-05-27): sessions/ is the dual-radar
+        # harvest input — that's where a fresh brief lands and where this
+        # marker-clearing check should look first. Fall through to flat
+        # briefs/ for projects still on the pre-lanes layout.
+        scan_dirs = []
+        sessions_dir = briefs_dir / "sessions"
+        if sessions_dir.exists():
+            scan_dirs.append(sessions_dir)
+        if briefs_dir.exists():
+            scan_dirs.append(briefs_dir)
+
+        for scan_dir in scan_dirs:
+            for brief_file in scan_dir.iterdir():
+                if brief_file.name == "_TEMPLATE.md":
+                    continue
+                if brief_file.is_file() and brief_file.stat().st_mtime > pending_epoch:
+                    # A brief was authored after the pending timestamp; clear
+                    # both the brief-pending marker AND the sibling
+                    # doctrine-catches-pending marker (the addendum is bundled
+                    # with the brief-pending notice; clearing one without the
+                    # other leaves a stale file).
+                    try:
+                        marker.unlink()
+                    except Exception:
+                        pass
+                    try:
+                        doctrine_marker = Path.home() / ".claude" / "projects" / slug / "doctrine-catches-pending.txt"
+                        if doctrine_marker.exists():
+                            doctrine_marker.unlink()
+                    except Exception:
+                        pass
+                    return None
+
+        # Phase 2 — append a doctrine-catches addendum when the sibling
+        # marker is present (Stop hook saw ≥1 doctrine_match row with
+        # outcome="caught_in_review" this session). The harvest reads the
+        # brief's "Doctrine Violations Caught in Review" section to promote
+        # candidates into SKILL_QUEUE.md § Doctrine Candidates.
+        doctrine_addendum = ""
+        try:
+            doctrine_marker = Path.home() / ".claude" / "projects" / slug / "doctrine-catches-pending.txt"
+            if doctrine_marker.exists():
+                content = doctrine_marker.read_text().strip()
+                count = ""
+                if "\t" in content:
+                    _, count = content.split("\t", 1)
+                doctrine_addendum = (
+                    f"\n\n**Doctrine catches this session** ({count or 'see JSONL'}): "
+                    "You caught doctrine violations in review — add them to the "
+                    "brief under \"## Doctrine Violations Caught in Review\" so "
+                    "the next harvest surfaces them for promotion in "
+                    "SKILL_QUEUE.md § Doctrine Candidates."
+                )
+        except Exception:
+            pass
+
+        # No brief authored — emit the notice. Suggest the sessions/ lane if
+        # it exists (the dual-radar harvest input); fall back to flat briefs/
+        # for projects on the pre-lanes layout.
+        suggested_path = sessions_dir if sessions_dir.exists() else briefs_dir
+        return (
+            "Session brief pending — the Stop hook from a prior session "
+            f"({pending_ts_str}) flagged this project as owing a brief.\n"
+            f"\n"
+            f"Author one at `{suggested_path}/YY-M-D_<topic>.md` covering this "
+            "session's pivots, gotchas, and skill candidates. The template is "
+            f"`{briefs_dir}/_TEMPLATE.md`.\n"
+            f"\n"
+            "The brief is the harvest's input — without it, the weekly skill "
+            "harvest has nothing per-session to read from. Once authored, the "
+            "marker auto-clears (next prompt will not re-notify).\n"
+            f"\n"
+            "See ~/.claude/CLAUDE.md § \"Skill Lifecycle\" for the full loop."
+            + doctrine_addendum
+        )
+    except Exception:
+        return None
+
+
+def log_skill_inject(prompt_text: str, matches: list[dict]) -> None:
+    """Record a prompt-hook injection as a JSONL row.
+
+    Replaces the pre-2026-05-26 markdown SKILL_INJECT_LOG.md writes (archived).
+    Sets event_type='prompt_match' and includes the top skill_match. The
+    legacy [prompt] marker is preserved in the event_type, not the timestamp."""
+    if not matches:
+        return
+    best = max(matches, key=lambda m: m.get("score", 0.0))
+    skill_match_row = {
+        "score": round(best["score"], 3),
+        "skill": best.get("skill_name", best.get("name", "?")),
+        "header": best.get("header", ""),
+    }
+    if session_log_append(
+        event_type="prompt_match",
+        tool="UserPromptSubmit",
+        command_or_context=prompt_text[:400],
+        skill_match=skill_match_row,
+        outcome="injected",
+    ):
+        _touch_heartbeat()
+
+
+def log_doctrine_auto_inject(prompt_text: str, rule: dict) -> None:
+    """Record an auto-detected doctrine match as a JSONL row.
+
+    Distinguishing fields from the manual record-session-event path:
+    - `match_type: "auto"` (the radar fired vs human-judged)
+    - `outcome: "injected"` (not yet caught_in_review / violated_in_code)
+
+    The harvest reads only `match_type="manual"` rows with
+    `outcome="caught_in_review"` into the doctrine queue — auto-fires are
+    observability signal, not promotion candidates. A reviewer who later
+    judges the fire as a real catch records it manually via
+    record-session-event."""
+    if not rule:
+        return
+    score = rule.get("score", 0.0)
+    extra = {
+        "rule": (rule.get("title") or "")[:600],
+        "rule_source": (rule.get("source") or "")[:400],
+        "touchpoint": [],
+        "match_type": "auto",
+        "evidence": f"prompt_hook semantic match (score {score:.3f})",
+        "receipt": (rule.get("receipt") or "").split("\n", 1)[0][:600],
+        "match_score": round(score, 3),
+    }
+    if session_log_append(
+        event_type="doctrine_match",
+        tool="UserPromptSubmit",
+        command_or_context=prompt_text[:400],
+        outcome="injected",
+        extra=extra,
+        dedupe_parts=(extra["rule"], "injected"),
+    ):
+        _touch_heartbeat()
+
+
+def main():
+    try:
+        raw = sys.stdin.read()
+        payload = json.loads(raw)
+    except Exception:
+        sys.exit(0)
+
+    event = normalize_event(payload)
+    if not isinstance(event, PromptEvent):
+        sys.exit(0)
+
+    prompt = event.prompt.strip()
+    if len(prompt) < MIN_PROMPT_CHARS:
+        sys.exit(0)
+
+    if SKIP_PATTERNS.match(prompt):
+        sys.exit(0)
+
+    # Phase 2 + Phase 4 + Phase 4.5 — lifecycle nag notices fire INDEPENDENTLY
+    # of the skill-match injection. They render before the skill match so
+    # session-discipline signals lead. Each can return None to skip.
+    lifecycle_notices: list[str] = []
+    for notice_fn in (check_brief_pending, check_harvest_overdue, check_queue_zero_candidates):
+        notice = notice_fn()
+        if notice:
+            lifecycle_notices.append(notice)
+
+    if lifecycle_notices:
+        combined = "\n\n---\n\n".join(lifecycle_notices)
+        print(render_additional_context(
+            combined,
+            hook_event_name=event.hook_event_name,
+            runtime=event.runtime,
+        ))
+
+    # Phase 1 — doctrine match runs INDEPENDENTLY of the skill radar so a
+    # prompt can fire both surfaces. Doctrine is higher-stakes (threshold
+    # 0.85 vs skill's 0.72) and renders BEFORE the skill section so the
+    # architectural constraint leads.
+    doctrine_rule = match_doctrine_for_prompt(prompt)
+    if doctrine_rule:
+        log_doctrine_auto_inject(prompt, doctrine_rule)
+        print(render_additional_context(
+            render_doctrine_section(doctrine_rule),
+            hook_event_name=event.hook_event_name,
+            runtime=event.runtime,
+        ))
+
+    wisdom_idx = load_index(INDEX_WISDOM_PATH)
+    what_idx = load_index(INDEX_WHAT_PATH)
+    if not wisdom_idx and not what_idx:
+        sys.exit(0)
+
+    # Tier 1: deterministic keyword match — fires on either dimension.
+    # Search the union; if the matched chunk is in the what index, it goes
+    # to the "what" surface, otherwise wisdom. Score is 1.0 either way.
+    matches_by_dim: dict[str, list[dict]] = {"wisdom": [], "what": []}
+    kw_matches = keyword_prefilter(prompt, wisdom_idx + what_idx)
+    if kw_matches:
+        # Bucket each match by which index it came from
+        what_paths = {(e.get("file_path"), e.get("skill_name")) for e in what_idx}
+        for m in kw_matches:
+            key = (m.get("file_path"), m.get("skill_name"))
+            dim = "what" if key in what_paths else "wisdom"
+            matches_by_dim[dim].append(m)
+    else:
+        # Tier 2: semantic — single embed, score against each index, apply
+        # per-dimension threshold, take top-N from each.
+        query_vec = embed(QUERY_PREFIX + prompt[:1000])
+        if not query_vec:
+            sys.exit(0)
+
+        for dim, idx, threshold in (
+            ("wisdom", wisdom_idx, THRESHOLD_WISDOM),
+            ("what", what_idx, THRESHOLD_WHAT),
+        ):
+            if not idx:
+                continue
+            scored = sorted(
+                [{"score": dot(query_vec, s["embedding"]), **s} for s in idx],
+                key=lambda x: x["score"],
+                reverse=True,
+            )
+            matches_by_dim[dim] = [s for s in scored[:TOP_PER_DIM] if s["score"] >= threshold]
+
+    all_matches = matches_by_dim["wisdom"] + matches_by_dim["what"]
+    if not all_matches:
+        sys.exit(0)
+
+    log_skill_inject(prompt, all_matches)
+
+    # Render side-by-side: one labeled section per dimension that fired.
+    lines: list[str] = []
+    section_labels = {
+        "wisdom": "Skill Radar — what we've learned (Layers 1+4):",
+        "what":   "Skill Radar — what is (Layer 3, project clusters):",
+    }
+    for dim in ("wisdom", "what"):
+        ms = matches_by_dim[dim]
+        if not ms:
+            continue
+        lines.append(section_labels[dim])
+        lines.append("")
+        for m in ms:
+            skill = m.get("skill_name", m.get("name", "?"))
+            header = m.get("header", "")
+            fpath = m.get("file_path", "")
+            score = m["score"]
+            text = m.get("text", m.get("description", ""))
+            lines.append(f"[{score:.2f}] {skill} › {header}  ({fpath})")
+            lines.append("---")
+            lines.append(text[:CONTEXT_CHARS])
+            lines.append("")
+
+    print(render_additional_context(
+        "\n".join(lines),
+        hook_event_name=event.hook_event_name,
+        runtime=event.runtime,
+    ))
+
+
+if __name__ == "__main__":
+    main()

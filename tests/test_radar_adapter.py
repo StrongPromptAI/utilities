@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts" / "skill_hook"))
+sys.path.insert(0, str(ROOT / "scripts" / "radar"))
 
 from event_adapter import PromptEvent, ToolEvent, UnknownEvent, normalize_event
 from output_adapter import render_additional_context
@@ -61,7 +61,7 @@ def test_event_adapter_parses_codex_nested_tool_command():
 
     assert isinstance(event, ToolEvent)
     assert event.runtime == "codex"
-    assert event.command == "rg normalize_event scripts/skill_hook"
+    assert event.command == "rg normalize_event scripts/radar"
     assert "event_adapter.py" in event.output
 
 

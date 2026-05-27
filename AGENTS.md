@@ -182,9 +182,9 @@ cd ~/repos/<any-project> && gitnexus analyze --embeddings
 
 See `~/repo_docs/skills/gitnexus/SKILL.md` for the gitnexus-side env-var contract (required vars, wire protocol, fallback behavior).
 
-### Skill Radar hook
+### Radar hook
 
-`utilities/scripts/skill_hook/hook.py` calls `http://localhost:8100/embed` without an Authorization header — relies on dev-mode auth-off to land. This is why local dev must stay auth-off by default, not require per-machine token setup.
+`utilities/scripts/radar/radar_post_tool.py` calls `http://localhost:8100/embed` without an Authorization header — relies on dev-mode auth-off to land. This is why local dev must stay auth-off by default, not require per-machine token setup.
 
 ### Railway env
 

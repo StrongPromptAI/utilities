@@ -286,16 +286,23 @@ def _bucketize_doctrine_rows(rows: list[dict]) -> dict[str, dict]:
     return buckets
 
 
-def _existing_queue_keys(queue_text: str) -> set[str]:
-    """Extract a coarse fingerprint set from the existing queue so we don't
-    re-add candidates already present. We use the first ~60 chars of each
-    entry's `One-liner:` value as a stable identity proxy."""
-    keys: set[str] = set()
+def _existing_queue_keys(queue_text: str) -> tuple[set[str], set[str]]:
+    """Extract coarse fingerprint sets from the existing queue so we don't
+    re-add candidates already present.
+
+    Returns (oneliner_keys, dedupe_keys) — two independent identity surfaces.
+    oneliner_keys: first ~60 chars of each One-liner value.
+    dedupe_keys: sha256 dedupe keys already in the queue."""
+    oneliner_keys: set[str] = set()
+    dedupe_keys: set[str] = set()
     for line in queue_text.splitlines():
         if line.startswith("**One-liner**:"):
             fingerprint = line.split(":", 1)[1].strip()[:60].lower()
-            keys.add(fingerprint)
-    return keys
+            oneliner_keys.add(fingerprint)
+        elif line.startswith("**Dedupe key**: `"):
+            dk = line.split("`")[1]
+            dedupe_keys.add(dk)
+    return oneliner_keys, dedupe_keys
 
 
 def _format_jsonl_candidate(project: str, key: str, bucket: dict) -> str | None:
@@ -484,7 +491,7 @@ def main() -> int:
 
     # 3. Load existing queue + existing fingerprints (skill + doctrine separately).
     queue_text = QUEUE_PATH.read_text() if QUEUE_PATH.exists() else ""
-    existing_keys = _existing_queue_keys(queue_text)
+    existing_keys, existing_dedupe_keys = _existing_queue_keys(queue_text)
     existing_doctrine_keys = _existing_doctrine_keys(queue_text)
 
     # 4a. Build new skill candidate entries.
@@ -492,10 +499,13 @@ def main() -> int:
     new_from_jsonl = 0
     new_from_briefs = 0
     for key, (project_name, bucket) in all_buckets.items():
+        if key in existing_dedupe_keys:
+            continue
         entry = _format_jsonl_candidate(project_name, key, bucket)
         if entry is None:
             continue
-        err_for_fp = (bucket["error_text"] or bucket["command_or_context"] or "").strip()[:60].lower()
+        raw_fp = (bucket["error_text"] or bucket["command_or_context"] or "")
+        err_for_fp = re.sub(r"\s+", " ", raw_fp.strip())[:60].lower()
         if err_for_fp and err_for_fp in existing_keys:
             continue
         new_entries.append(entry)

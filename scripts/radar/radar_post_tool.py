@@ -192,9 +192,15 @@ def extract_error(output: str) -> str | None:
         return None
     if _looks_like_test_output(output):
         return None
-    if not ERROR_SIGNALS.search(output):
+    match = ERROR_SIGNALS.search(output)
+    if not match:
         return None
-    snippet = output.strip()[-600:]
+    # Return text centered on the error signal, not the unconditional tail.
+    # Prevents raw ls/git-log output from entering the queue when a
+    # multi-command bash has an error early and clean output late.
+    start = max(0, match.start() - 200)
+    end = min(len(output), match.end() + 400)
+    snippet = output[start:end]
     snippet = re.sub(r"\x1b\[[0-9;]*m", "", snippet)
     return snippet.strip()
 

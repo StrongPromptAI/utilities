@@ -38,6 +38,15 @@ HARVEST_HEARTBEAT = Path.home() / ".claude" / "last-skill-harvest.txt"
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 REPO_DOCS_DIR = Path.home() / "repo_docs"
 
+# Persistent "already emitted" ledger. The queue-only dedup (_existing_queue_keys)
+# can't see candidates that were PROMOTED or REJECTED (deleted from the queue),
+# so within the lookback window the harvest re-emits them every run — the
+# unchecked-checkbox replay that resurfaced 7 already-promoted candidates on
+# 2026-05-28. This ledger records every fingerprint the harvest has ever
+# emitted; once a fingerprint is here it never re-emits, with zero manual
+# action at promotion time. Append-only, one fingerprint per line.
+SEEN_LEDGER = Path.home() / ".claude" / "harvest-seen-fingerprints.txt"
+
 # How far back to look in each session-log for new candidates. Rows older
 # than this were already harvested in a prior cycle and would dedupe-collide
 # with existing queue entries, but skipping them up front saves work.
@@ -82,6 +91,35 @@ def _touch_harvest_heartbeat() -> None:
     try:
         HARVEST_HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
         HARVEST_HEARTBEAT.write_text(_now_iso() + "\n")
+    except Exception:
+        pass
+
+
+def _load_seen() -> set[str]:
+    """Load the already-emitted fingerprint ledger. Empty set if missing.
+
+    Fingerprints are stored verbatim — a `[:60]` truncation can legitimately
+    end on a space, so do NOT strip the line content (splitlines already drops
+    the newline); stripping would break the round-trip with the computed fp.
+    """
+    if not SEEN_LEDGER.exists():
+        return set()
+    return {
+        line
+        for line in SEEN_LEDGER.read_text().splitlines()
+        if line.strip()
+    }
+
+
+def _append_seen(fingerprints: set[str]) -> None:
+    """Append new fingerprints to the ledger (append-only; dedup on read)."""
+    if not fingerprints:
+        return
+    try:
+        SEEN_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        with SEEN_LEDGER.open("a") as fh:
+            for fp in sorted(fingerprints):
+                fh.write(fp + "\n")
     except Exception:
         pass
 
@@ -435,6 +473,12 @@ def main() -> int:
         "--lookback-days", type=int, default=LOOKBACK_DAYS,
         help=f"How far back to scan session-log rows (default {LOOKBACK_DAYS}).",
     )
+    p.add_argument(
+        "--seed-ledger", action="store_true",
+        help="Record every currently-computable candidate fingerprint into the "
+             "seen-ledger WITHOUT touching the queue. Run once after a manual "
+             "triage so already-triaged candidates never re-emit.",
+    )
     args = p.parse_args()
 
     cutoff = datetime.now(timezone.utc).astimezone().replace(
@@ -489,17 +533,38 @@ def main() -> int:
                 brief_candidates.extend(_parse_brief_candidates(briefs))
                 brief_doctrine_catches.extend(_parse_brief_doctrine_catches(briefs))
 
-    # 3. Load existing queue + existing fingerprints (skill + doctrine separately).
+    # 3. Load existing queue + existing fingerprints (skill + doctrine separately),
+    #    plus the persistent seen-ledger (survives promotion/rejection deletes).
     queue_text = QUEUE_PATH.read_text() if QUEUE_PATH.exists() else ""
     existing_keys, existing_dedupe_keys = _existing_queue_keys(queue_text)
     existing_doctrine_keys = _existing_doctrine_keys(queue_text)
+    seen = _load_seen()
+
+    # Seed mode: record every currently-computable fingerprint into the ledger
+    # WITHOUT touching the queue. Run once after a manual triage so already-
+    # triaged candidates (promoted OR rejected) never re-emit.
+    if args.seed_ledger:
+        seed_fps: set[str] = set()
+        seed_fps.update(all_buckets.keys())
+        seed_fps.update(c["candidate"][:60].lower() for c in brief_candidates)
+        for _proj, bucket in all_doctrine_buckets.values():
+            fp = (bucket["rule"] or "").strip().lower()[:80]
+            if fp:
+                seed_fps.add(fp)
+        seed_fps.update(c["rule"].strip().lower()[:80] for c in brief_doctrine_catches)
+        new_fps = seed_fps - seen
+        _append_seen(new_fps)
+        print(f"harvest --seed-ledger: recorded {len(new_fps)} new fingerprint(s); "
+              f"ledger now {len(seen | seed_fps)} total.")
+        return 0
 
     # 4a. Build new skill candidate entries.
     new_entries: list[str] = []
+    emitted_fps: set[str] = set()  # fingerprints appended this run → ledger
     new_from_jsonl = 0
     new_from_briefs = 0
     for key, (project_name, bucket) in all_buckets.items():
-        if key in existing_dedupe_keys:
+        if key in existing_dedupe_keys or key in seen:
             continue
         entry = _format_jsonl_candidate(project_name, key, bucket)
         if entry is None:
@@ -509,13 +574,15 @@ def main() -> int:
         if err_for_fp and err_for_fp in existing_keys:
             continue
         new_entries.append(entry)
+        emitted_fps.add(key)
         new_from_jsonl += 1
 
     for c in brief_candidates:
         fp = c["candidate"][:60].lower()
-        if fp in existing_keys:
+        if fp in existing_keys or fp in seen:
             continue
         new_entries.append(_format_brief_candidate(c))
+        emitted_fps.add(fp)
         new_from_briefs += 1
 
     # 4b. Build new doctrine candidate entries.
@@ -524,20 +591,22 @@ def main() -> int:
     new_doctrine_from_briefs = 0
     for key, (project_name, bucket) in all_doctrine_buckets.items():
         fp = (bucket["rule"] or "").strip().lower()[:80]
-        if fp and fp in existing_doctrine_keys:
+        if fp and (fp in existing_doctrine_keys or fp in seen):
             continue
         new_doctrine_entries.append(
             _format_doctrine_jsonl_candidate(project_name, bucket)
         )
         existing_doctrine_keys.add(fp)
+        emitted_fps.add(fp)
         new_doctrine_from_jsonl += 1
 
     for c in brief_doctrine_catches:
         fp = c["rule"].strip().lower()[:80]
-        if fp in existing_doctrine_keys:
+        if fp in existing_doctrine_keys or fp in seen:
             continue
         new_doctrine_entries.append(_format_doctrine_brief_candidate(c))
         existing_doctrine_keys.add(fp)
+        emitted_fps.add(fp)
         new_doctrine_from_briefs += 1
 
     total_new = len(new_entries) + len(new_doctrine_entries)
@@ -592,6 +661,7 @@ def main() -> int:
 
     QUEUE_PATH.write_text(queue_text)
     _touch_harvest_heartbeat()
+    _append_seen(emitted_fps)  # so promoted/rejected entries never re-emit
     print(
         f"harvest: appended {total_new} candidate"
         f"{'s' if total_new != 1 else ''} "

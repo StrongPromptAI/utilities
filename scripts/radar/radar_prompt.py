@@ -23,7 +23,9 @@ Exits silently (code 0) on any failure — never blocks the agent runtime.
 import json
 import os
 import re
+import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,6 +44,28 @@ INDEX_WISDOM_PATH = Path.home() / ".claude/radar_skills_wisdom.json"
 INDEX_WHAT_PATH = Path.home() / ".claude/radar_skills_what.json"
 HEARTBEAT_PATH = Path.home() / ".claude" / "last-jsonl-write.txt"
 QUERY_PREFIX = "search_query: "
+
+# ── Index freshness gate (2026-05-29) ────────────────────────────────────────
+# The injected chunk text is a frozen snapshot in radar_skills_wisdom.json built
+# by build_index.py. Nothing rebuilt it on skill edits, so a corrected skill kept
+# getting injected in its pre-fix form until someone ran build_index.py by hand
+# (the weekly launchd job runs radar_harvest.py, NOT build_index.py). This gate
+# watches SKILL_REGISTRY.md's mtime — the corpus table-of-contents, and the same
+# sentinel build_index.py uses to blow its wisdom cache — and, when it has
+# drifted from the value the manifest recorded at the last build, fires a
+# NON-BLOCKING background rebuild. The current prompt still serves the existing
+# index; the index converges by the next prompt (build_index is incremental, so
+# only files whose mtime changed are re-embedded). Silent no-op on any failure.
+REGISTRY_PATH = Path.home() / "repo_docs" / "skills" / "SKILL_REGISTRY.md"
+MANIFEST_PATH = Path.home() / ".claude" / "radar_skills_manifest.json"
+UTILITIES_DIR = Path.home() / "repos" / "utilities"
+BUILD_INDEX_SCRIPT = UTILITIES_DIR / "scripts" / "radar" / "build_index.py"
+REBUILD_LOCK = Path.home() / ".claude" / "radar_index_rebuild.lock"
+REBUILD_LOG = Path.home() / ".claude" / "last-index-rebuild.log"
+REBUILD_LOCK_TTL = 600  # seconds — a rebuild is in flight; don't stampede.
+# Must exceed the worst case: a SKILL_REGISTRY.md mtime change blows the whole
+# wisdom cache and re-embeds all chunks (~2-4 min). Incremental single-file
+# rebuilds finish in seconds, but the lock has to cover the full-rebuild case.
 
 # Bifurcated radar: two content classes, two distributions, two thresholds.
 # - WISDOM (Layers 1+4): narrative, high semantic signal, conservative bar.
@@ -228,6 +252,52 @@ def load_index(path: Path) -> list[dict]:
         return json.loads(path.read_text())
     except Exception:
         return []
+
+
+def index_stale_vs_registry() -> bool:
+    """True when SKILL_REGISTRY.md's current mtime differs from the value the
+    manifest recorded at the last build — i.e. the skill corpus changed since
+    the index was built. Mirrors build_index.py's own registry-mtime cache-blow
+    signal so the two stay consistent. Any error → False (silent no-op)."""
+    try:
+        manifest = json.loads(MANIFEST_PATH.read_text())
+        recorded = manifest.get("files", {}).get("wisdom", {}).get(str(REGISTRY_PATH))
+        if recorded is None:
+            return False
+        return REGISTRY_PATH.stat().st_mtime != recorded
+    except Exception:
+        return False
+
+
+def trigger_background_rebuild() -> None:
+    """Fire build_index.py detached and lock-guarded so concurrent prompts don't
+    stampede a rebuild that's already in flight. Never blocks the prompt; never
+    raises. The lock is time-based (REBUILD_LOCK_TTL) so a crashed build self-heals
+    on the next stale prompt, and build_index updates the manifest's recorded
+    registry mtime on success — which clears index_stale_vs_registry() naturally."""
+    try:
+        if REBUILD_LOCK.exists():
+            if (time.time() - REBUILD_LOCK.stat().st_mtime) < REBUILD_LOCK_TTL:
+                return  # a rebuild is already running
+        REBUILD_LOCK.write_text(
+            datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z") + "\n"
+        )
+        uv = "/opt/homebrew/bin/uv"
+        if not Path(uv).exists():
+            import shutil
+            uv = shutil.which("uv") or ""
+        if not uv:
+            return
+        logf = open(REBUILD_LOG, "a")
+        subprocess.Popen(
+            [uv, "run", "--project", str(UTILITIES_DIR), "python", str(BUILD_INDEX_SCRIPT)],
+            cwd=str(UTILITIES_DIR),
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
 
 
 def _touch_heartbeat() -> None:
@@ -530,6 +600,16 @@ def main():
             hook_event_name=event.hook_event_name,
             runtime=event.runtime,
         ))
+
+    # Index freshness gate (2026-05-29): if the skill corpus changed since the
+    # index was built (SKILL_REGISTRY.md mtime drift vs the manifest), fire a
+    # NON-BLOCKING background rebuild. We still serve the current index this turn
+    # — it converges by the next prompt. Never blocks; failures no-op silently.
+    try:
+        if index_stale_vs_registry():
+            trigger_background_rebuild()
+    except Exception:
+        pass
 
     wisdom_idx = load_index(INDEX_WISDOM_PATH)
     what_idx = load_index(INDEX_WHAT_PATH)

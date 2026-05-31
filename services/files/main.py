@@ -431,7 +431,10 @@ async def home(request: Request, folder: str = ""):
             current_folder=folder,
             theme=_read_theme(request),
             public_folders=sorted(PUBLIC_FOLDERS),
-        )
+        ),
+        # no-store so the post-rename/move/delete window.location.reload()
+        # always re-lists the bucket instead of serving a cached document.
+        headers={"Cache-Control": "no-store"},
     )
 
 

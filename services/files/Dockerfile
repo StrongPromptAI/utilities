@@ -8,7 +8,8 @@ RUN pip install --no-cache-dir \
     "python-jose[cryptography]>=3.3.0" \
     "boto3>=1.34.0" \
     "httpx>=0.27.0" \
-    "python-multipart>=0.0.9"
+    "python-multipart>=0.0.9" \
+    "tzdata"
 
 COPY main.py templates.py ./
 

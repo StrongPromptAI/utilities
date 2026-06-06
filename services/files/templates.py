@@ -10,6 +10,7 @@ Public helpers:
 
 from __future__ import annotations
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from html import escape
 from typing import Optional
 from urllib.parse import quote
@@ -1181,8 +1182,17 @@ def _fmt_size(n: int) -> str:
     return f"{n} B"
 
 
+# oxp.files modified times are stored UTC (boto3 LastModified). Show both
+# Mountain (Chris) and Pacific (THJ stakeholders) so neither has to convert.
+# zoneinfo needs the IANA db — the slim image gets it via the `tzdata` pip pkg.
+_MT = ZoneInfo("America/Denver")
+_PT = ZoneInfo("America/Los_Angeles")
+
+
 def _fmt_time(dt: datetime) -> str:
-    return dt.strftime("%Y-%m-%d %H:%M UTC")
+    mt = dt.astimezone(_MT)
+    pt = dt.astimezone(_PT)
+    return f"{mt:%Y-%m-%d %-I:%M %p %Z} / {pt:%-I:%M %p %Z}"
 
 
 def file_browser_html(

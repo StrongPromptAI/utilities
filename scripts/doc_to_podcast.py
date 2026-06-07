@@ -92,10 +92,16 @@ DEFAULT_SCRIPT_MODEL = "anthropic/claude-opus-4.8"  # latest Opus; one short cal
 WORDS_PER_MINUTE = 145  # conversational Kokoro pace, leaving headroom for turn gaps
 MAX_SOURCE_CHARS = 40000  # cap the LLM input; the brief steers focus, not the dump
 
+# Podcasts always target sales reps and executives — never a clinical or technical
+# audience — so the default brief is exec-oriented. Override with --brief for the rare
+# technical episode. (Mirrors the exec lens in doc_to_speech.py's _EXEC_SYSTEM.)
 DEFAULT_BRIEF = (
-    "A relaxed two-host debrief that explains the source material to a smart "
-    "general audience. Lead with a hook, keep it conversational, end with a clean "
-    "sign-off."
+    "A relaxed two-host debrief that gives a busy executive or sales rep the business "
+    "picture of the source material — fast. Lead with a hook and the bottom line. Boost "
+    "the business model, pricing and monetization, branding and positioning, market "
+    "insight, the competitive seam, and the assumptions the strategy rests on; skim past "
+    "implementation and clinical/technical detail unless it carries business meaning. "
+    "Keep it conversational and jargon-free, and end with a clean sign-off."
 )
 
 
@@ -133,7 +139,9 @@ HARD RULES:
 - About {words} words of spoken text total (~{minutes:g} minutes aloud). Tighter is better than padded — do NOT stuff filler to hit the count.
 - Turns alternate but not robotically: a host may take two short turns in a row, or a one-word reaction. Each turn is 1–4 sentences.
 - This is read by TTS, so write only what should be SPOKEN. NO stage directions, NO sound cues, NO markdown, NO asterisks, NO emoji, NO headings, NO host-name prefixes inside the text.
-- Make technical terms sound right when read aloud. Prefer spoken forms: "N P M" for npm, "keys dot json" for keys.json, "one password" for 1Password, "ignore dash scripts" for ignore-scripts, "node gyp" for node-gyp, "JSON" said as a word is fine. Spell out anything a TTS would mangle.
+- This is for a non-technical executive / sales audience: do NOT name or spell out file paths, file names, document names, section pointers, URLs, or code — convey the idea, never the pointer. Translate any technical, clinical, or product-internal jargon into plain business language, or drop it.
+- Lead with the business angle and keep returning to it — the opportunity, the money, the positioning, the bet. Do not dwell on implementation or step-by-step detail. Never invent numbers or prices; use only figures the source supports, and if the source leaves a price open, say it's still open.
+- For any term that must be spoken where a TTS would mangle it, write the spoken form ("JSON" as a word is fine; only spell out an acronym if it reads cleanly aloud).
 - Output STRICT JSON ONLY — no prose, no code fences around it:
   {{"title": "<short episode title>", "turns": [{{"speaker": "{female}", "text": "..."}}, {{"speaker": "{male}", "text": "..."}}]}}"""
 

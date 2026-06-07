@@ -2,8 +2,6 @@
 
 from ..db import get_db
 from ..embeddings import get_embedding
-from ..config import BATCH_SIZE
-from ..llm import complete
 
 
 def insert_chunks(call_id: int, chunks: list, show_progress: bool = True) -> int:
@@ -50,111 +48,6 @@ def get_call_chunks(call_id: int) -> list[dict]:
                 (call_id,)
             )
             return cur.fetchall()
-
-
-# --- Batch Summaries ---
-
-def summarize_chunk_batch(chunks: list[dict], user_notes: str = None) -> str:
-    """Summarize a batch of chunks using local LLM.
-
-    Args:
-        chunks: List of chunk dicts with 'text' field
-        user_notes: Optional owner briefing — prioritizes detail on flagged topics
-
-    Returns:
-        Summary string (3-5 sentences)
-    """
-    combined = "\n\n".join([c["text"] for c in chunks])
-
-    briefing = ""
-    if user_notes:
-        briefing = f"""The call owner provided this briefing on what mattered most:
----
-{user_notes}
----
-Pay special attention to segments related to these topics — capture more detail there.
-For other segments, summarize normally but more briefly.
-
-"""
-
-    prompt = f"""{briefing}Summarize this business call segment in 3-5 sentences. Capture:
-- Key decisions, action items, and important context
-- Who drove the conversation and who was passive
-- Agreement vs tension — note hedging, confidence, or pushback
-- Any concerns raised (even subtle ones)
-
-Keep it as natural prose (no bullet points or headers). Be concise but preserve the conversation's tone.
-
-TRANSCRIPT:
-{combined}
-
-SUMMARY:"""
-
-    return complete(prompt, max_tokens=400, temperature=0.3)
-
-
-def generate_call_batch_summaries(call_id: int, batch_size: int = BATCH_SIZE, show_progress: bool = True) -> dict:
-    """Generate batch summaries for all chunks in a call.
-
-    Processes chunks in batches of batch_size, summarizes each batch,
-    and stores in chunk_batch_summaries table. If the call has user_notes,
-    they are injected into each batch prompt as a prioritization lens.
-
-    Returns:
-        {"call_id": int, "batches_created": int, "chunks_processed": int}
-    """
-    chunks = get_call_chunks(call_id)
-    if not chunks:
-        return {"error": f"No chunks found for call {call_id}"}
-
-    # Fetch user_notes for guided summarization
-    user_notes = None
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT user_notes FROM calls WHERE id = %s", (call_id,))
-            row = cur.fetchone()
-            if row and row["user_notes"]:
-                user_notes = row["user_notes"]
-                if show_progress:
-                    print(f"  Using owner briefing to guide summaries")
-
-    # Clear existing summaries for this call
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM chunk_batch_summaries WHERE call_id = %s", (call_id,))
-        conn.commit()
-
-    batches_created = 0
-    for batch_idx, i in enumerate(range(0, len(chunks), batch_size)):
-        batch_chunks = chunks[i:i + batch_size]
-        start_idx = batch_chunks[0]["chunk_idx"]
-        end_idx = batch_chunks[-1]["chunk_idx"]
-
-        if show_progress:
-            print(f"  Summarizing batch {batch_idx} (chunks {start_idx}-{end_idx})...")
-
-        summary = summarize_chunk_batch(batch_chunks, user_notes=user_notes)
-
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """INSERT INTO chunk_batch_summaries
-                       (call_id, batch_idx, start_chunk_idx, end_chunk_idx, summary)
-                       VALUES (%s, %s, %s, %s, %s)""",
-                    (call_id, batch_idx, start_idx, end_idx, summary)
-                )
-            conn.commit()
-
-        batches_created += 1
-
-    if show_progress:
-        print(f"\n  Next: \"Harvest call {call_id}\" · \"Show me the summaries for call {call_id}\"")
-
-    return {
-        "call_id": call_id,
-        "batches_created": batches_created,
-        "chunks_processed": len(chunks)
-    }
 
 
 def get_call_batch_summaries(call_id: int) -> list[dict]:

@@ -5,10 +5,6 @@ import re
 import csv
 from io import StringIO
 from pathlib import Path
-from openai import OpenAI
-from .config import LM_STUDIO_URL, SUMMARY_MODEL
-
-MAX_LLM_BATCH = 15  # Stay within qwen2.5-coder-1.5b context window
 
 
 def _extract_docx(file_path: str) -> str:
@@ -69,7 +65,7 @@ def detect_and_extract(file_path: str) -> tuple[str, str]:
     return raw, _detect_text_format(raw)
 
 
-def preprocess_transcript(file_path: str, merge_speaker_turns: bool = True, filter_fillers: bool = True, llm_adjudicate: bool = True) -> dict:
+def preprocess_transcript(file_path: str, merge_speaker_turns: bool = True, filter_fillers: bool = True) -> dict:
     """Preprocess a transcript file (any supported format).
 
     Detects format (DOCX, CSV, plaintext), extracts text, strips timestamps,
@@ -79,8 +75,7 @@ def preprocess_transcript(file_path: str, merge_speaker_turns: bool = True, filt
     Args:
         file_path: Path to transcript file (DOCX, CSV, or plaintext)
         merge_speaker_turns: If True, merge consecutive lines from same speaker
-        filter_fillers: If True, remove low-value agreement statements
-        llm_adjudicate: If True, use local LLM to classify borderline cases
+        filter_fillers: If True, remove low-value agreement statements (regex only)
 
     Returns:
         {
@@ -104,9 +99,6 @@ def preprocess_transcript(file_path: str, merge_speaker_turns: bool = True, filt
         r'^i (agree|know|see|got it|understand)\.?$',
     ]
 
-    # Words that suggest possible filler (for LLM adjudication)
-    FILLER_INDICATORS = ['yeah', 'yup', 'yep', 'okay', 'ok', 'right', 'sure', 'alright', 'correct', 'true', 'exactly', 'definitely', 'absolutely', 'got it', 'i see', 'mm-hmm', 'uh-huh']
-
     def is_obvious_filler(text: str) -> bool:
         """Check if text is an obvious filler (regex match)."""
         normalized = text.lower().strip()
@@ -117,79 +109,10 @@ def preprocess_transcript(file_path: str, merge_speaker_turns: bool = True, filt
                 return True
         return False
 
-    def is_borderline(text: str) -> bool:
-        """Check if text is a borderline case needing LLM adjudication."""
-        normalized = text.lower().strip()
-        if len(normalized) < 15 or len(normalized) > 80:
-            return False
-        return any(re.search(rf'\b{re.escape(ind)}\b', normalized) for ind in FILLER_INDICATORS)
-
-    def _classify_batch(client: OpenAI, texts: list[str]) -> list[bool]:
-        """Classify a single batch of texts. Returns list of is_filler bools."""
-        numbered_statements = "\n".join([f'{i+1}. "{text}"' for i, text in enumerate(texts)])
-
-        prompt = f"""Classify each statement from a business call transcript.
-Is it FILLER (just agreement/acknowledgment with no real information) or CONTENT (has meaningful information)?
-
-Statements:
-{numbered_statements}
-
-Reply with only the line number and classification, one per line:
-1. FILLER
-2. CONTENT
-etc."""
-
-        try:
-            response = client.chat.completions.create(
-                model=SUMMARY_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=len(texts) * 10,
-                temperature=0
-            )
-            answer = response.choices[0].message.content.strip().upper()
-
-            results = []
-            lines = answer.split('\n')
-            for i, line in enumerate(lines):
-                if i < len(texts):
-                    if "FILLER" in line:
-                        results.append(True)
-                    elif "CONTENT" in line:
-                        results.append(False)
-                    else:
-                        results.append(False)
-
-            while len(results) < len(texts):
-                results.append(False)
-
-            return results[:len(texts)]
-        except Exception as e:
-            print(f"Warning: LLM classification failed: {e}. Keeping all borderline items.")
-            return [False] * len(texts)
-
-    def llm_classify_filler(texts: list[str]) -> list[bool]:
-        """Use local LLM to classify borderline statements in batches. Returns list of is_filler bools."""
-        if not texts:
-            return []
-
-        try:
-            client = OpenAI(base_url=LM_STUDIO_URL, api_key="not-needed")
-        except Exception as e:
-            print(f"Warning: Could not connect to LM Studio: {e}. Keeping all borderline items.")
-            return [False] * len(texts)
-
-        results = []
-        for batch_start in range(0, len(texts), MAX_LLM_BATCH):
-            batch = texts[batch_start:batch_start + MAX_LLM_BATCH]
-            batch_results = _classify_batch(client, batch)
-            results.extend(batch_results)
-        return results
-
     lines = []
     participants = set()
     filtered_count = 0
-    llm_filtered_count = 0
-    borderline_items = []
+    llm_filtered_count = 0  # retained at 0 for return-shape stability (LM Studio adjudication removed)
     all_rows = []
 
     if fmt == 'json':
@@ -257,28 +180,15 @@ etc."""
             participants.add(current_speaker)
             all_rows.append({"speaker": current_speaker, "text": text})
 
-    # First pass: obvious fillers and identify borderline
-    for i, row in enumerate(all_rows):
+    # Obvious fillers (regex) are dropped; everything else is kept. (The old LM Studio
+    # borderline-adjudication second pass was removed — borderline lines now just stay.)
+    for row in all_rows:
         text = row["text"]
         if filter_fillers and is_obvious_filler(text):
             filtered_count += 1
             row["_status"] = "filtered"
-        elif filter_fillers and llm_adjudicate and is_borderline(text):
-            row["_status"] = "borderline"
-            borderline_items.append((i, text))
         else:
             row["_status"] = "keep"
-
-    # Second pass: LLM adjudication for borderline cases
-    if borderline_items and llm_adjudicate:
-        borderline_texts = [item[1] for item in borderline_items]
-        llm_results = llm_classify_filler(borderline_texts)
-        for (i, _), is_filler in zip(borderline_items, llm_results):
-            if is_filler:
-                all_rows[i]["_status"] = "filtered"
-                llm_filtered_count += 1
-            else:
-                all_rows[i]["_status"] = "keep"
 
     # Collect kept rows (preserve timestamps when present)
     for row in all_rows:

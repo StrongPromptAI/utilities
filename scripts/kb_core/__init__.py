@@ -7,10 +7,8 @@ Shared functions for kb-ingest and kb-check skills.
 # Config
 from .config import (
     DB_URL,
-    LM_STUDIO_URL,
     EMBED_MODEL,
     EMBED_BACKEND,
-    SUMMARY_MODEL,
     PRIMARY_LLM_URL,
     PRIMARY_LLM_MODEL,
     PRIMARY_LLM_PROVIDER,
@@ -24,8 +22,6 @@ from .config import (
     DEFAULT_DAYS_BACK,
     DECAY_RATE,
     QUOTES_PER_BATCH,
-    LLM_CONTEXT_LENGTH,
-    ensure_model,
 )
 
 # Core utilities
@@ -132,10 +128,8 @@ from .clustering import (
 __all__ = [
     # Config
     "DB_URL",
-    "LM_STUDIO_URL",
     "EMBED_MODEL",
     "EMBED_BACKEND",
-    "SUMMARY_MODEL",
     "PRIMARY_LLM_URL",
     "PRIMARY_LLM_MODEL",
     "PRIMARY_LLM_PROVIDER",
@@ -149,8 +143,6 @@ __all__ = [
     "DEFAULT_DAYS_BACK",
     "DECAY_RATE",
     "QUOTES_PER_BATCH",
-    "LLM_CONTEXT_LENGTH",
-    "ensure_model",
     # Core
     "get_db",
     "get_embedding",

@@ -73,14 +73,8 @@ def _load_singleton() -> dict | None:
 
 _config = _load_singleton()
 
-# Legacy LM Studio constants (deleted in plan 26-5-21 Phase 4 — kept for
-# transcripts.py until that path migrates off the local LLM).
-LM_STUDIO_URL = _config["llm_url"] if _config else ""
-SUMMARY_MODEL = _config["llm_model"] if _config else ""
-
-# Primary/backup LLM config (plan 26-5-21 Phase 1 migration adds these columns).
-# Empty strings if columns don't exist yet — `complete_with_fallback()` will
-# raise a clear "run the migration" error in that case.
+# Primary/backup LLM config (kb_config columns). Empty strings if columns don't
+# exist yet — `complete_with_fallback()` raises a clear "run the migration" error.
 PRIMARY_LLM_URL = (_config.get("primary_llm_url") if _config else "") or ""
 PRIMARY_LLM_MODEL = (_config.get("primary_llm_model") if _config else "") or ""
 PRIMARY_LLM_PROVIDER = (_config.get("primary_llm_provider") if _config else "") or ""
@@ -88,33 +82,6 @@ BACKUP_LLM_URL = (_config.get("backup_llm_url") if _config else "") or ""
 BACKUP_LLM_MODEL = (_config.get("backup_llm_model") if _config else "") or ""
 BACKUP_LLM_PROVIDER = (_config.get("backup_llm_provider") if _config else "") or ""
 
-# LLM context length (set via LM Studio SDK at pipeline start — legacy)
-LLM_CONTEXT_LENGTH = 32768
-
 # Embedding (sentence-transformers, local)
 EMBED_MODEL = _config["embed_model"] if _config else "nomic-ai/nomic-embed-text-v1.5"
 EMBED_BACKEND = _config["embed_backend"] if _config else "onnx"
-
-
-def ensure_model():
-    """Ensure LM Studio has the model loaded with correct context length.
-
-    Call once at pipeline start (harvest, harvest-review), not per LLM call.
-    Idempotent — skips if model already loaded with sufficient context.
-    No-op when LM_STUDIO_URL points at a remote provider (e.g. z.ai).
-    """
-    if "api.z.ai" in (LM_STUDIO_URL or ""):
-        return
-
-    import lmstudio as lms
-
-    loaded = lms.list_loaded_models("llm")
-    for m in loaded:
-        if SUMMARY_MODEL in str(m):
-            ctx = m.get_context_length()
-            if ctx >= LLM_CONTEXT_LENGTH:
-                return  # Already good
-            print(f"  Model loaded with {ctx} context, need {LLM_CONTEXT_LENGTH}. Reloading...")
-            break
-
-    lms.llm(SUMMARY_MODEL, config={"contextLength": LLM_CONTEXT_LENGTH})

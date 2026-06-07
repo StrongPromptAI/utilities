@@ -1,16 +1,10 @@
 """LLM client dispatch.
 
-Two entry points coexist during the plan-26-5-21 transition:
+`complete_with_fallback(prompt, ...)` reads primary/backup from kb_config. Tries
+primary; on HTTP 5xx / timeout / 429, falls back to backup once. Any other error
+raises loudly. Used by `summarize.py`.
 
-- `complete_with_fallback(prompt, ...)` — the new path. Reads primary/backup
-  from kb_config. Tries primary; on HTTP 5xx / timeout / 429, falls back to
-  backup once. Any other error raises loudly. Used by `summarize.py`.
-
-- `complete(prompt, ...)` — legacy path. Routes to LM Studio (local) or z.ai
-  (cloud Anthropic-compatible) based on `LM_STUDIO_URL`. Used by harvest.py,
-  quotes.py, synthesis.py — modules slated for deletion in Phase 4.
-
-Provider strings supported by the new path:
+Provider strings supported:
   "openrouter" — base_url = https://openrouter.ai/api/v1, key from openrouter
   "requesty"   — base_url = https://router.requesty.ai/v1, key from requesty
   "anthropic"  — direct Anthropic Messages API, key from ANTHROPIC_API_KEY
@@ -29,11 +23,9 @@ from .config import (
     BACKUP_LLM_MODEL,
     BACKUP_LLM_PROVIDER,
     BACKUP_LLM_URL,
-    LM_STUDIO_URL,
     PRIMARY_LLM_MODEL,
     PRIMARY_LLM_PROVIDER,
     PRIMARY_LLM_URL,
-    SUMMARY_MODEL,
 )
 
 
@@ -143,38 +135,3 @@ def complete_with_fallback(
             prompt, max_tokens, temperature,
         )
         return content, BACKUP_LLM_MODEL
-
-
-# ---------------------------------------------------------------------------
-# Legacy path — complete() (deleted in plan 26-5-21 Phase 4)
-# ---------------------------------------------------------------------------
-
-def _is_zai(url: str) -> bool:
-    return "api.z.ai" in (url or "")
-
-
-def _zai_complete(prompt: str, max_tokens: int) -> str:
-    import anthropic
-    key = json.load(open(_KEYS_PATH))["z.ai"]
-    client = anthropic.Anthropic(api_key=key, base_url="https://api.z.ai/api/anthropic")
-    resp = client.messages.create(
-        model=SUMMARY_MODEL,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
-
-
-def complete(prompt: str, max_tokens: int = 400, temperature: float = 0.3) -> str:
-    """Legacy single-turn completion. Routes to LM Studio or z.ai."""
-    if _is_zai(LM_STUDIO_URL):
-        return _zai_complete(prompt, max_tokens=max_tokens)
-
-    client = OpenAI(base_url=LM_STUDIO_URL, api_key="not-needed")
-    response = client.chat.completions.create(
-        model=SUMMARY_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
-    return response.choices[0].message.content.strip()

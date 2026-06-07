@@ -82,6 +82,38 @@ DOCTRINE_BULLET_RE = re.compile(
 
 PLACEHOLDER_RE = re.compile(r"<[^>]+>")
 
+# --- Bash-error noise filter (skill-track) -----------------------------------
+# A non-zero bash exit is logged as `bash_error`, but most are exploratory or
+# control-flow, not a knowledge gap worth a skill: an existence check that
+# returns "not found", a typo'd command, a one-off psql/python error hit while
+# debugging. Without this filter every such row became a queue candidate — the
+# 267-entry backlog that triggered this fix (2026-06-07). Two guards:
+#   (1) MISS patterns — file/command "not found": an existence check, never a wall.
+#   (2) Recurrence floor — a single occurrence (count < 2) is an exploration, not
+#       a repeated stumbling block. DEFERRED, not suppressed: a one-off whose
+#       fingerprint isn't ledgered re-surfaces from a later harvest once it
+#       recurs (count >= 2). NB: skill_match.score is deliberately NOT used here
+#       — empirically it lands 0.5-0.9 for *every* error (the embedder always
+#       finds some nearby skill chunk), so it can't discriminate noise. The
+#       repeat count is the signal: it tracks how many times Claude actually hit
+#       the wall. Human-judgment one-offs go through brief candidates, not here.
+_BASH_MISS_RE = re.compile(
+    r"no such file or directory"
+    r"|command not found"
+    r"|: not found\b"
+    r"|not a directory",
+    re.IGNORECASE,
+)
+
+
+def _is_nonskill_bash_noise(err_text: str, count: int) -> bool:
+    """True when a logged error bucket is exploratory noise, not a skill candidate."""
+    if _BASH_MISS_RE.search(err_text or ""):
+        return True
+    if count < 2:  # one-off exploration, not a repeated stumbling block
+        return True
+    return False
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -356,9 +388,15 @@ def _format_jsonl_candidate(project: str, key: str, bucket: dict) -> str | None:
     if event_types == {"doctrine_match"}:
         return None  # doctrine rows go to the doctrine section, not skill
 
+    skill_match = bucket["skill_match"]
+    if _is_nonskill_bash_noise(
+        bucket["error_text"] or bucket["command_or_context"] or "",
+        bucket.get("count", 1),
+    ):
+        return None  # exploratory/transient bash noise — not a skill candidate
+
     err = bucket["error_text"] or bucket["command_or_context"] or "(no text)"
     err_one_line = re.sub(r"\s+", " ", err.strip())[:200]
-    skill_match = bucket["skill_match"]
     target = (
         f"existing skill `{skill_match['skill']}` (close miss, score {skill_match['score']:.2f})"
         if skill_match and skill_match.get("score", 0) > 0.5
@@ -463,8 +501,64 @@ def _existing_doctrine_keys(queue_text: str) -> set[str]:
     return keys
 
 
+_QUEUE_BLOCK_RE = re.compile(
+    r"^## \d{4}-\d{2}-\d{2} — \[.*?(?=^## \d{4}-\d{2}-\d{2} — \[|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _prune_queue(queue_text: str) -> tuple[str, int, int]:
+    """Re-evaluate the EXISTING JSONL-sourced skill candidates against the noise
+    filter and drop the exploratory ones — the one-time cleanup companion to the
+    emit-time guard in `_format_jsonl_candidate`, using the same predicate.
+
+    Brief-sourced candidates (`[from <brief>]`) and the entire Doctrine section
+    are always kept. Returns (new_text, kept, dropped)."""
+    s_idx = queue_text.find("## Skill Candidates")
+    if s_idx < 0:
+        return queue_text, 0, 0
+    d_idx = queue_text.find("\n## Doctrine Candidates")
+    if d_idx < 0:
+        d_idx = len(queue_text)
+    head, skill_section, tail = (
+        queue_text[:s_idx], queue_text[s_idx:d_idx], queue_text[d_idx:],
+    )
+
+    first = _QUEUE_BLOCK_RE.search(skill_section)
+    if not first:
+        return queue_text, 0, 0
+    preamble = skill_section[: first.start()]
+
+    kept_blocks: list[str] = []
+    kept = dropped = 0
+    for m in _QUEUE_BLOCK_RE.finditer(skill_section):
+        block = m.group(0)
+        header = block.split("\n", 1)[0]
+        if "[from " in header:  # human-authored brief candidate — always keep
+            kept_blocks.append(block)
+            kept += 1
+            continue
+        oneliner_m = re.search(r"^\*\*One-liner\*\*: (.+)$", block, re.MULTILINE)
+        count_m = re.search(r"— (\d+) hit", block)
+        oneliner = oneliner_m.group(1) if oneliner_m else ""
+        count = int(count_m.group(1)) if count_m else 1
+        if _is_nonskill_bash_noise(oneliner, count):
+            dropped += 1
+        else:
+            kept_blocks.append(block)
+            kept += 1
+
+    return head + preamble + "".join(kept_blocks) + tail, kept, dropped
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="harvest.py")
+    p.add_argument(
+        "--prune-queue", action="store_true",
+        help="One-time cleanup: re-evaluate existing JSONL skill candidates "
+             "against the noise filter and drop the exploratory ones. Honors "
+             "--dry-run. Brief candidates + the doctrine section are untouched.",
+    )
     p.add_argument(
         "--dry-run", action="store_true",
         help="Print what would be appended; don't write the queue file.",
@@ -480,6 +574,18 @@ def main() -> int:
              "triage so already-triaged candidates never re-emit.",
     )
     args = p.parse_args()
+
+    if args.prune_queue:
+        queue_text = QUEUE_PATH.read_text() if QUEUE_PATH.exists() else ""
+        new_text, kept, dropped = _prune_queue(queue_text)
+        new_text = _update_queue_header(new_text, existing_only=False)
+        if args.dry_run:
+            print(f"# DRY RUN --prune-queue: would keep {kept}, drop {dropped} "
+                  f"JSONL skill candidate(s).")
+            return 0
+        QUEUE_PATH.write_text(new_text)
+        print(f"harvest --prune-queue: kept {kept}, dropped {dropped} noise candidate(s).")
+        return 0
 
     cutoff = datetime.now(timezone.utc).astimezone().replace(
         microsecond=0,

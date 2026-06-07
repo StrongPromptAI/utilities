@@ -1,6 +1,7 @@
 {
   "_comment": "Lever-2 pronunciation overrides for the TTS pipeline (doc_to_speech + doc_to_podcast). Keys are whole words, matched case-insensitively, and replaced in the text BEFORE synthesis. Values are respellings that Kokoro's espeak phonemizer pronounces the way we want. This is the text-level lever; for surgical IPA control see Lever 3 (kokoro-onnx create(is_phonemes=True)). Validate a new entry by comparing phonemes: cd services/tts && uv run python -c \"from kokoro_onnx.tokenizer import Tokenizer as T; t=T(); print('want', t.phonemize('<respelling>')); print('base', t.phonemize('<word>'))\" — a good override changes only the target vowel/stress, leaving the rest of the phoneme string identical.",
   "overrides": {
-    "irrevocable": "irrevohcable"
+    "irrevocable": "irrevohcable",
+    "prehab": "preehab"
   }
 }

@@ -27,7 +27,14 @@ Usage:
   # Strip file paths / names / scaffolding via a cheap LLM so you hear only the meat:
   uv run python scripts/doc_to_speech.py PLAN.md --scrub --speed 1.1
 
-  # See exactly what will be spoken — no synthesis (with --scrub, shows cleaned text):
+  # Executive recap for a non-technical leadership audience — shorter, low/no jargon,
+  # business/pricing/branding/market-insight boosted over detail, all paths/filenames
+  # scrubbed. Implies an LLM pass; output auto-named "<doc>-exec.mp3" so it sits beside
+  # the full technical reading rather than clobbering it:
+  uv run python scripts/doc_to_speech.py PREHAB.md --audience exec
+
+  # See exactly what will be spoken — no synthesis (with --scrub or --audience exec,
+  # shows the LLM-transformed text):
   uv run python scripts/doc_to_speech.py PLAN.md --scrub --dry-run
 
   # Use a locally-running TTS (services/tts on :8102, auth-off in dev):
@@ -82,8 +89,10 @@ LOCAL_TTS_URL = "http://localhost:8102"
 OXP_FILES_FALLBACK_URL = "https://oxp.files.strongprompt.ai"
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_SCRUB_MODEL = "google/gemini-3.5-flash"  # cheap; matches kb's backup LLM
-SCRUB_SEG_CHARS = 6000  # per-call input cap so output never truncates
+DEFAULT_SCRUB_MODEL = "google/gemini-3.5-flash"  # cheap; matches kb's backup LLM — mechanical cleanup
+DEFAULT_EXEC_MODEL = "anthropic/claude-opus-4.8"  # exec recap needs judgment — matches doc_to_podcast's script model
+SCRUB_SEG_CHARS = 6000   # scrub output ≈ input size → cap input to bound output tokens
+EXEC_SEG_CHARS = 24000   # exec recap output ≪ input → input can be larger (most docs → one pass)
 
 KOKORO_SAMPLE_RATE = 24000  # Kokoro's native PCM rate (see services/tts/app.py)
 
@@ -142,7 +151,11 @@ def _openrouter_key() -> str:
     _die("No OpenRouter key for --scrub. Expected ~/.config/keys.json → openrouter.")
 
 
-# ── LLM scrub: paths / filenames / scaffolding → natural spoken prose ─────────────
+# ── LLM passes: audience-specific rewrites of the speakable prose ─────────────────
+#
+# Two audiences, two system prompts, one request path (_llm_pass):
+#   technical (default) — optional --scrub: content-preserving cleanup, full reading.
+#   exec               — always: a short, jargon-free executive recap.
 
 _SCRUB_SYSTEM = (
     "You are preparing a document to be read aloud as audio. Rewrite the text so it "
@@ -154,13 +167,38 @@ _SCRUB_SYSTEM = (
     "preamble, or markers. Output only the cleaned text."
 )
 
+_EXEC_SYSTEM = (
+    "You are turning an internal product/strategy document into a short EXECUTIVE audio "
+    "recap for a senior, non-technical business audience (founders, executives, "
+    "investors) who have little time and no patience for jargon. Produce a tight spoken "
+    "recap, NOT a full reading.\n\n"
+    "Do:\n"
+    "- Open with the business takeaway. Boost and lead with business model, "
+    "pricing / monetization strategy, branding and positioning, market insight, the "
+    "competitive seam being entered, and the assumptions the strategy rests on.\n"
+    "- Translate any technical, clinical, or product-internal jargon into plain language "
+    "an executive would actually use; drop terms that don't carry business meaning.\n"
+    "- Be substantially shorter than the source — keep only what a busy executive needs "
+    "to grasp the thesis, the bet, and the open decisions.\n\n"
+    "Do NOT:\n"
+    "- Mention or read aloud ANY file path, file name, document name, section pointer, "
+    "URL, code, or cross-reference scaffolding (e.g. 'see X dot M D', 'per the registry'). "
+    "Remove them entirely — convey the idea, never the pointer.\n"
+    "- Dwell on implementation detail, step-by-step procedure, or fine-grained clinical / "
+    "technical specifics unless they directly carry business meaning.\n"
+    "- Invent numbers or prices. Use only figures present in the source; if the source "
+    "defers a price, say it is still open rather than inventing one.\n"
+    "- Add headings, bullets, labels, preamble, or meta-commentary. Output ONLY the recap "
+    "as flowing prose meant to be heard, not seen."
+)
 
-def _segment_for_scrub(text: str) -> list[str]:
-    """Split on paragraph breaks, packing into ≤ SCRUB_SEG_CHARS segments so each
-    LLM call's output stays well under the model's max-tokens (no truncation)."""
+
+def _segment(text: str, seg_chars: int) -> list[str]:
+    """Split on paragraph breaks, packing into ≤ seg_chars segments so each LLM call's
+    output stays well under the model's max-tokens (no truncation)."""
     segs, cur = [], ""
     for para in text.split("\n\n"):
-        if cur and len(cur) + 2 + len(para) > SCRUB_SEG_CHARS:
+        if cur and len(cur) + 2 + len(para) > seg_chars:
             segs.append(cur)
             cur = para
         else:
@@ -170,19 +208,25 @@ def _segment_for_scrub(text: str) -> list[str]:
     return segs
 
 
-def _llm_scrub(text: str, *, model: str, api_key: str) -> str:
+def _llm_pass(
+    text: str, *, system: str, model: str, api_key: str,
+    seg_chars: int, max_tokens: int, label: str,
+) -> str:
+    """Run one LLM rewrite over the speakable prose, segmenting so each call's output
+    never truncates. `system` selects the transform (content-preserving scrub vs.
+    executive recap); the request shape is identical across audiences — one happy path."""
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    cleaned: list[str] = []
-    segments = _segment_for_scrub(text)
+    out_parts: list[str] = []
+    segments = _segment(text, seg_chars)
     for i, seg in enumerate(segments, 1):
         if len(segments) > 1:
-            _log(f"   scrub segment {i}/{len(segments)}…")
+            _log(f"   {label} segment {i}/{len(segments)}…")
         body = {
             "model": model,
             "temperature": 0,
-            "max_tokens": 8000,
+            "max_tokens": max_tokens,
             "messages": [
-                {"role": "system", "content": _SCRUB_SYSTEM},
+                {"role": "system", "content": system},
                 {"role": "user", "content": seg},
             ],
         }
@@ -193,8 +237,8 @@ def _llm_scrub(text: str, *, model: str, api_key: str) -> str:
                 if r.status_code == 200:
                     out = r.json()["choices"][0]["message"]["content"].strip()
                     if not out:
-                        _die("scrub LLM returned empty content")
-                    cleaned.append(out)
+                        _die(f"{label} LLM returned empty content")
+                    out_parts.append(out)
                     break
                 if r.status_code in (401, 403):
                     _die(f"OpenRouter auth rejected ({r.status_code}): {r.text[:200]}")
@@ -204,8 +248,8 @@ def _llm_scrub(text: str, *, model: str, api_key: str) -> str:
             if attempt < 2:
                 time.sleep(1.0 * (attempt + 1))
         else:
-            _die(f"scrub LLM failed after 3 attempts: {last_err}")
-    return "\n\n".join(cleaned)
+            _die(f"{label} LLM failed after 3 attempts: {last_err}")
+    return "\n\n".join(out_parts)
 
 
 # ── HS256 JWT (stdlib — same shape as shared_auth/token.py and the files session) ─
@@ -473,8 +517,10 @@ def upload_to_oxp(
 
 # ── Filename helpers (match services/files _safe_filename rules) ─────────────────
 
-def _safe_mp3_name(doc_path: Path, override: str | None) -> str:
+def _safe_mp3_name(doc_path: Path, override: str | None, audience: str = "technical") -> str:
     name = override or doc_path.stem
+    if not override and audience == "exec":
+        name = f"{name}-exec"          # sit beside the full reading, not clobber it
     name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")
     if not name:
         name = "document"
@@ -503,13 +549,23 @@ def main() -> None:
     p.add_argument("--bitrate", default="64k", help="MP3 bitrate (default 64k, good for speech).")
     p.add_argument("--name", help="Output filename override (without needing .mp3).")
     p.add_argument("--title", help="ID3 title (default: doc's first H1, else filename).")
+    p.add_argument("--audience", choices=["technical", "exec"], default="technical",
+                   help="Who the reading is for. 'technical' (default): the full document, "
+                        "read verbatim (use --scrub to also strip paths/scaffolding). "
+                        "'exec': an LLM-generated executive recap — shorter, low/no jargon, "
+                        "business/pricing/branding/market-insight boosted over detail, all "
+                        "paths and file names scrubbed. 'exec' implies an LLM pass and "
+                        "auto-suffixes the output filename with '-exec'.")
     p.add_argument("--scrub", action="store_true",
-                   help="LLM cleanup pass: strip file paths/names, code/CLI fragments, URLs, "
-                        "and cross-ref scaffolding so you hear only the substance. (Frontmatter "
-                        "+ markdown are already stripped deterministically; this is the polish "
-                        "pass. NOT PHI scrubbing — that's `kb scrub`.)")
+                   help="(technical audience) LLM cleanup pass: strip file paths/names, "
+                        "code/CLI fragments, URLs, and cross-ref scaffolding so you hear only "
+                        "the substance, WITHOUT summarizing. (Frontmatter + markdown are already "
+                        "stripped deterministically; this is the polish pass. NOT PHI scrubbing — "
+                        "that's `kb scrub`. Redundant with --audience exec, which already scrubs.)")
     p.add_argument("--scrub-model", default=DEFAULT_SCRUB_MODEL,
-                   help=f"OpenRouter model for --scrub (default: {DEFAULT_SCRUB_MODEL}).")
+                   help=f"OpenRouter model for the --scrub pass (default: {DEFAULT_SCRUB_MODEL}).")
+    p.add_argument("--exec-model", default=DEFAULT_EXEC_MODEL,
+                   help=f"OpenRouter model for the --audience exec recap (default: {DEFAULT_EXEC_MODEL}).")
     p.add_argument("--local-tts", action="store_true", help="Use localhost:8102 (no token).")
     p.add_argument("--tts-url", help="Override the TTS base URL entirely.")
     p.add_argument("--email", default=os.environ.get("OXP_FILES_EMAIL", "doc-to-speech@oxp.files"),
@@ -526,10 +582,25 @@ def main() -> None:
         _die("--speed must be between 0.5 and 2.0")
 
     raw = args.doc.read_text(encoding="utf-8")
-    speakable, h1 = normalize_markdown(raw)
-    if args.scrub:
+    # Exec recaps never read code aloud — drop the "Code block omitted." cue for them.
+    code_cue = "" if args.audience == "exec" else "Code block omitted."
+    speakable, h1 = normalize_markdown(raw, code_cue=code_cue)
+    if args.audience == "exec":
+        if args.scrub:
+            _log("ℹ️  --scrub is redundant with --audience exec (the exec recap already strips paths/names).")
+        _log(f"👔 exec recap pass ({args.exec_model}) — shorter, jargon-free, business-boosted, paths scrubbed…")
+        speakable = _llm_pass(
+            speakable, system=_EXEC_SYSTEM, model=args.exec_model,
+            api_key=_openrouter_key(), seg_chars=EXEC_SEG_CHARS,
+            max_tokens=4000, label="exec recap",
+        )
+    elif args.scrub:
         _log(f"🧽 LLM scrub pass ({args.scrub_model}) — paths/filenames/scaffolding…")
-        speakable = _llm_scrub(speakable, model=args.scrub_model, api_key=_openrouter_key())
+        speakable = _llm_pass(
+            speakable, system=_SCRUB_SYSTEM, model=args.scrub_model,
+            api_key=_openrouter_key(), seg_chars=SCRUB_SEG_CHARS,
+            max_tokens=8000, label="scrub",
+        )
     if not args.no_pron:
         overrides = load_pron_overrides()
         if overrides:
@@ -539,7 +610,12 @@ def main() -> None:
     if not chunks:
         _die("Nothing speakable after normalization (document is empty or all code/markup).")
 
-    title = args.title or h1 or args.doc.stem
+    if args.title:
+        title = args.title
+    else:
+        title = h1 or args.doc.stem
+        if args.audience == "exec":
+            title = f"{title} — exec recap"
     total_chars = sum(len(c) for c in chunks)
     _log(f"📄 {args.doc.name}: {len(raw)} raw chars → {total_chars} speakable → {len(chunks)} chunks")
 
@@ -599,7 +675,7 @@ def main() -> None:
         return
 
     # Upload to oxp.files.
-    filename = _safe_mp3_name(args.doc, args.name)
+    filename = _safe_mp3_name(args.doc, args.name, args.audience)
     _log("🔑 pulling oxp-files JWT_SECRET + PUBLIC_BASE_URL from Railway…")
     files_vars = _railway_vars(**{
         "project": OXP_KB["project"],

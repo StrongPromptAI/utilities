@@ -60,7 +60,7 @@ def _load_engine():
 
 mp = _load_engine()
 
-DEFAULT_SYNTH_MODEL = "anthropic/claude-sonnet-4.6"   # strain verdict + opener (judgment tier)
+DEFAULT_SYNTH_MODEL = "anthropic/claude-opus-4.8"   # strain verdict + opener (judgment tier — flagship)
 DOCTOR_PROFILE = Path("~/repo_docs/thj/stakeholders/doctor.md").expanduser()
 
 

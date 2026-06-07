@@ -6,8 +6,11 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 
+# requirements.txt is a pinned + hashed lock (uv pip compile from requirements.in).
+# --require-hashes makes the build fail closed: exact versions, integrity-verified,
+# no silent forward-resolution into a freshly-poisoned release. See ironworm_andfriends L2.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --require-hashes --no-cache-dir -r requirements.txt
 
 # Bake faster-whisper model to an explicit path. Runtime loads from disk only — no HF Hub calls.
 # Rationale: runtime hf_hub_download / snapshot_download causes a metadata check against HF Hub.

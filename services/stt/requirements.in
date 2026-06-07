@@ -1,0 +1,10 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+numpy>=1.24.0
+sherpa-onnx>=1.10.0
+# sherpa-onnx >=1.13 splits its native binary into a separate sherpa-onnx-core
+# package. uv's --universal resolve omits it, which breaks --require-hashes; pin it
+# explicitly so the binary half is version-locked + hash-verified too.
+sherpa-onnx-core>=1.13.0
+huggingface-hub>=0.23.0
+PyJWT>=2.8.0

@@ -10,8 +10,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends espeak-ng libsndfile1 curl \
     && rm -rf /var/lib/apt/lists/*
 
+# requirements.txt is a pinned + hashed lock (uv pip compile from requirements.in).
+# --require-hashes makes the build fail closed: exact versions, integrity-verified,
+# no silent forward-resolution into a freshly-poisoned release. See ironworm_andfriends L2.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --require-hashes --no-cache-dir -r requirements.txt
 
 # Bake Kokoro-82M ONNX model + voices binary to explicit paths from the
 # kokoro-onnx GitHub release (the canonical source per upstream README).

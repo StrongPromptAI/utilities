@@ -4,8 +4,11 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# requirements.txt is a pinned + hashed lock (uv pip compile from requirements.in).
+# --require-hashes makes the build fail closed: exact versions, integrity-verified,
+# no silent forward-resolution into a freshly-poisoned release. See ironworm_andfriends L2.
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --require-hashes --no-cache-dir -r requirements.txt
 
 # Pre-cache model weights + tokenizer during build to explicit paths (not HF cache)
 # Runtime loads directly from these paths — no HF Hub lookups at startup.

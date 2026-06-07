@@ -343,6 +343,32 @@ def chunk_text(text: str, max_chars: int) -> list[str]:
     return chunks
 
 
+# ── Pronunciation overrides (Lever 2: text respelling before synth) ──────────────
+
+PRON_OVERRIDES_PATH = Path(__file__).resolve().with_name("pron_overrides.json")
+
+
+def load_pron_overrides(path: Path | None = None) -> dict[str, str]:
+    """Load the word→respelling map from pron_overrides.json (the 'overrides' key).
+    Missing file → empty map (feature is opt-out-by-absence). Kokoro's espeak
+    phonemizer mishears some proper nouns/jargon; this rewrites them to a spelling
+    it says correctly, deterministically, regardless of what the LLM wrote."""
+    p = path or PRON_OVERRIDES_PATH
+    if not p.exists():
+        return {}
+    data = json.loads(p.read_text(encoding="utf-8"))
+    ov = data.get("overrides", {}) if isinstance(data, dict) else {}
+    return {str(k): str(v) for k, v in ov.items() if k and not str(k).startswith("_")}
+
+
+def apply_pron_overrides(text: str, overrides: dict[str, str]) -> str:
+    """Whole-word, case-insensitive replacement. Word boundaries keep 'irrevocable'
+    from matching inside a larger token."""
+    for word, spoken in overrides.items():
+        text = re.sub(rf"\b{re.escape(word)}\b", spoken, text, flags=re.IGNORECASE)
+    return text
+
+
 # ── TTS synthesis ────────────────────────────────────────────────────────────────
 
 def synthesize(
@@ -467,7 +493,9 @@ def main() -> None:
     p.add_argument("doc", type=Path, help="Path to the source document (markdown or text).")
     p.add_argument("--folder", default="briefings",
                    help="oxp.files folder (default: briefings — the private podcast folder).")
-    p.add_argument("--voice", default="af_heart", help="Kokoro voice (must be in TTS allowlist).")
+    p.add_argument("--voice", default="af_nova", help="Kokoro voice (must be in TTS allowlist).")
+    p.add_argument("--no-pron", action="store_true",
+                   help="Disable the Lever-2 pronunciation overrides (scripts/pron_overrides.json).")
     p.add_argument("--speed", type=float, default=1.0, help="0.5–2.0 (default 1.0).")
     p.add_argument("--language", default="en-us")
     p.add_argument("--max-chars", type=int, default=700, help="Per-chunk cap, < TTS's 800.")
@@ -502,6 +530,11 @@ def main() -> None:
     if args.scrub:
         _log(f"🧽 LLM scrub pass ({args.scrub_model}) — paths/filenames/scaffolding…")
         speakable = _llm_scrub(speakable, model=args.scrub_model, api_key=_openrouter_key())
+    if not args.no_pron:
+        overrides = load_pron_overrides()
+        if overrides:
+            speakable = apply_pron_overrides(speakable, overrides)
+            _log(f"🗣️  applied {len(overrides)} pronunciation override(s)")
     chunks = chunk_text(speakable, args.max_chars)
     if not chunks:
         _die("Nothing speakable after normalization (document is empty or all code/markup).")

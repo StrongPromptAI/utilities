@@ -24,7 +24,7 @@ from ingest_reference_doc import ingest_reference_doc
 THJ = Path.home() / "repos/thj/symlink_docs"
 
 DOCTRINE = [
-    "project/ALERT.md", "project/BRANDING.md", "project/CARE_TEAM_MGMT.md",
+    "project/BRANDING.md", "project/CARE_TEAM_MGMT.md",  # ALERT.md retired into CARE_TEAM_MGMT.md (2026-06-06)
     "project/CONVERSATION_DESIGN.md", "project/DATA_PROTECTION.md", "project/EQUIPMENT_CORPUS.md",
     "project/FIRST_100.md", "project/FRICTION.md", "project/MVP.md", "project/PRD.md",
     "project/PREHAB.md", "project/REVENUE.md", "project/VOICE_DESIGN.md",

@@ -15,6 +15,7 @@ Catalogs of this repo's pieces. Know they exist; read the relevant one on demand
 | What each utility is, who consumes it, where its code lives | [`symlink_docs/registries/UTILS_REGISTRY.md`](symlink_docs/registries/UTILS_REGISTRY.md) |
 | Where data lives (the shared Postgres schema map, S3, JSON, configs) | [`symlink_docs/registries/DATA_REGISTRY.md`](symlink_docs/registries/DATA_REGISTRY.md) |
 | How to auth into a surface | [`symlink_docs/registries/AUTH_REGISTRY.md`](symlink_docs/registries/AUTH_REGISTRY.md) |
+| Which LLM a surface uses, its router, and where the model ID is configured | [`symlink_docs/registries/LLM_REGISTRY.md`](symlink_docs/registries/LLM_REGISTRY.md) |
 | What a utility *is and why* (per-utility deep context) | [`symlink_docs/project/`](symlink_docs/project/) — `PRD_<utility>.md` (index: `project/README.md`) |
 
 The sections below this hold the operational **values** the registries delegate to (Railway IDs, var-pulls, the token-mint contract). Two known traps the registries resolve: **hj-roadmap source is in `symlink_docs/plans/hj_roadmap/`, not `~/repos`**; and **"kb" is overloaded** (the CLI vs the Postgres vs the chatbot's corpora) — see DATA_REGISTRY §1.

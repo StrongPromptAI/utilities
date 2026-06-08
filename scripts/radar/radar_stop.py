@@ -109,6 +109,32 @@ def main() -> int:
 
     try:
         state_dir = _project_state_dir()
+
+        # Brief-exempt opt-out (CLAUDE.md § Skill Lifecycle): planning-only and
+        # cleanup/maintenance/consolidation sessions don't owe a session brief —
+        # the plan doc or commit messages ARE the harvest input. When the session
+        # set a `brief-exempt.txt` marker, skip writing brief-pending entirely,
+        # clear any stale pending + doctrine markers, consume the exempt file, and
+        # return. The exemption is explicit-and-fail-safe: absent the marker the
+        # default is still to owe a brief, so a real feature session can't silently
+        # lose its brief. The marker may name the reason (e.g. "planning",
+        # "cleanup") for the log; any content counts as exempt.
+        exempt = state_dir / "brief-exempt.txt"
+        if exempt.exists():
+            for stale in ("brief-pending.txt", "doctrine-catches-pending.txt"):
+                try:
+                    (state_dir / stale).unlink()
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    pass
+            try:
+                exempt.unlink()
+            except Exception:
+                pass
+            _touch_heartbeat()
+            return 0
+
         marker = state_dir / "brief-pending.txt"
         marker.write_text(_now_iso() + "\n")
 

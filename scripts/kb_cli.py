@@ -343,7 +343,8 @@ def add_notes(call_id, notes, append):
 @click.option("--max-tokens", type=int, default=8000, help="LLM output cap (default: 8000)")
 @click.option("--edit", is_flag=True, help="Open the most-recent stored summary in $EDITOR for in-place editing (UPDATEs the row on save)")
 @click.option("--id", "summary_id", type=int, help="With --edit: edit a specific summary id instead of most-recent")
-def summary_cmd(call_id, phi, max_tokens, edit, summary_id):
+@click.option("--lens", "lens_path", type=click.Path(exists=True), help="Lens file dictating priming context + output contract (e.g. a recap or extraction lens). Default: business-meeting template.")
+def summary_cmd(call_id, phi, max_tokens, edit, summary_id, lens_path):
     """Generate or edit a meeting summary.
 
     Default: generate a comprehensive markdown summary for the call
@@ -393,12 +394,14 @@ def summary_cmd(call_id, phi, max_tokens, edit, summary_id):
         _print_llm_banner()
         if phi:
             click.secho("PHI mode: transcript will be scrubbed before LLM call", fg="yellow")
+        if lens_path:
+            click.secho(f"Lens: {Path(lens_path).name}", fg="cyan")
         click.secho(f"Generating summary for call {call_id}...", fg="blue")
-        new_id = generate_summary(call_id, phi=phi, max_tokens=max_tokens)
+        new_id = generate_summary(call_id, phi=phi, max_tokens=max_tokens, lens_path=lens_path)
         summary = get_summary(call_id, summary_id=new_id)
         click.secho(
             f"\nSaved meeting_summaries.id={new_id} "
-            f"(model={summary['model_used']}, phi_scrubbed={summary['phi_scrubbed']})",
+            f"(model={summary['model_used']}, phi_scrubbed={summary['phi_scrubbed']}, lens={summary.get('lens')})",
             fg="green",
         )
     except Exception as e:

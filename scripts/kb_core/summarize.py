@@ -15,6 +15,8 @@ Public entry: `generate_summary(call_id, *, phi=False, model="primary")`.
 """
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Tuple
 
 import psycopg
@@ -64,6 +66,47 @@ def _format_transcript(rows: list[dict]) -> str:
     return "\n".join(f"{r['speaker'] or 'Unknown'}: {r['text']}" for r in rows)
 
 
+# Inline directive: a line `@include <path>` in a lens file is replaced by that
+# file's contents. Paths resolve relative to the lens file first, then as-is.
+_INCLUDE_RE = re.compile(r'^@include\s+(.+)$', re.MULTILINE)
+
+
+def _build_lens_prompt(lens_path: str, transcript: str) -> str:
+    """Build a lens-driven prompt.
+
+    The lens file is the full instruction (priming + objective + output contract
+    + rules). `@include <path>` lines are inlined verbatim — that's how priming
+    context docs (stakeholder/project docs) are placed "top of mind". The
+    transcript is substituted at `{transcript}` if present, else appended.
+
+    Genericity: the engine carries no per-purpose logic — swap the lens file and
+    the output shape changes. NOT .format() — lens/doc text may contain literal
+    braces; only the exact `{transcript}` token is substituted (via .replace).
+    """
+    lens_file = Path(lens_path)
+    text = lens_file.read_text()
+
+    def _inline(m: re.Match) -> str:
+        raw = m.group(1).strip()
+        p = lens_file.parent / raw
+        if not p.exists():
+            p = Path(raw)
+        if not p.exists():
+            raise FileNotFoundError(f"Lens @include not found: {raw!r} (in {lens_path})")
+        body = p.read_text()
+        return f"\n<<< BEGIN {p.name} >>>\n{body}\n<<< END {p.name} >>>\n"
+
+    text = _INCLUDE_RE.sub(_inline, text)
+
+    if "{transcript}" in text:
+        return text.replace("{transcript}", transcript)
+    return (
+        text
+        + "\n\nTranscript (Speaker: utterance, one turn per line):\n\n"
+        + transcript
+    )
+
+
 def _load_chunks(call_id: int) -> list[dict]:
     """Return chunk rows for a call, ordered. Raises if call has no chunks."""
     with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
@@ -84,15 +127,16 @@ def _persist_summary(
     content: str,
     model_used: str,
     phi_scrubbed: bool,
+    lens: str | None = None,
 ) -> int:
     """Insert into meeting_summaries; return new id."""
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO meeting_summaries "
-                "(call_id, outline_id, content, model_used, phi_scrubbed) "
-                "VALUES (%s, NULL, %s, %s, %s) RETURNING id",
-                (call_id, content, model_used, phi_scrubbed),
+                "(call_id, outline_id, content, model_used, phi_scrubbed, lens) "
+                "VALUES (%s, NULL, %s, %s, %s, %s) RETURNING id",
+                (call_id, content, model_used, phi_scrubbed, lens),
             )
             new_id = cur.fetchone()[0]
             conn.commit()
@@ -104,26 +148,36 @@ def generate_summary(
     *,
     phi: bool = False,
     max_tokens: int = 8000,
+    lens_path: str | None = None,
 ) -> int:
-    """Generate and persist a meeting summary. Returns the new row id."""
+    """Generate and persist a meeting summary. Returns the new row id.
+
+    Default (no lens): the business-meeting PROMPT_TEMPLATE. With `lens_path`:
+    the lens file dictates priming + objective + output contract; the engine
+    carries no per-purpose logic (swap the lens, change the output). One happy
+    path, parameterized — not a fork.
+    """
     chunk_rows = _load_chunks(call_id)
     transcript = _format_transcript(chunk_rows)
+    lens_name = Path(lens_path).name if lens_path else None
+
+    def _build(t: str) -> str:
+        return _build_lens_prompt(lens_path, t) if lens_path else PROMPT_TEMPLATE.format(transcript=t)
 
     if phi:
         from .scrub import rehydrate, scrub
         scrubbed_transcript, mapping = scrub(transcript)
-        prompt = PROMPT_TEMPLATE.format(transcript=scrubbed_transcript)
-        content, model_used = complete_with_fallback(prompt, max_tokens=max_tokens)
+        content, model_used = complete_with_fallback(_build(scrubbed_transcript), max_tokens=max_tokens)
         content = rehydrate(content, mapping)
     else:
-        prompt = PROMPT_TEMPLATE.format(transcript=transcript)
-        content, model_used = complete_with_fallback(prompt, max_tokens=max_tokens)
+        content, model_used = complete_with_fallback(_build(transcript), max_tokens=max_tokens)
 
     return _persist_summary(
         call_id=call_id,
         content=content,
         model_used=model_used,
         phi_scrubbed=phi,
+        lens=lens_name,
     )
 
 
@@ -168,13 +222,13 @@ def get_summary(call_id: int, summary_id: int | None = None) -> dict | None:
         with conn.cursor() as cur:
             if summary_id is not None:
                 cur.execute(
-                    "SELECT id, call_id, content, model_used, phi_scrubbed, created_at "
+                    "SELECT id, call_id, content, model_used, phi_scrubbed, lens, created_at "
                     "FROM meeting_summaries WHERE id = %s",
                     (summary_id,),
                 )
             else:
                 cur.execute(
-                    "SELECT id, call_id, content, model_used, phi_scrubbed, created_at "
+                    "SELECT id, call_id, content, model_used, phi_scrubbed, lens, created_at "
                     "FROM meeting_summaries WHERE call_id = %s "
                     "ORDER BY created_at DESC LIMIT 1",
                     (call_id,),

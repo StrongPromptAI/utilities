@@ -68,9 +68,16 @@ def detect_and_extract(file_path: str) -> tuple[str, str]:
 def preprocess_transcript(file_path: str, merge_speaker_turns: bool = True, filter_fillers: bool = True) -> dict:
     """Preprocess a transcript file (any supported format).
 
-    Detects format (DOCX, CSV, plaintext), extracts text, strips timestamps,
+    Detects format (DOCX, CSV, plaintext, JSON), extracts text, ALWAYS strips
+    timestamps (protocol: per-turn start/end seconds are never carried into
+    processing or storage; only the overall call date is kept, on the call row),
     preserves speaker attribution, optionally merges consecutive turns by the
     same speaker, filters out agreement fillers.
+
+    Also returns `raw_transcript`: the full diarized record (every turn, speaker-
+    attributed, timestamp-free, fillers RETAINED) — the verbatim "what was said"
+    artifact, stored on calls.raw_transcript. Distinct from `text`, which is the
+    filler-filtered + merged form that feeds chunking/embedding.
 
     Args:
         file_path: Path to transcript file (DOCX, CSV, or plaintext)
@@ -123,12 +130,10 @@ def preprocess_transcript(file_path: str, merge_speaker_turns: bool = True, filt
             text = entry.get("text", "").strip()
             if speaker and text:
                 participants.add(speaker)
-                row = {"speaker": speaker, "text": text}
-                if "start" in entry:
-                    row["start"] = float(entry["start"])
-                if "end" in entry:
-                    row["end"] = float(entry["end"])
-                all_rows.append(row)
+                # Protocol: strip timestamps before processing. We keep speaker +
+                # text only; per-turn start/end seconds are intentionally dropped
+                # (the overall call date lives on calls.call_date).
+                all_rows.append({"speaker": speaker, "text": text})
     elif fmt == 'csv':
         # Parse CSV - Dialpad format: "timestamp","speaker","text"
         reader = csv.reader(StringIO(raw_text))
@@ -190,59 +195,38 @@ def preprocess_transcript(file_path: str, merge_speaker_turns: bool = True, filt
         else:
             row["_status"] = "keep"
 
-    # Collect kept rows (preserve timestamps when present)
+    # Raw transcript: the full diarized record, timestamps stripped, fillers
+    # RETAINED. This is the verbatim "what was said" artifact (protocol: always
+    # stored on calls.raw_transcript), distinct from the filler-filtered +
+    # chunked text below that feeds embedding/search.
+    raw_transcript = "\n".join(f"[{r['speaker']}] {r['text']}" for r in all_rows)
+
+    # Collect kept rows (speaker + text only; timestamps already dropped)
     for row in all_rows:
         if row.get("_status") == "keep":
-            kept = {"speaker": row["speaker"], "text": row["text"]}
-            if "start" in row:
-                kept["start"] = row["start"]
-            if "end" in row:
-                kept["end"] = row["end"]
-            lines.append(kept)
+            lines.append({"speaker": row["speaker"], "text": row["text"]})
 
     if not lines:
-        return {"text": raw_text, "participants": [], "turn_count": 0, "filtered_count": filtered_count, "llm_filtered_count": llm_filtered_count, "format": fmt}
+        return {"text": raw_text, "raw_transcript": raw_transcript, "participants": [], "turn_count": 0, "filtered_count": filtered_count, "llm_filtered_count": llm_filtered_count, "format": fmt}
 
-    # Merge consecutive turns by same speaker
+    # Merge consecutive turns by same speaker (speaker + text only)
     if merge_speaker_turns:
         merged = []
         current_speaker = None
         current_texts = []
-        current_start = None
-        current_end = None
 
         for line in lines:
             if line["speaker"] == current_speaker:
                 current_texts.append(line["text"])
-                if "end" in line:
-                    current_end = line["end"]
             else:
                 if current_speaker and current_texts:
-                    turn = {
-                        "speaker": current_speaker,
-                        "text": " ".join(current_texts),
-                    }
-                    if current_start is not None:
-                        turn["start"] = current_start
-                    if current_end is not None:
-                        turn["end"] = current_end
-                    merged.append(turn)
+                    merged.append({"speaker": current_speaker, "text": " ".join(current_texts)})
                 current_speaker = line["speaker"]
                 current_texts = [line["text"]]
-                current_start = line.get("start")
-                current_end = line.get("end")
 
         # Don't forget last turn
         if current_speaker and current_texts:
-            turn = {
-                "speaker": current_speaker,
-                "text": " ".join(current_texts),
-            }
-            if current_start is not None:
-                turn["start"] = current_start
-            if current_end is not None:
-                turn["end"] = current_end
-            merged.append(turn)
+            merged.append({"speaker": current_speaker, "text": " ".join(current_texts)})
 
         lines = merged
 
@@ -253,6 +237,7 @@ def preprocess_transcript(file_path: str, merge_speaker_turns: bool = True, filt
 
     return {
         "text": "\n\n".join(formatted_lines),
+        "raw_transcript": raw_transcript,
         "turns": lines,
         "participants": sorted(list(participants)),
         "turn_count": len(lines),

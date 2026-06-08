@@ -67,17 +67,29 @@ def get_call_by_source_file(source_file: str) -> Optional[dict]:
 
 
 def delete_call(call_id: int) -> dict:
-    """Delete a call and all its chunks (for re-ingestion).
+    """Delete a call and ALL its dependents (for re-ingestion / cleanup).
 
-    Returns info about what was deleted.
-    Chunks are deleted automatically via ON DELETE CASCADE.
+    CASCADE dependents (call_chunks, call_contacts, meeting_summaries, outlines,
+    call_quotes, chunk_batch_summaries) are removed automatically when the call
+    row is deleted. NO-ACTION dependents must be deleted first — currently only
+    `content` (extracted decisions/questions/themes). Removing the call removes
+    its extracted content too: the content has no parent once the call is gone.
+
+    Fail-fast by design: if a NEW NO-ACTION dependent is added later, the final
+    DELETE raises a ForeignKeyViolation rather than silently skipping it — that's
+    the signal to add the table here (exactly how `content` was discovered).
+
+    Returns counts of what was deleted (or {"error": ...} if the call is absent).
     """
     with get_db() as conn:
         with conn.cursor() as cur:
-            # Get info before deletion
+            # Get counts before deletion (for the returned receipt)
             cur.execute(
                 """SELECT c.id, c.call_date, c.source_file, o.name as org_name,
-                          (SELECT count(*) FROM call_chunks WHERE call_id = c.id) as chunk_count
+                          (SELECT count(*) FROM call_chunks       WHERE call_id = c.id) AS chunk_count,
+                          (SELECT count(*) FROM content           WHERE call_id = c.id) AS content_count,
+                          (SELECT count(*) FROM call_contacts     WHERE call_id = c.id) AS contact_count,
+                          (SELECT count(*) FROM meeting_summaries WHERE call_id = c.id) AS summary_count
                    FROM calls c
                    JOIN orgs o ON c.org_id = o.id
                    WHERE c.id = %s""",
@@ -87,7 +99,8 @@ def delete_call(call_id: int) -> dict:
             if not call_info:
                 return {"error": f"Call {call_id} not found"}
 
-            # Delete (chunks cascade)
+            # NO-ACTION dependents first, then the call row (CASCADE handles the rest)
+            cur.execute("DELETE FROM content WHERE call_id = %s", (call_id,))
             cur.execute("DELETE FROM calls WHERE id = %s", (call_id,))
             conn.commit()
 
@@ -96,7 +109,10 @@ def delete_call(call_id: int) -> dict:
                 "call_date": call_info["call_date"],
                 "org": call_info["org_name"],
                 "chunks_deleted": call_info["chunk_count"],
-                "source_file": call_info["source_file"]
+                "content_deleted": call_info["content_count"],
+                "contacts_deleted": call_info["contact_count"],
+                "summaries_deleted": call_info["summary_count"],
+                "source_file": call_info["source_file"],
             }
 
 
@@ -107,21 +123,33 @@ def create_call(
     source_file: str = None,
     summary: str = None,
     project_id: int = None,
-    user_notes: str = None
+    user_notes: str = None,
+    raw_transcript: str = None,
 ) -> int:
     """Create a call record, return ID.
 
     user_notes: Optional personal observations/thoughts about the call.
+    raw_transcript: Full diarized transcript (speaker-attributed, timestamp-free,
+        fillers retained) — the verbatim record. Protocol: always stored at ingest.
     """
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO calls (call_date, org_id, source_type, source_file, summary, project_id, user_notes)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                (call_date, org_id, source_type, source_file, summary, project_id, user_notes)
+                """INSERT INTO calls (call_date, org_id, source_type, source_file, summary, project_id, user_notes, raw_transcript)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                (call_date, org_id, source_type, source_file, summary, project_id, user_notes, raw_transcript)
             )
             conn.commit()
             return cur.fetchone()["id"]
+
+
+def get_raw_transcript(call_id: int) -> str | None:
+    """Return the stored full diarized raw transcript for a call (or None)."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT raw_transcript FROM calls WHERE id = %s", (call_id,))
+            row = cur.fetchone()
+            return row["raw_transcript"] if row else None
 
 
 def get_calls_for_org(org_name: str) -> list[dict]:

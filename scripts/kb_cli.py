@@ -14,6 +14,7 @@ from scripts.kb_core import (
     semantic_search,
     list_org,
     list_contacts,
+    delete_call,
     get_calls_for_org,
     get_org_context,
     get_call_contacts,
@@ -1180,6 +1181,47 @@ def owu_models(limit, show_all):
     for r in rows:
         active = "✓" if r["is_active"] else "✗"
         click.echo(f"  [{active}] {r['name']:40} base={r['base_model_id'] or '(none)'}")
+
+
+@cli.command(name="delete-call")
+@click.argument("call_id", type=int)
+@click.option("--force", "-f", is_flag=True, help="Skip the confirmation prompt")
+def delete_call_cmd(call_id, force):
+    """Delete a call and ALL its dependents (chunks, contacts, summaries, content).
+
+    Handles the NO-ACTION `content` FK that a bare DELETE trips over. Shows a
+    preview of what will be removed and confirms before deleting (--force skips).
+    """
+    from scripts.kb_core.db import get_db
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT c.id, c.call_date, c.source_file, o.name AS org_name,
+                          (SELECT count(*) FROM call_chunks       WHERE call_id=c.id) AS chunks,
+                          (SELECT count(*) FROM content           WHERE call_id=c.id) AS content,
+                          (SELECT count(*) FROM call_contacts     WHERE call_id=c.id) AS contacts,
+                          (SELECT count(*) FROM meeting_summaries WHERE call_id=c.id) AS summaries
+                   FROM calls c JOIN orgs o ON c.org_id=o.id WHERE c.id=%s""",
+                (call_id,),
+            )
+            info = cur.fetchone()
+    if not info:
+        click.secho(f"Call {call_id} not found.", fg="red"); return
+    click.echo(f"Call {info['id']}  {info['call_date']}  org={info['org_name']}")
+    click.echo(f"  source: {info['source_file']}")
+    click.echo(f"  will delete: {info['chunks']} chunks, {info['content']} content, "
+               f"{info['contacts']} contacts, {info['summaries']} summaries")
+    if not force and not click.confirm("Delete this call and all the above?", default=False):
+        click.secho("Aborted.", fg="yellow"); return
+    result = delete_call(call_id)
+    if "error" in result:
+        click.secho(result["error"], fg="red"); return
+    click.secho(
+        f"Deleted call {result['deleted_call_id']} "
+        f"({result['chunks_deleted']} chunks, {result['content_deleted']} content, "
+        f"{result['contacts_deleted']} contacts, {result['summaries_deleted']} summaries).",
+        fg="green",
+    )
 
 
 if __name__ == "__main__":

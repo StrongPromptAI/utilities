@@ -119,6 +119,7 @@ def ingest(
         source_file=str(path),
         summary=summary,
         project_id=project_id,
+        raw_transcript=result.get("raw_transcript"),
     )
 
     # Link contacts to call via junction table

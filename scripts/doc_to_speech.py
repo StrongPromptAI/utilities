@@ -95,6 +95,7 @@ SCRUB_SEG_CHARS = 6000   # scrub output ≈ input size → cap input to bound ou
 EXEC_SEG_CHARS = 24000   # exec recap output ≪ input → input can be larger (most docs → one pass)
 
 KOKORO_SAMPLE_RATE = 24000  # Kokoro's native PCM rate (see services/tts/app.py)
+CHARS_PER_SECOND = 20  # ~Kokoro speech rate; converts the max-pause-gap (seconds) to a char budget
 
 
 def _log(msg: str) -> None:
@@ -295,9 +296,20 @@ def _ensure_sentence_end(s: str) -> str:
     return s
 
 
-def normalize_markdown(text: str, *, code_cue: str = "Code block omitted.") -> tuple[str, str | None]:
-    """Return (speakable_text, first_h1_title). Drops code/tables/markup."""
+# Sentinel marking a major-topic boundary in speakable text. The synth loop turns
+# it into a longer "take a breath" silence instead of a TTS call. BEL is never
+# produced by markdown and survives strip()/_strip_inline untouched.
+_SECTION_SENTINEL = "\u0007"
+
+
+def normalize_markdown(
+    text: str, *, code_cue: str = "Code block omitted.", section_breaks: bool = False
+) -> tuple[str, str | None]:
+    """Return (speakable_text, first_h1_title). Drops code/tables/markup.
+    When section_breaks=True, inserts a _SECTION_SENTINEL before each level-1/2
+    heading after the first, so the pipeline can pause between major topics."""
     title = None
+    seen_heading = False
     m = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
     if m:
         title = _strip_inline(m.group(1)).strip()
@@ -317,10 +329,14 @@ def normalize_markdown(text: str, *, code_cue: str = "Code block omitted.") -> t
             out_lines.append("")
             continue
 
-        h = re.match(r"^#{1,6}\s+(.*)$", stripped)              # heading → its own sentence
+        h = re.match(r"^(#{1,6})\s+(.*)$", stripped)            # heading → its own sentence
         if h:
+            if section_breaks and seen_heading and len(h.group(1)) <= 2:
+                out_lines.append("")                            # major topic boundary →
+                out_lines.append(_SECTION_SENTINEL)             # "take a breath" pause
+            seen_heading = True
             out_lines.append("")
-            out_lines.append(_ensure_sentence_end(h.group(1)))
+            out_lines.append(_ensure_sentence_end(h.group(2)))
             out_lines.append("")
             continue
 
@@ -366,6 +382,12 @@ def chunk_text(text: str, max_chars: int) -> list[str]:
         para = para.strip()
         if not para:
             continue
+        if para == _SECTION_SENTINEL:                  # topic boundary → standalone chunk
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.append(_SECTION_SENTINEL)
+            continue
         for sentence in re.split(r"(?<=[.!?:;])\s+", para):
             sentence = sentence.strip()
             if not sentence:
@@ -387,6 +409,28 @@ def chunk_text(text: str, max_chars: int) -> list[str]:
     return chunks
 
 
+def enforce_pause_cap(chunks: list[str], max_chars: int) -> list[str]:
+    """Guarantee no run of speech between pauses exceeds ~max_chars (a char proxy for
+    seconds at Kokoro's rate). Walks the chunk list and inserts a _SECTION_SENTINEL at a
+    sentence-aligned boundary whenever the accumulated stretch since the last pause would
+    overflow. Composes with heading-based sentinels (which also reset the accumulator).
+    This is the "no stretch longer than N seconds without a breath" rule, enforced
+    structurally so it never depends on where headings happen to fall."""
+    out: list[str] = []
+    acc = 0
+    for c in chunks:
+        if c == _SECTION_SENTINEL:
+            out.append(c)
+            acc = 0
+            continue
+        if acc > 0 and acc + len(c) > max_chars:
+            out.append(_SECTION_SENTINEL)
+            acc = 0
+        out.append(c)
+        acc += len(c)
+    return out
+
+
 # ── Pronunciation overrides (Lever 2: text respelling before synth) ──────────────
 
 PRON_OVERRIDES_PATH = Path(__file__).resolve().with_name("pron_overrides.json")
@@ -406,9 +450,11 @@ def load_pron_overrides(path: Path | None = None) -> dict[str, str]:
 
 
 def apply_pron_overrides(text: str, overrides: dict[str, str]) -> str:
-    """Whole-word, case-insensitive replacement. Word boundaries keep 'irrevocable'
-    from matching inside a larger token."""
-    for word, spoken in overrides.items():
+    """Whole-word, case-insensitive replacement, applied LONGEST-KEY-FIRST so a
+    multi-word phrase ('live with') wins over a bare word ('live') — the lever for
+    context-dependent homographs. Word boundaries keep 'irrevocable' from matching
+    inside a larger token."""
+    for word, spoken in sorted(overrides.items(), key=lambda kv: len(kv[0]), reverse=True):
         text = re.sub(rf"\b{re.escape(word)}\b", spoken, text, flags=re.IGNORECASE)
     return text
 
@@ -546,6 +592,11 @@ def main() -> None:
     p.add_argument("--language", default="en-us")
     p.add_argument("--max-chars", type=int, default=700, help="Per-chunk cap, < TTS's 800.")
     p.add_argument("--gap", type=float, default=0.35, help="Silence between chunks, seconds.")
+    p.add_argument("--section-gap", type=float, default=2.0,
+                   help="Silence at major topic (heading) boundaries — the 'take a breath' pause, seconds.")
+    p.add_argument("--max-pause-gap", type=float, default=150.0,
+                   help="Hard cap: max seconds of speech between pauses. A breath is auto-inserted "
+                        "at a sentence boundary to enforce it (0 disables). Default 150 = 2.5 min.")
     p.add_argument("--bitrate", default="64k", help="MP3 bitrate (default 64k, good for speech).")
     p.add_argument("--name", help="Output filename override (without needing .mp3).")
     p.add_argument("--title", help="ID3 title (default: doc's first H1, else filename).")
@@ -584,7 +635,7 @@ def main() -> None:
     raw = args.doc.read_text(encoding="utf-8")
     # Exec recaps never read code aloud — drop the "Code block omitted." cue for them.
     code_cue = "" if args.audience == "exec" else "Code block omitted."
-    speakable, h1 = normalize_markdown(raw, code_cue=code_cue)
+    speakable, h1 = normalize_markdown(raw, code_cue=code_cue, section_breaks=True)
     if args.audience == "exec":
         if args.scrub:
             _log("ℹ️  --scrub is redundant with --audience exec (the exec recap already strips paths/names).")
@@ -607,6 +658,12 @@ def main() -> None:
             speakable = apply_pron_overrides(speakable, overrides)
             _log(f"🗣️  applied {len(overrides)} pronunciation override(s)")
     chunks = chunk_text(speakable, args.max_chars)
+    if args.max_pause_gap > 0:
+        before = sum(1 for c in chunks if c == _SECTION_SENTINEL)
+        chunks = enforce_pause_cap(chunks, int(args.max_pause_gap * CHARS_PER_SECOND))
+        added = sum(1 for c in chunks if c == _SECTION_SENTINEL) - before
+        if added:
+            _log(f"⏸️  inserted {added} extra pause(s) to keep every stretch under {args.max_pause_gap:g}s")
     if not chunks:
         _die("Nothing speakable after normalization (document is empty or all code/markup).")
 
@@ -645,18 +702,29 @@ def main() -> None:
         now = int(time.time())
         tts_token = _hs256_jwt({"iss": "doc-to-speech", "aud": "tts", "exp": now + 1800}, secret)
 
-    # Synthesize each chunk → concatenate PCM with a silence gap.
+    # Synthesize each chunk → concatenate PCM. Normal gap between chunks; a longer
+    # "take a breath" silence at section sentinels (major topic boundaries).
     gap = b"\x00" * (int(args.gap * KOKORO_SAMPLE_RATE) * 2)
+    section_gap = b"\x00" * (int(args.section_gap * KOKORO_SAMPLE_RATE) * 2)
+    n_synth = sum(1 for c in chunks if c != _SECTION_SENTINEL)
     pcm_parts: list[bytes] = []
-    for i, chunk in enumerate(chunks, 1):
-        _log(f"🗣️  [{i}/{len(chunks)}] synth {len(chunk)} chars…")
+    done = 0
+    for i, chunk in enumerate(chunks):
+        if chunk == _SECTION_SENTINEL:
+            pcm_parts.append(section_gap)
+            continue
+        done += 1
+        _log(f"🗣️  [{done}/{n_synth}] synth {len(chunk)} chars…")
         pcm_parts.append(
             synthesize(
                 chunk, tts_url=tts_url, voice=args.voice, speed=args.speed,
                 language=args.language, token=tts_token,
             )
         )
-        if i < len(chunks):
+        # Normal inter-chunk gap, unless the next chunk is a section break (which
+        # supplies its own longer silence) or this is the last real chunk.
+        nxt = chunks[i + 1] if i + 1 < len(chunks) else None
+        if done < n_synth and nxt != _SECTION_SENTINEL:
             pcm_parts.append(gap)
     pcm = b"".join(pcm_parts)
     seconds = len(pcm) / 2 / KOKORO_SAMPLE_RATE

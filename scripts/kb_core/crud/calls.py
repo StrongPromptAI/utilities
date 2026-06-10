@@ -219,6 +219,39 @@ def list_calls(project_id: int = None, limit: int = 20) -> list[dict]:
             return cur.fetchall()
 
 
+def add_call_output(call_id: int, path: str, label: str = None) -> int:
+    """Link an output file (deliverable) to a call. Returns the row id.
+
+    Idempotent on (call_id, path): re-linking the same path updates the label
+    rather than erroring. Stores the path only — the file on disk is the source
+    of truth (see migration 006).
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO call_outputs (call_id, path, label)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (call_id, path) DO UPDATE SET label = EXCLUDED.label
+                   RETURNING id""",
+                (call_id, path, label),
+            )
+            conn.commit()
+            return cur.fetchone()["id"]
+
+
+def get_call_outputs(call_id: int) -> list[dict]:
+    """Return output files linked to a call, newest first."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, call_id, path, label, created_at
+                   FROM call_outputs WHERE call_id = %s
+                   ORDER BY created_at DESC""",
+                (call_id,),
+            )
+            return cur.fetchall()
+
+
 def get_call_detail(call_id: int) -> Optional[dict]:
     """Get full call detail: call + contacts + summaries + chunks.
 

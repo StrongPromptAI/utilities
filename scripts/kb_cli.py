@@ -23,6 +23,8 @@ from scripts.kb_core import (
     store_clusters,
     get_cluster_details,
     expand_by_cluster,
+    add_call_output,
+    get_call_outputs,
 )
 from scripts.kb_core.summarize import (
     generate_summary,
@@ -285,6 +287,10 @@ def list_calls(client):
                     summary = summary[:150] + "..."
                 click.secho(f"     {summary}", fg="white")
 
+            for out in get_call_outputs(call['id']):
+                label = f" ({out['label']})" if out.get('label') else ""
+                click.secho(f"     → {out['path']}{label}", fg="magenta")
+
             click.echo()
 
     except Exception as e:
@@ -332,6 +338,51 @@ def add_notes(call_id, notes, append):
         else:
             click.secho(f"Call {call_id} not found", fg="red")
             sys.exit(1)
+    except Exception as e:
+        click.secho(f"Error: {e}", fg="red")
+        sys.exit(1)
+
+
+@cli.command(name="link-output")
+@click.argument("call_id", type=int)
+@click.argument("path", type=click.Path())
+@click.option("--label", "-l", help="Human label for the deliverable (e.g. 'JourneyMan role charter')")
+def link_output(call_id, path, label):
+    """Record an output file (deliverable) a call produced.
+
+    Stores the absolute path so kb is the index — no remembering where the
+    comms/ file or email lives. Re-linking the same path updates its label.
+    Run once per call when a deliverable derives from several (e.g. two calls).
+    """
+    try:
+        abspath = str(Path(path).expanduser().resolve())
+        if not Path(abspath).exists():
+            click.secho(f"Warning: {abspath} does not exist (linking anyway)", fg="yellow")
+        out_id = add_call_output(call_id, abspath, label)
+        click.secho(f"Linked output {out_id} to call {call_id}: ", fg="green", nl=False)
+        click.echo(abspath + (f"  ({label})" if label else ""))
+    except Exception as e:
+        click.secho(f"Error: {e}", fg="red")
+        sys.exit(1)
+
+
+@cli.command(name="outputs")
+@click.argument("call_id", type=int)
+def outputs(call_id):
+    """List the output files (deliverables) linked to a call."""
+    try:
+        rows = get_call_outputs(call_id)
+        if not rows:
+            click.secho(f"No outputs linked to call {call_id}", fg="yellow")
+            return
+        click.secho(f"\nOutputs for call {call_id}\n", fg="blue", bold=True)
+        for r in rows:
+            click.secho(f"[{r['id']}] ", fg="cyan", nl=False)
+            click.echo(r["path"], nl=False)
+            if r.get("label"):
+                click.secho(f"  ({r['label']})", fg="white")
+            else:
+                click.echo()
     except Exception as e:
         click.secho(f"Error: {e}", fg="red")
         sys.exit(1)

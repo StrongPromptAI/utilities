@@ -77,6 +77,8 @@ from .crud.calls import (
     list_calls,
     get_call_detail,
     get_call_context,
+    add_call_output,
+    get_call_outputs,
 )
 
 # CRUD - Chunks
@@ -182,6 +184,8 @@ __all__ = [
     "list_calls",
     "get_call_detail",
     "get_call_context",
+    "add_call_output",
+    "get_call_outputs",
     # Chunks
     "insert_chunks",
     "get_call_chunks",

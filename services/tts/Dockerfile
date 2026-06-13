@@ -33,12 +33,15 @@ COPY app.py .
 
 ENV PORT=8080
 ENV MODELS_DIR=/app/models/kokoro
-# Pin CPU thread count for ONNX Runtime, OpenMP, OpenBLAS, MKL.
-# Kokoro inference on Railway hardware is single-threaded per call; extra threads
-# fight each other on context switches. Concurrency is gated at the FastAPI layer
-# via the synth semaphore (TTS_MAX_CONCURRENCY, default 4).
-ENV OMP_NUM_THREADS=1
+# onnxruntime's intra-op thread pool is the memory driver. Unbounded, ORT sizes it to
+# the CPU grant (cpu=32 → ~32 threads, each with a memory arena), so ONE synth peaked
+# at 3.5–5 GB and OOM-killed the container. The real cap is TTS_INTRA_OP_THREADS,
+# applied in app.py via SessionOptions.intra_op_num_threads on a session we build
+# ourselves. NOTE: the pip onnxruntime wheel is NOT OpenMP-built, so OMP_NUM_THREADS
+# does NOT cap that pool — relying on it (the prior setup) is what let the pool explode.
+# OPENBLAS/MKL pins bound transitive BLAS use only; they don't touch ORT's pool. Request
+# concurrency is gated separately at the FastAPI layer (TTS_MAX_CONCURRENCY).
+ENV TTS_INTRA_OP_THREADS=4
 ENV OPENBLAS_NUM_THREADS=1
 ENV MKL_NUM_THREADS=1
-ENV ORT_NUM_THREADS=1
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port $PORT"]

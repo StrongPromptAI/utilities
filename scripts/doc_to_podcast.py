@@ -81,6 +81,7 @@ from doc_to_speech import (
     _railway_vars,
     _safe_mp3_name,
     _Synth,
+    _wait_for_tts_ready,
     apply_pron_overrides,
     chunk_text,
     load_pron_overrides,
@@ -278,6 +279,9 @@ def main() -> None:
     # TTS endpoint.
     p.add_argument("--local-tts", action="store_true", help="Use localhost:8102 (no token).")
     p.add_argument("--tts-url", help="Override the TTS base URL entirely.")
+    p.add_argument("--warmup-timeout", type=float, default=300.0,
+                   help="Seconds to wait for the TTS service to wake from serverless sleep before "
+                        "synth (polls /health; cold start ~30–40s). 0 = skip the warmup poll.")
 
     # Output.
     p.add_argument("--email", default=os.environ.get("OXP_FILES_EMAIL", "doc-to-podcast@oxp.files"),
@@ -330,6 +334,9 @@ def main() -> None:
         if not secret:
             _die("JWT_SECRET not found on the shared-svcs TTS service.")
         tts_token = _hs256_jwt({"iss": "doc-to-podcast", "aud": "tts", "exp": int(time.time()) + 1800}, secret)
+
+    # Wake the service from serverless sleep (and gate synth on readiness) before synth.
+    _wait_for_tts_ready(tts_url, timeout=args.warmup_timeout)
 
     # Pronunciation overrides: file (unless --no-pron) plus any ad-hoc --pron WORD=SPOKEN.
     overrides: dict[str, str] = {} if args.no_pron else load_pron_overrides()

@@ -61,6 +61,14 @@ VOICE_ALLOWLIST = set(
 DEFAULT_VOICE = os.environ.get("TTS_DEFAULT_VOICE", "af_heart")
 MAX_INPUT_CHARS = int(os.environ.get("TTS_MAX_INPUT_CHARS", "800"))
 MAX_CONCURRENCY = int(os.environ.get("TTS_MAX_CONCURRENCY", "4"))
+
+# onnxruntime intra-op thread cap. Without it, ORT sizes its intra-op pool to the
+# CPU grant (cpu=32 on Railway → ~32 threads, each with a memory arena), so a SINGLE
+# synth peaked at 3.5–5 GB and OOM-killed the container. The pip onnxruntime wheel is
+# not OpenMP-built, so OMP_NUM_THREADS is ignored — SessionOptions.intra_op_num_threads
+# is the only reliable knob. Capped here and threaded into the InferenceSession we
+# build ourselves (see _load_kokoro). inter_op is pinned to 1 (single graph, serial).
+INTRA_OP_THREADS = int(os.environ.get("TTS_INTRA_OP_THREADS", "4"))
 MIN_SPEED = 0.5
 MAX_SPEED = 2.0
 
@@ -177,8 +185,24 @@ def _load_kokoro() -> None:
                     _log(f"[tts]   fetching {name}...")
                     urllib.request.urlretrieve(f"{base}/{name}", dest)
 
-        _log(f"[tts] Loading Kokoro from {MODELS_DIR}... (kokoro-onnx={_kokoro_pkg_version})")
-        _kokoro = Kokoro(str(KOKORO_MODEL_PATH), str(KOKORO_VOICES_PATH))
+        _log(
+            f"[tts] Loading Kokoro from {MODELS_DIR}... "
+            f"(kokoro-onnx={_kokoro_pkg_version}, intra_op_threads={INTRA_OP_THREADS})"
+        )
+        # Build the ONNX session ourselves with a bounded intra-op thread pool, then
+        # hand it to Kokoro.from_session — Kokoro(model, voices) builds its own session
+        # with no thread control, which is what let ORT spawn ~32 threads and OOM. This
+        # is the supported public API (Kokoro.from_session); no monkeypatch needed for
+        # threads (the speed-dtype patch above is a separate, still-required fix).
+        import onnxruntime as _ort
+
+        so = _ort.SessionOptions()
+        so.intra_op_num_threads = INTRA_OP_THREADS
+        so.inter_op_num_threads = 1
+        sess = _ort.InferenceSession(
+            str(KOKORO_MODEL_PATH), sess_options=so, providers=["CPUExecutionProvider"]
+        )
+        _kokoro = Kokoro.from_session(sess, str(KOKORO_VOICES_PATH))
         _ready = True
         _log("[tts] Ready")
 

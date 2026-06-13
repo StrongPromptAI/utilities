@@ -24,6 +24,10 @@ Usage:
   # Full run against prod TTS, upload to the "briefings" folder (the default):
   uv run python scripts/doc_to_speech.py PLAN.md --speed 1.1
 
+  # Several docs at once — each becomes its own MP3, up to --concurrency synthesized
+  # in parallel (one doc per worker; the server's TTS_MAX_CONCURRENCY is the backstop):
+  uv run python scripts/doc_to_speech.py A.md B.md C.md --concurrency 3
+
   # Strip file paths / names / scaffolding via a cheap LLM so you hear only the meat:
   uv run python scripts/doc_to_speech.py PLAN.md --scrub --speed 1.1
 
@@ -160,13 +164,19 @@ def _openrouter_key() -> str:
 #   exec               — always: a short, jargon-free executive recap.
 
 _SCRUB_SYSTEM = (
-    "You are preparing a document to be read aloud as audio. Rewrite the text so it "
-    "flows naturally when spoken. Remove or naturalize anything that is unlistenable: "
-    "file paths, file names, directory names, URLs, code and CLI fragments, and "
-    "cross-reference scaffolding (e.g. 'see X.md section Y', 'per the registry'). "
-    "Preserve ALL substantive ideas, arguments, and detail — do NOT summarize, "
-    "shorten, or editorialize the actual content. Do not add commentary, headings, "
-    "preamble, or markers. Output only the cleaned text."
+    "You are preparing a document to be read aloud as audio for a LISTENER — someone "
+    "absorbing the ideas, not studying a file. Rewrite the text so it flows naturally "
+    "when spoken. DELETE outright (do not read aloud, do not naturalize) anything that "
+    "only matters to a reader looking at the source: file paths, file names, directory "
+    "names, URLs, code and CLI fragments, cross-reference scaffolding ('see X.md "
+    "section Y', 'per the registry', '(Call 2026-02-06)'), inline citations and ID tags, "
+    "and document-metadata headers — status lines, version stamps, 'Date:' / 'Updated:' "
+    "/ 'Last updated:' lines, project tags, and the like. A listener never needs a "
+    "document's update date or a section cross-reference; drop them silently. Spell out "
+    "any remaining abbreviation the way it would be said aloud. Preserve ALL substantive "
+    "ideas, arguments, and detail — do NOT summarize, shorten, or editorialize the actual "
+    "content. Do not add commentary, headings, preamble, or markers. Output only the "
+    "cleaned spoken text."
 )
 
 _EXEC_SYSTEM = (
@@ -645,6 +655,174 @@ def _safe_mp3_name(doc_path: Path, override: str | None, audience: str = "techni
     return name[:255]
 
 
+# ── Per-document pipeline (shared by single- and multi-doc runs) ─────────────────
+
+def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
+    """Read a doc → speakable prose → optional LLM pass → pron overrides → chunks.
+
+    Returns (chunks, title, raw_chars, speakable_chars). No network beyond the
+    optional LLM pass; safe to call from a worker thread (one per doc).
+    """
+    raw = doc.read_text(encoding="utf-8")
+    # Exec recaps never read code aloud — drop the "Code block omitted." cue for them.
+    code_cue = "" if args.audience == "exec" else "Code block omitted."
+    speakable, h1 = normalize_markdown(raw, code_cue=code_cue, section_breaks=True)
+    if args.audience == "exec":
+        if args.scrub:
+            _log(f"ℹ️  [{doc.name}] --scrub is redundant with --audience exec (the recap already strips paths/names).")
+        _log(f"👔 [{doc.name}] exec recap pass ({args.exec_model})…")
+        speakable = _llm_pass(
+            speakable, system=_EXEC_SYSTEM, model=args.exec_model,
+            api_key=_openrouter_key(), seg_chars=EXEC_SEG_CHARS,
+            max_tokens=4000, label="exec recap",
+        )
+    elif args.scrub:
+        _log(f"🧽 [{doc.name}] LLM scrub pass ({args.scrub_model})…")
+        speakable = _llm_pass(
+            speakable, system=_SCRUB_SYSTEM, model=args.scrub_model,
+            api_key=_openrouter_key(), seg_chars=SCRUB_SEG_CHARS,
+            max_tokens=8000, label="scrub",
+        )
+    if not args.no_pron:
+        overrides = load_pron_overrides()
+        if overrides:
+            speakable = apply_pron_overrides(speakable, overrides)
+            _log(f"🗣️  [{doc.name}] applied {len(overrides)} pronunciation override(s)")
+    chunks = chunk_text(speakable, args.max_chars)
+    if args.max_pause_gap > 0:
+        before = sum(1 for c in chunks if c == _SECTION_SENTINEL)
+        chunks = enforce_pause_cap(chunks, int(args.max_pause_gap * CHARS_PER_SECOND))
+        added = sum(1 for c in chunks if c == _SECTION_SENTINEL) - before
+        if added:
+            _log(f"⏸️  [{doc.name}] inserted {added} extra pause(s) (max {args.max_pause_gap:g}s/stretch)")
+    if not chunks:
+        _die(f"Nothing speakable in {doc.name} (empty or all code/markup).")
+
+    if args.title:
+        title = args.title
+    else:
+        title = h1 or doc.stem
+        if args.audience == "exec":
+            title = f"{title} — exec recap"
+    return chunks, title, len(raw), sum(len(c) for c in chunks)
+
+
+def _resolve_tts_endpoint(args) -> tuple[str, str | None]:
+    """Resolve the TTS base URL and (for prod) a freshly-minted aud=tts token. Once
+    per run — the token is shared across all docs."""
+    if args.tts_url:
+        return args.tts_url.rstrip("/"), None
+    if args.local_tts:
+        return LOCAL_TTS_URL, None
+    _log("🔑 pulling shared-svcs JWT_SECRET from Railway…")
+    secret = _railway_vars(
+        project=SHARED_SVCS["project"], env=SHARED_SVCS["env"], service=SHARED_SVCS["tts_service"]
+    ).get("JWT_SECRET")
+    if not secret:
+        _die("JWT_SECRET not found on the shared-svcs TTS service.")
+    now = int(time.time())
+    return PROD_TTS_URL, _hs256_jwt({"iss": "doc-to-speech", "aud": "tts", "exp": now + 1800}, secret)
+
+
+def _wait_for_tts_ready(tts_url: str, *, timeout: float = 300.0) -> None:
+    """Poll GET /health until the TTS service answers 200, then return.
+
+    With Railway serverless sleep enabled, the prod TTS sleeps when idle and wakes on
+    the first request (~30–40 s cold start to load the Kokoro model); /health returns
+    503 'loading' until ready. Polling here both *wakes* the service and *gates* synth
+    on readiness, so the real synth requests don't race the cold start (which would
+    otherwise burn synthesize()'s 3 short retries and fail). No-op-fast when already
+    awake — one 200 and we return. timeout<=0 skips the poll entirely.
+    """
+    if timeout <= 0:
+        return
+    deadline = time.time() + timeout
+    waking = False
+    while True:
+        try:
+            r = requests.get(f"{tts_url}/health", timeout=10)
+            if r.status_code == 200:
+                if waking:
+                    _log("✅ TTS awake.")
+                return
+            # 503 (model loading) or a transient 5xx during boot — keep waiting.
+        except requests.RequestException:
+            pass  # connection refused/reset while the container spins up — keep waiting
+        if time.time() >= deadline:
+            _die(f"TTS not ready after {timeout:g}s at {tts_url}/health — still asleep or failing to boot.")
+        if not waking:
+            _log(f"⏳ waking TTS at {tts_url} (serverless cold start ~30–40s)…")
+            waking = True
+        time.sleep(3.0)
+
+
+def _resolve_files_target(args) -> tuple[str, str]:
+    """Resolve the oxp.files session secret + base URL. Once per run."""
+    _log("🔑 pulling oxp-files JWT_SECRET + PUBLIC_BASE_URL from Railway…")
+    files_vars = _railway_vars(
+        project=OXP_KB["project"], env=OXP_KB["env"], service=OXP_KB["files_service"]
+    )
+    secret = files_vars.get("JWT_SECRET")
+    if not secret:
+        _die("JWT_SECRET not found on the oxp-files service.")
+    base_url = (files_vars.get("PUBLIC_BASE_URL") or OXP_FILES_FALLBACK_URL).rstrip("/")
+    return secret, base_url
+
+
+def _process_doc(
+    doc: Path, args, *, tts_url: str, tts_token: str | None,
+    files_secret: str | None, base_url: str | None, chunk_concurrency: int,
+) -> str | None:
+    """Full pipeline for one document: normalize → synth → MP3 → (upload). Returns the
+    oxp.files location, or None when --no-upload. Endpoint/secrets are resolved once by
+    the caller and passed in, so this is safe to run concurrently (one call per doc)."""
+    chunks, title, raw_len, total_chars = _normalize_and_chunk(doc, args)
+    _log(f"📄 {doc.name}: {raw_len} raw → {total_chars} speakable → {len(chunks)} chunks")
+
+    # Build the ordered parts list (silence bytes + _Synth markers). Normal gap after
+    # each spoken chunk, unless the next is a section break (own longer silence) or last.
+    gap = b"\x00" * (int(args.gap * KOKORO_SAMPLE_RATE) * 2)
+    section_gap = b"\x00" * (int(args.section_gap * KOKORO_SAMPLE_RATE) * 2)
+    n_synth = sum(1 for c in chunks if c != _SECTION_SENTINEL)
+    parts: list = []
+    done = 0
+    for i, chunk in enumerate(chunks):
+        if chunk == _SECTION_SENTINEL:
+            parts.append(section_gap)
+            continue
+        done += 1
+        parts.append(_Synth(chunk, args.voice))
+        nxt = chunks[i + 1] if i + 1 < len(chunks) else None
+        if done < n_synth and nxt != _SECTION_SENTINEL:
+            parts.append(gap)
+    pcm = synthesize_ordered(
+        parts, tts_url=tts_url, speed=args.speed, language=args.language,
+        token=tts_token, concurrency=chunk_concurrency, label=doc.stem,
+    )
+    seconds = len(pcm) / 2 / KOKORO_SAMPLE_RATE
+    _log(f"🎚️  [{doc.name}] {seconds/60:.1f} min of audio → MP3 ({args.bitrate})…")
+
+    mp3 = pcm_to_mp3(pcm, title=title, bitrate=args.bitrate, volume=args.volume)
+    _log(f"💿 [{doc.name}] MP3: {len(mp3)/1_000_000:.1f} MB")
+
+    if args.out:
+        args.out.write_bytes(mp3)
+        _log(f"💾 wrote {args.out}")
+    if args.no_upload:
+        if not args.out:
+            _die("--no-upload given but no --out path — nothing would be saved.")
+        return None
+
+    filename = _safe_mp3_name(doc, args.name, args.audience)
+    _log(f"⬆️  [{doc.name}] uploading to {base_url} ({args.folder}/{filename})…")
+    loc = upload_to_oxp(
+        mp3, filename=filename, folder=args.folder, base_url=base_url,
+        secret=files_secret, email=args.email,
+    )
+    _log(f"✅ {doc.name} → oxp.files: {loc}")
+    return loc
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -652,7 +830,9 @@ def main() -> None:
         prog="doc_to_speech",
         description="Convert a markdown/text document to an MP3 and land it in oxp.files.",
     )
-    p.add_argument("doc", type=Path, help="Path to the source document (markdown or text).")
+    p.add_argument("docs", nargs="+", type=Path,
+                   help="One or more source documents (markdown or text). Each becomes its own "
+                        "MP3; multiple docs are synthesized concurrently (see --concurrency).")
     p.add_argument("--folder", default="briefings",
                    help="oxp.files folder (default: briefings — the private podcast folder).")
     p.add_argument("--voice", default="af_nova", help="Kokoro voice (must be in TTS allowlist).")
@@ -672,11 +852,12 @@ def main() -> None:
                         "A soft limiter follows so a boost can't clip. Default 1.0 (no change).")
     p.add_argument("--bitrate", default="64k", help="MP3 bitrate (default 64k, good for speech).")
     p.add_argument("--concurrency", type=int, default=TTS_CONCURRENCY_DEFAULT,
-                   help=f"Parallel synth requests in flight (default {TTS_CONCURRENCY_DEFAULT}, "
-                        "matching the TTS service's TTS_MAX_CONCURRENCY). Higher just queues "
-                        "server-side; 1 = the old sequential behaviour.")
-    p.add_argument("--name", help="Output filename override (without needing .mp3).")
-    p.add_argument("--title", help="ID3 title (default: doc's first H1, else filename).")
+                   help=f"Max concurrent synth requests in flight (default {TTS_CONCURRENCY_DEFAULT}, "
+                        "matching the TTS service's TTS_MAX_CONCURRENCY). With ONE doc this is "
+                        "chunk-level parallelism; with MANY docs it's how many synth in parallel "
+                        "(each doc's chunks then go sequentially). 1 = fully sequential.")
+    p.add_argument("--name", help="Output filename override (single doc only; without needing .mp3).")
+    p.add_argument("--title", help="ID3 title (single doc only; default: doc's first H1, else filename).")
     p.add_argument("--audience", choices=["technical", "exec"], default="technical",
                    help="Who the reading is for. 'technical' (default): the full document, "
                         "read verbatim (use --scrub to also strip paths/scaffolding). "
@@ -696,148 +877,74 @@ def main() -> None:
                    help=f"OpenRouter model for the --audience exec recap (default: {DEFAULT_EXEC_MODEL}).")
     p.add_argument("--local-tts", action="store_true", help="Use localhost:8102 (no token).")
     p.add_argument("--tts-url", help="Override the TTS base URL entirely.")
+    p.add_argument("--warmup-timeout", type=float, default=300.0,
+                   help="Seconds to wait for the TTS service to wake from serverless sleep before "
+                        "synth (polls /health; cold start ~30–40s). 0 = skip the warmup poll.")
     p.add_argument("--email", default=os.environ.get("OXP_FILES_EMAIL", "doc-to-speech@oxp.files"),
                    help="sub claim for the oxp.files bearer (shown in its activity log).")
-    p.add_argument("--out", type=Path, help="Also write the MP3 to this local path.")
+    p.add_argument("--out", type=Path, help="Also write the MP3 to this local path (single doc only).")
     p.add_argument("--no-upload", action="store_true", help="Skip the oxp.files upload.")
     p.add_argument("--dry-run", action="store_true",
                    help="Normalize + chunk only; print a preview and exit. No network.")
     args = p.parse_args()
 
-    if not args.doc.exists():
-        _die(f"Document not found: {args.doc}")
+    for doc in args.docs:
+        if not doc.exists():
+            _die(f"Document not found: {doc}")
     if not (0.5 <= args.speed <= 2.0):
         _die("--speed must be between 0.5 and 2.0")
-
-    raw = args.doc.read_text(encoding="utf-8")
-    # Exec recaps never read code aloud — drop the "Code block omitted." cue for them.
-    code_cue = "" if args.audience == "exec" else "Code block omitted."
-    speakable, h1 = normalize_markdown(raw, code_cue=code_cue, section_breaks=True)
-    if args.audience == "exec":
-        if args.scrub:
-            _log("ℹ️  --scrub is redundant with --audience exec (the exec recap already strips paths/names).")
-        _log(f"👔 exec recap pass ({args.exec_model}) — shorter, jargon-free, business-boosted, paths scrubbed…")
-        speakable = _llm_pass(
-            speakable, system=_EXEC_SYSTEM, model=args.exec_model,
-            api_key=_openrouter_key(), seg_chars=EXEC_SEG_CHARS,
-            max_tokens=4000, label="exec recap",
-        )
-    elif args.scrub:
-        _log(f"🧽 LLM scrub pass ({args.scrub_model}) — paths/filenames/scaffolding…")
-        speakable = _llm_pass(
-            speakable, system=_SCRUB_SYSTEM, model=args.scrub_model,
-            api_key=_openrouter_key(), seg_chars=SCRUB_SEG_CHARS,
-            max_tokens=8000, label="scrub",
-        )
-    if not args.no_pron:
-        overrides = load_pron_overrides()
-        if overrides:
-            speakable = apply_pron_overrides(speakable, overrides)
-            _log(f"🗣️  applied {len(overrides)} pronunciation override(s)")
-    chunks = chunk_text(speakable, args.max_chars)
-    if args.max_pause_gap > 0:
-        before = sum(1 for c in chunks if c == _SECTION_SENTINEL)
-        chunks = enforce_pause_cap(chunks, int(args.max_pause_gap * CHARS_PER_SECOND))
-        added = sum(1 for c in chunks if c == _SECTION_SENTINEL) - before
-        if added:
-            _log(f"⏸️  inserted {added} extra pause(s) to keep every stretch under {args.max_pause_gap:g}s")
-    if not chunks:
-        _die("Nothing speakable after normalization (document is empty or all code/markup).")
-
-    if args.title:
-        title = args.title
-    else:
-        title = h1 or args.doc.stem
-        if args.audience == "exec":
-            title = f"{title} — exec recap"
-    total_chars = sum(len(c) for c in chunks)
-    _log(f"📄 {args.doc.name}: {len(raw)} raw chars → {total_chars} speakable → {len(chunks)} chunks")
+    multi = len(args.docs) > 1
+    if multi and (args.out or args.name or args.title):
+        _die("--out/--name/--title apply to a single document; omit them with multiple docs "
+             "(each is auto-named from its filename / first H1).")
+    if multi and args.no_upload:
+        _die("--no-upload needs a local --out path, which is single-doc only; "
+             "multiple docs must upload to oxp.files.")
 
     if args.dry_run:
-        _log(f"   title: {title!r}")
-        preview = "\n\n".join(f"[{i+1}/{len(chunks)}] {c}" for i, c in enumerate(chunks[:3]))
-        print(preview)
-        if len(chunks) > 3:
-            print(f"\n… (+{len(chunks) - 3} more chunks)")
+        for doc in args.docs:
+            chunks, title, raw_len, total_chars = _normalize_and_chunk(doc, args)
+            _log(f"📄 {doc.name}: {raw_len} raw → {total_chars} speakable → {len(chunks)} chunks")
+            _log(f"   title: {title!r}")
+            preview = "\n\n".join(f"[{i+1}/{len(chunks)}] {c}" for i, c in enumerate(chunks[:3]))
+            print(preview)
+            if len(chunks) > 3:
+                print(f"\n… (+{len(chunks) - 3} more chunks)")
         return
 
-    # Resolve TTS endpoint + token.
-    if args.tts_url:
-        tts_url, tts_token = args.tts_url.rstrip("/"), None
-    elif args.local_tts:
-        tts_url, tts_token = LOCAL_TTS_URL, None
+    # Resolve the shared endpoint + secrets ONCE (token reused across all docs).
+    tts_url, tts_token = _resolve_tts_endpoint(args)
+    # Wake the service from serverless sleep (and gate synth on readiness) before any
+    # synth request fires — once per run, shared across all docs.
+    _wait_for_tts_ready(tts_url, timeout=args.warmup_timeout)
+    files_secret, base_url = (None, None)
+    if not args.no_upload:
+        files_secret, base_url = _resolve_files_target(args)
+
+    if multi:
+        # Doc-level parallelism: run up to --concurrency docs at once, chunks sequential
+        # within each, so total synth requests in flight ≈ --concurrency (the server's cap).
+        workers = max(1, min(args.concurrency, len(args.docs)))
+        _log(f"🎛️  {len(args.docs)} docs, {workers} synthesizing in parallel…")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = [
+                ex.submit(
+                    _process_doc, doc, args, tts_url=tts_url, tts_token=tts_token,
+                    files_secret=files_secret, base_url=base_url, chunk_concurrency=1,
+                )
+                for doc in args.docs
+            ]
+            for fut in concurrent.futures.as_completed(futs):
+                fut.result()  # _die() in a worker propagates here and exits
     else:
-        tts_url = PROD_TTS_URL
-        _log("🔑 pulling shared-svcs JWT_SECRET from Railway…")
-        secret = _railway_vars(**{
-            "project": SHARED_SVCS["project"],
-            "env": SHARED_SVCS["env"],
-            "service": SHARED_SVCS["tts_service"],
-        }).get("JWT_SECRET")
-        if not secret:
-            _die("JWT_SECRET not found on the shared-svcs TTS service.")
-        now = int(time.time())
-        tts_token = _hs256_jwt({"iss": "doc-to-speech", "aud": "tts", "exp": now + 1800}, secret)
+        # Single doc: --concurrency is chunk-level parallelism.
+        _process_doc(
+            args.docs[0], args, tts_url=tts_url, tts_token=tts_token,
+            files_secret=files_secret, base_url=base_url, chunk_concurrency=args.concurrency,
+        )
 
-    # Synthesize each chunk → concatenate PCM. Normal gap between chunks; a longer
-    # "take a breath" silence at section sentinels (major topic boundaries).
-    gap = b"\x00" * (int(args.gap * KOKORO_SAMPLE_RATE) * 2)
-    section_gap = b"\x00" * (int(args.section_gap * KOKORO_SAMPLE_RATE) * 2)
-    n_synth = sum(1 for c in chunks if c != _SECTION_SENTINEL)
-    # Build the ordered parts list (silence bytes + _Synth markers), then resolve all
-    # markers concurrently. Gap rules unchanged: a normal gap after each spoken chunk,
-    # unless the next chunk is a section break (own longer silence) or this is the last.
-    parts: list = []
-    done = 0
-    for i, chunk in enumerate(chunks):
-        if chunk == _SECTION_SENTINEL:
-            parts.append(section_gap)
-            continue
-        done += 1
-        parts.append(_Synth(chunk, args.voice))
-        nxt = chunks[i + 1] if i + 1 < len(chunks) else None
-        if done < n_synth and nxt != _SECTION_SENTINEL:
-            parts.append(gap)
-    _log(f"🗣️  synthesizing {n_synth} chunk(s), {args.concurrency}-wide…")
-    pcm = synthesize_ordered(
-        parts, tts_url=tts_url, speed=args.speed, language=args.language,
-        token=tts_token, concurrency=args.concurrency,
-    )
-    seconds = len(pcm) / 2 / KOKORO_SAMPLE_RATE
-    _log(f"🎚️  {seconds/60:.1f} min of audio → MP3 ({args.bitrate})…")
-
-    mp3 = pcm_to_mp3(pcm, title=title, bitrate=args.bitrate, volume=args.volume)
-    _log(f"💿 MP3: {len(mp3)/1_000_000:.1f} MB")
-
-    if args.out:
-        args.out.write_bytes(mp3)
-        _log(f"💾 wrote {args.out}")
-
-    if args.no_upload:
-        if not args.out:
-            _die("--no-upload given but no --out path — nothing would be saved.")
-        return
-
-    # Upload to oxp.files.
-    filename = _safe_mp3_name(args.doc, args.name, args.audience)
-    _log("🔑 pulling oxp-files JWT_SECRET + PUBLIC_BASE_URL from Railway…")
-    files_vars = _railway_vars(**{
-        "project": OXP_KB["project"],
-        "env": OXP_KB["env"],
-        "service": OXP_KB["files_service"],
-    })
-    files_secret = files_vars.get("JWT_SECRET")
-    if not files_secret:
-        _die("JWT_SECRET not found on the oxp-files service.")
-    base_url = (files_vars.get("PUBLIC_BASE_URL") or OXP_FILES_FALLBACK_URL).rstrip("/")
-
-    _log(f"⬆️  uploading to {base_url} ({args.folder}/{filename})…")
-    loc = upload_to_oxp(
-        mp3, filename=filename, folder=args.folder, base_url=base_url,
-        secret=files_secret, email=args.email,
-    )
-    _log(f"✅ landed in oxp.files: {loc}")
-    _log(f"   browse: {base_url}/?folder={args.folder}")
+    if base_url:
+        _log(f"   browse: {base_url}/?folder={args.folder}")
 
 
 if __name__ == "__main__":

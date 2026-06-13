@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -494,9 +495,74 @@ def synthesize(
     _die(f"TTS failed after 3 attempts: {last_err}")
 
 
+# ── Concurrent synthesis ─────────────────────────────────────────────────────────
+
+# The TTS service gates concurrent synths at TTS_MAX_CONCURRENCY (default 4) and
+# pins each Kokoro inference to a single thread, so ~4 in-flight requests saturate
+# it; going wider just queues server-side. Match that default here.
+TTS_CONCURRENCY_DEFAULT = 4
+
+
+class _Synth:
+    """A pending synth request inside an ordered parts list. `synthesize_ordered`
+    resolves these concurrently; silence segments in the same list are plain bytes
+    that need no network call and pass straight through."""
+
+    __slots__ = ("text", "voice")
+
+    def __init__(self, text: str, voice: str) -> None:
+        self.text = text
+        self.voice = voice
+
+
+def synthesize_ordered(
+    parts: list,
+    *,
+    tts_url: str,
+    speed: float,
+    language: str,
+    token: str | None,
+    concurrency: int = TTS_CONCURRENCY_DEFAULT,
+    label: str = "synth",
+) -> bytes:
+    """Resolve every `_Synth` in `parts` concurrently (bounded pool), preserving the
+    original order, and return the concatenated PCM.
+
+    `requests.post` releases the GIL while it blocks on the network, so a thread
+    pool — not asyncio — is enough to keep `concurrency` requests in flight. The
+    client used to synth strictly one chunk at a time, leaving the multi-worker TTS
+    service idle between calls; this exploits its existing concurrency gate.
+    `synthesize()` already retries and `_die()`s on hard failure, so a worker that
+    fails propagates that exit through `fut.result()`.
+    """
+    jobs = [(i, part) for i, part in enumerate(parts) if isinstance(part, _Synth)]
+    total = len(jobs)
+    if total == 0:
+        return b"".join(parts)
+    workers = max(1, min(concurrency, total))
+    results: dict[int, bytes] = {}
+    done = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {
+            ex.submit(
+                synthesize, job.text, tts_url=tts_url, voice=job.voice,
+                speed=speed, language=language, token=token,
+            ): idx
+            for idx, job in jobs
+        }
+        for fut in concurrent.futures.as_completed(futs):
+            results[futs[fut]] = fut.result()
+            done += 1
+            _log(f"🗣️  [{done}/{total}] {label} ✓")
+    return b"".join(
+        results[i] if isinstance(part, _Synth) else part
+        for i, part in enumerate(parts)
+    )
+
+
 # ── PCM → MP3 (ffmpeg) ───────────────────────────────────────────────────────────
 
-def pcm_to_mp3(pcm: bytes, *, title: str | None, bitrate: str) -> bytes:
+def pcm_to_mp3(pcm: bytes, *, title: str | None, bitrate: str, volume: float = 1.0) -> bytes:
     if not _which("ffmpeg"):
         _die("ffmpeg not found on PATH — install it (brew install ffmpeg).")
     fd, tmp = tempfile.mkstemp(suffix=".mp3")
@@ -505,8 +571,12 @@ def pcm_to_mp3(pcm: bytes, *, title: str | None, bitrate: str) -> bytes:
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-f", "s16le", "-ar", str(KOKORO_SAMPLE_RATE), "-ac", "1", "-i", "pipe:0",
-            "-codec:a", "libmp3lame", "-b:a", bitrate,
         ]
+        if volume and volume != 1.0:
+            # Linear amplitude gain (1.25 = +25%). A soft limiter follows so a boost
+            # that would clip the peaks is caught instead of distorting.
+            cmd += ["-af", f"volume={volume},alimiter=limit=0.97"]
+        cmd += ["-codec:a", "libmp3lame", "-b:a", bitrate]
         if title:
             cmd += ["-metadata", f"title={title}"]
         cmd += ["-f", "mp3", tmp]
@@ -597,7 +667,14 @@ def main() -> None:
     p.add_argument("--max-pause-gap", type=float, default=150.0,
                    help="Hard cap: max seconds of speech between pauses. A breath is auto-inserted "
                         "at a sentence boundary to enforce it (0 disables). Default 150 = 2.5 min.")
+    p.add_argument("--volume", type=float, default=1.0,
+                   help="Linear output gain applied at transcode (1.25 = +25%% louder). "
+                        "A soft limiter follows so a boost can't clip. Default 1.0 (no change).")
     p.add_argument("--bitrate", default="64k", help="MP3 bitrate (default 64k, good for speech).")
+    p.add_argument("--concurrency", type=int, default=TTS_CONCURRENCY_DEFAULT,
+                   help=f"Parallel synth requests in flight (default {TTS_CONCURRENCY_DEFAULT}, "
+                        "matching the TTS service's TTS_MAX_CONCURRENCY). Higher just queues "
+                        "server-side; 1 = the old sequential behaviour.")
     p.add_argument("--name", help="Output filename override (without needing .mp3).")
     p.add_argument("--title", help="ID3 title (default: doc's first H1, else filename).")
     p.add_argument("--audience", choices=["technical", "exec"], default="technical",
@@ -707,30 +784,29 @@ def main() -> None:
     gap = b"\x00" * (int(args.gap * KOKORO_SAMPLE_RATE) * 2)
     section_gap = b"\x00" * (int(args.section_gap * KOKORO_SAMPLE_RATE) * 2)
     n_synth = sum(1 for c in chunks if c != _SECTION_SENTINEL)
-    pcm_parts: list[bytes] = []
+    # Build the ordered parts list (silence bytes + _Synth markers), then resolve all
+    # markers concurrently. Gap rules unchanged: a normal gap after each spoken chunk,
+    # unless the next chunk is a section break (own longer silence) or this is the last.
+    parts: list = []
     done = 0
     for i, chunk in enumerate(chunks):
         if chunk == _SECTION_SENTINEL:
-            pcm_parts.append(section_gap)
+            parts.append(section_gap)
             continue
         done += 1
-        _log(f"🗣️  [{done}/{n_synth}] synth {len(chunk)} chars…")
-        pcm_parts.append(
-            synthesize(
-                chunk, tts_url=tts_url, voice=args.voice, speed=args.speed,
-                language=args.language, token=tts_token,
-            )
-        )
-        # Normal inter-chunk gap, unless the next chunk is a section break (which
-        # supplies its own longer silence) or this is the last real chunk.
+        parts.append(_Synth(chunk, args.voice))
         nxt = chunks[i + 1] if i + 1 < len(chunks) else None
         if done < n_synth and nxt != _SECTION_SENTINEL:
-            pcm_parts.append(gap)
-    pcm = b"".join(pcm_parts)
+            parts.append(gap)
+    _log(f"🗣️  synthesizing {n_synth} chunk(s), {args.concurrency}-wide…")
+    pcm = synthesize_ordered(
+        parts, tts_url=tts_url, speed=args.speed, language=args.language,
+        token=tts_token, concurrency=args.concurrency,
+    )
     seconds = len(pcm) / 2 / KOKORO_SAMPLE_RATE
     _log(f"🎚️  {seconds/60:.1f} min of audio → MP3 ({args.bitrate})…")
 
-    mp3 = pcm_to_mp3(pcm, title=title, bitrate=args.bitrate)
+    mp3 = pcm_to_mp3(pcm, title=title, bitrate=args.bitrate, volume=args.volume)
     _log(f"💿 MP3: {len(mp3)/1_000_000:.1f} MB")
 
     if args.out:

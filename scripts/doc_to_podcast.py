@@ -73,18 +73,20 @@ from doc_to_speech import (
     OXP_KB,
     PROD_TTS_URL,
     SHARED_SVCS,
+    TTS_CONCURRENCY_DEFAULT,
     _die,
     _hs256_jwt,
     _log,
     _openrouter_key,
     _railway_vars,
     _safe_mp3_name,
+    _Synth,
     apply_pron_overrides,
     chunk_text,
     load_pron_overrides,
     normalize_markdown,
     pcm_to_mp3,
-    synthesize,
+    synthesize_ordered,
     upload_to_oxp,
 )
 
@@ -265,6 +267,10 @@ def main() -> None:
                    help="Ad-hoc pronunciation override, repeatable (e.g. --pron irrevocable=irrevohcable).")
     p.add_argument("--turn-gap", type=float, default=0.45, help="Silence between speakers, seconds.")
     p.add_argument("--sub-gap", type=float, default=0.15, help="Silence between sub-chunks of one turn.")
+    p.add_argument("--concurrency", type=int, default=TTS_CONCURRENCY_DEFAULT,
+                   help=f"Parallel synth requests in flight (default {TTS_CONCURRENCY_DEFAULT}, "
+                        "matching the TTS service's TTS_MAX_CONCURRENCY). Higher just queues "
+                        "server-side; 1 = sequential.")
     p.add_argument("--bitrate", default="64k", help="MP3 bitrate (default 64k, good for speech).")
     p.add_argument("--name", help="Output filename (without needing .mp3).")
     p.add_argument("--title", help="ID3 title (default: the script's title).")
@@ -338,10 +344,13 @@ def main() -> None:
     # 3) Synthesize each turn with its host's voice; concatenate with gaps.
     turn_gap = _silence(args.turn_gap)
     sub_gap = _silence(args.sub_gap)
-    pcm_parts: list[bytes] = []
     prev_voice: str | None = None
     turns = [t for t in script["turns"] if str(t.get("text", "")).strip()]
 
+    # Build the ordered parts list across all turns (each turn's sub-chunks separated
+    # by sub-gaps, a turn-gap between speakers), then resolve every synth marker
+    # concurrently while preserving order.
+    parts: list = []
     for i, turn in enumerate(turns, 1):
         speaker = str(turn["speaker"]).strip()
         text = str(turn["text"]).strip()
@@ -353,18 +362,20 @@ def main() -> None:
         if overrides:
             text = apply_pron_overrides(text, overrides)
         subs = chunk_text(text, args.max_chars)
-        _log(f"🗣️  [{i}/{len(turns)}] {speaker} ({voice}) — {len(text)} chars, {len(subs)} piece(s)")
+        _log(f"🎙️  [{i}/{len(turns)}] {speaker} ({voice}) — {len(text)} chars, {len(subs)} piece(s)")
         for k, sub in enumerate(subs):
-            pcm_parts.append(
-                synthesize(sub, tts_url=tts_url, voice=voice, speed=args.speed,
-                           language=args.language, token=tts_token)
-            )
+            parts.append(_Synth(sub, voice))
             if k < len(subs) - 1:
-                pcm_parts.append(sub_gap)
+                parts.append(sub_gap)
         if i < len(turns):
-            pcm_parts.append(turn_gap)
+            parts.append(turn_gap)
 
-    pcm = b"".join(pcm_parts)
+    n_synth = sum(1 for p in parts if isinstance(p, _Synth))
+    _log(f"🗣️  synthesizing {n_synth} piece(s), {args.concurrency}-wide…")
+    pcm = synthesize_ordered(
+        parts, tts_url=tts_url, speed=args.speed, language=args.language,
+        token=tts_token, concurrency=args.concurrency,
+    )
     seconds = len(pcm) / 2 / KOKORO_SAMPLE_RATE
     _log(f"🎚️  {seconds / 60:.1f} min of audio → MP3 ({args.bitrate})…")
 

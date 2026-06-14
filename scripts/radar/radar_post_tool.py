@@ -55,6 +55,20 @@ QUERY_PREFIX = "search_query: "
 # round-trip; false-negative cost is context pollution.
 GREP_TOOLS_RE = re.compile(r"(?:^|[\s|;&(])(grep|rg|ag)(?=\s)")
 
+# Non-search flags — grep is being used as a filter / presence-test /
+# extractor, NOT to find where an identifier is defined or used. All three are
+# the opposite of a relational lookup, so never redirect them to gitnexus:
+#   -v / --invert-match   suppress matching lines (filter a pipe / noisy warning)
+#   -o / --only-matching  extract the matched substring (pull a value out)
+#   -q / --quiet/--silent presence test, almost always `grep -q … && …`
+# Matched as long flags or as any short-flag cluster containing v/o/q (e.g.
+# `-nv`, `-oq`). None of the common code-search flags (-r -n -i -l -w -A -B -C
+# -E -P) contain v/o/q, so the cluster match has near-zero false-negative cost.
+NON_SEARCH_FLAG_RE = re.compile(
+    r"(?:^|\s)(?:--(?:invert-match|only-matching|quiet|silent)\b"
+    r"|-[a-zA-Z]*[voq][a-zA-Z]*\b)"
+)
+
 # Code path/extension signals — any one is enough.
 CODE_PATH_RE = re.compile(
     r"--include[= ]\*?\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|cs|cpp|c|h)\b"
@@ -263,7 +277,118 @@ def _extract_grep_pattern(segment: str) -> str | None:
     return None
 
 
-def detect_grep_on_code(command: str) -> tuple[str, str] | None:
+# --- Symbol-relevance gate -------------------------------------------------
+# The redirect only helps when the grep pattern names something gitnexus can
+# answer *relationally* — a node with call-graph / blast-radius edges. In a
+# gitnexus parse-cache, that's Function/Method/Class/Interface. The dominant
+# node type is Variable (12k+ on thj), which has no CALLS edge: grepping for a
+# variable / JSONB key / dict key / param name (`llm_raw`, `escalation_target`)
+# is a literal lookup gitnexus context can't improve on. Gating the redirect on
+# callable-symbol membership closes that overfire class without a brittle
+# denylist — the index itself is the ground truth for "is this a real symbol."
+CALLABLE_LABELS = frozenset({"Function", "Method", "Class", "Interface"})
+_SYMBOL_CACHE_DIR = Path.home() / ".claude"
+_ABS_PATH_RE = re.compile(r"(?<![\w])/[^\s'\"|;&()]+")
+
+
+def _walk_up_for_gitnexus(start: Path) -> Path | None:
+    """Nearest ancestor of `start` containing `.gitnexus/parse-cache/`."""
+    try:
+        base = start if start.is_dir() else start.parent
+    except OSError:
+        return None
+    for cand in (base, *base.parents):
+        if (cand / ".gitnexus" / "parse-cache").is_dir():
+            return cand
+    return None
+
+
+def _find_indexed_repo_root(command: str, cwd: str | None) -> Path | None:
+    """Resolve the indexed repo for this grep — prefer an absolute path
+    argument in the command (the grep target), else the hook's cwd."""
+    for abs_path in _ABS_PATH_RE.findall(command):
+        root = _walk_up_for_gitnexus(Path(abs_path))
+        if root:
+            return root
+    if cwd:
+        return _walk_up_for_gitnexus(Path(cwd))
+    return None
+
+
+def _parse_cache_signature(repo_root: Path) -> str | None:
+    """A cheap freshness token for the repo's parse-cache — the indexed commit
+    if recorded, else the newest shard mtime."""
+    pc = repo_root / ".gitnexus" / "parse-cache"
+    if not pc.is_dir():
+        return None
+    try:
+        meta = json.loads((repo_root / ".gitnexus" / "meta.json").read_text())
+        last_commit = meta.get("lastCommit")
+        if last_commit:
+            return f"commit:{last_commit}"
+    except Exception:
+        pass
+    try:
+        return f"mtime:{max(f.stat().st_mtime for f in pc.glob('*.json')):.0f}"
+    except ValueError:
+        return None
+
+
+def _callable_symbols_for_repo(repo_root: Path) -> set[str] | None:
+    """Set of callable/structural symbol names in the repo's gitnexus index,
+    cached at ~/.claude/radar_symbols_<repo-slug>.json and rebuilt only when the
+    parse-cache signature changes. Returns None if the index can't be read."""
+    sig = _parse_cache_signature(repo_root)
+    if not sig:
+        return None
+    slug = str(repo_root).strip("/").replace("/", "_") or "root"
+    cache_path = _SYMBOL_CACHE_DIR / f"radar_symbols_{slug}.json"
+    try:
+        cached = json.loads(cache_path.read_text())
+        if cached.get("sig") == sig:
+            return set(cached.get("symbols", []))
+    except Exception:
+        pass
+    names: set[str] = set()
+    try:
+        for shard in (repo_root / ".gitnexus" / "parse-cache").glob("*.json"):
+            if shard.name == "index.json":
+                continue
+            blocks = json.loads(shard.read_text())
+            if not isinstance(blocks, list):
+                continue
+            for blk in blocks:
+                for node in blk.get("nodes", []):
+                    if node.get("label") in CALLABLE_LABELS:
+                        name = node.get("properties", {}).get("name")
+                        if name:
+                            names.add(name)
+    except Exception:
+        return None
+    try:
+        cache_path.write_text(json.dumps({"sig": sig, "symbols": sorted(names)}))
+    except Exception:
+        pass
+    return names
+
+
+def _pattern_is_relational(pattern: str, command: str, cwd: str | None) -> bool:
+    """True when the pattern names a call-graph symbol gitnexus can answer
+    relationally. Fail-open: when the repo isn't indexed or the symbol set can't
+    be loaded, return True so the redirect fires exactly as before — only an
+    *indexed* repo where NONE of the pattern's alternatives is a callable symbol
+    suppresses it (the JSONB-key / variable / literal overfire)."""
+    repo_root = _find_indexed_repo_root(command, cwd)
+    if repo_root is None:
+        return True
+    symbols = _callable_symbols_for_repo(repo_root)
+    if not symbols:
+        return True
+    alternatives = [a for a in re.split(r"\\?\|", pattern) if a]
+    return any(a in symbols for a in alternatives)
+
+
+def detect_grep_on_code(command: str, cwd: str | None = None) -> tuple[str, str] | None:
     """Detect grep-on-code violation. Returns (pattern, path_signal) on
     violation, None when the command is fine.
 
@@ -273,11 +398,22 @@ def detect_grep_on_code(command: str) -> tuple[str, str] | None:
       3. Pattern is identifier-shaped (or alternation of identifiers)
       4. Pattern has at least one lowercase letter
       5. Pattern is at least 5 chars long
-      6. Command is NOT a same-file lookup (single file path, no recursion
-         flag, no glob) — that's the doctrine's "narrow same-file lookup"
-         exemption per ~/repo_docs/skills/gitnexus/SKILL.md.
+      6. Command is NOT a same-file lookup (single concrete file path, no glob)
+         — that's the doctrine's "narrow same-file lookup" exemption per
+         ~/repo_docs/skills/gitnexus/SKILL.md.
+      7. The pattern names a callable/structural symbol in the local gitnexus
+         index (Function/Method/Class/Interface). A variable / JSONB key /
+         literal that merely looks identifier-shaped is NOT a relational query.
     """
     if not GREP_TOOLS_RE.search(command):
+        return None
+
+    # Non-search flag (filter / extract / presence-test) → not a relational
+    # code query. Bail before the code-path/identifier checks. (Conservative:
+    # the flag anywhere in a compound `grep foo file.py | grep -v bar`
+    # suppresses the whole command — the rare cost of missing a legit first
+    # grep, vs. the common false-positive of flagging `... | grep -v warning`.)
+    if NON_SEARCH_FLAG_RE.search(command):
         return None
 
     # Operate on the first ~600 chars of the command (most fit; long pipelines
@@ -305,10 +441,14 @@ def detect_grep_on_code(command: str) -> tuple[str, str] | None:
     if _is_same_file_lookup(head):
         return None
 
+    # Symbol-relevance gate — suppress when the indexed repo proves the pattern
+    # is not a callable/structural symbol (variable / JSONB key / literal).
+    if not _pattern_is_relational(pattern, head, cwd):
+        return None
+
     return (pattern, code_match.group(0).strip())
 
 
-_RECURSION_FLAG_RE = re.compile(r"(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b")
 _GLOB_OUTSIDE_QUOTES_RE = re.compile(r"(?<!\\)\*")
 _SINGLE_FILE_PATH_RE = re.compile(
     r"\b\S+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|cs|cpp|c|h)(?=\s|$|['\"])"
@@ -326,11 +466,12 @@ def _is_same_file_lookup(head: str) -> bool:
     directory-name substring inside an absolute file path (e.g.
     ``/repo/backend/foo.py`` matches the ``backend/`` dir-name alternative
     even though the COMMAND targets a single file). Counting actual file
-    arguments + checking for recursion/glob flags is the structural read.
+    arguments + checking for glob is the structural read. A recursion flag is
+    NOT a directory signal here: ``grep -rn pat one_file.py`` is a vacuous
+    ``-r`` over a single concrete file — still a same-file lookup. The
+    directory-scan cases (``grep -rn pat app/``, ``grep -rn pat .``) carry zero
+    concrete file paths and fail the count check below.
     """
-    # Recursion flag → directory scan; not same-file.
-    if _RECURSION_FLAG_RE.search(head):
-        return False
     # --include filter → directory-scoped grep with extension filter.
     if "--include" in head:
         return False
@@ -411,8 +552,13 @@ def main():
 
     # ---- Path 1: grep-on-code redirect (deterministic, no embedding) ----
     command = event.command or ""
+    cwd = (
+        payload.get("cwd")
+        or payload.get("workdir")
+        or payload.get("working_directory")
+    )
     if command:
-        violation = detect_grep_on_code(command)
+        violation = detect_grep_on_code(command, cwd)
         if violation:
             pattern, path_signal = violation
             log_grep_violation(command, pattern, path_signal)

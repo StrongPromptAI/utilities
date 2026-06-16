@@ -273,6 +273,15 @@ def main() -> None:
                         "matching the TTS service's TTS_MAX_CONCURRENCY). Higher just queues "
                         "server-side; 1 = sequential.")
     p.add_argument("--bitrate", default="64k", help="MP3 bitrate (default 64k, good for speech).")
+    p.add_argument("--loudness", type=float, default=-16.0,
+                   help="Target integrated loudness in LUFS via ffmpeg loudnorm (EBU R128), "
+                        "applied at transcode. Raw Kokoro PCM lands ~-28 LUFS — too quiet for "
+                        "phone speakers; -16 is the podcast/streaming norm. loudnorm boosts AND "
+                        "compresses+limits, so it hits the target without clipping. 0 disables. "
+                        "Default -16.")
+    p.add_argument("--volume", type=float, default=1.0,
+                   help="Extra linear gain applied AFTER loudness normalization (1.25 = +25%%). "
+                        "Default 1.0 (no extra trim); normally tune --loudness instead.")
     p.add_argument("--name", help="Output filename (without needing .mp3).")
     p.add_argument("--title", help="ID3 title (default: the script's title).")
 
@@ -387,7 +396,8 @@ def main() -> None:
     _log(f"🎚️  {seconds / 60:.1f} min of audio → MP3 ({args.bitrate})…")
 
     title = args.title or script.get("title") or "Podcast"
-    mp3 = pcm_to_mp3(pcm, title=title, bitrate=args.bitrate)
+    mp3 = pcm_to_mp3(pcm, title=title, bitrate=args.bitrate, volume=args.volume,
+                     loudness=args.loudness)
     _log(f"💿 MP3: {len(mp3) / 1_000_000:.1f} MB")
 
     if args.out:

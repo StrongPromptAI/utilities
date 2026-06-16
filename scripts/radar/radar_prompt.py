@@ -40,6 +40,7 @@ from doctrine_registry import (
     render_doctrine_section,
 )
 import schema_corpus as sc
+import protocol_corpus as pc
 
 INDEX_WISDOM_PATH = Path.home() / ".claude/radar_skills_wisdom.json"
 INDEX_WHAT_PATH = Path.home() / ".claude/radar_skills_what.json"
@@ -89,6 +90,16 @@ THRESHOLD_SCHEMA = 0.72
 BUILD_SCHEMA_INDEX_SCRIPT = UTILITIES_DIR / "scripts" / "radar" / "build_schema_index.py"
 SCHEMA_REBUILD_LOG = Path.home() / ".claude" / "last-schema-index-rebuild.log"
 SCHEMA_REBUILD_LOCK_TTL = 300  # schema index rebuilds in seconds (no full-corpus blow)
+
+# Protocol Radar (plan thj/26-6-16 Phase 2): live protocol_component corpus.
+# Matching is PURELY semantic — component_keys are opaque pseudonyms
+# (knee_beartooth_trout_34) that never appear in a topical prompt, so there is
+# no keyword prefilter (unlike schema's distinctive table names); the chunk
+# CONTENT carries the signal. Conservative bar; calibrate off PROTOCOL inject log.
+THRESHOLD_PROTOCOL = 0.72
+BUILD_PROTOCOL_INDEX_SCRIPT = UTILITIES_DIR / "scripts" / "radar" / "build_protocol_index.py"
+PROTOCOL_REBUILD_LOG = Path.home() / ".claude" / "last-protocol-index-rebuild.log"
+PROTOCOL_REBUILD_LOCK_TTL = 600  # protocol rebuild re-embeds the corpus (~30-60s)
 
 # Top-1 from each dimension: prompts are usually single-intent on each axis.
 # Two surfaces firing at once is fine; two within one surface doubles noise.
@@ -687,6 +698,153 @@ def log_schema_inject(prompt_text: str, repo: str, match: dict) -> None:
         pass
 
 
+# ── Protocol Radar (plan thj/26-6-16 Phase 2) ────────────────────────────────
+# Ambient protocol_component awareness: surfaces talking points, coaching voice,
+# and triage thresholds where the chat-pathway truth lives. The index is built
+# from live Postgres by build_protocol_index.py; the hot path NEVER queries the
+# DB. Freshness is a fact-assertion — `trust="live-oracle"` is emitted ONLY when
+# the independent watermark accessor (written by the thj promote hook, step 6)
+# confirms the index matches live. Absent/mismatched accessor → fail-closed
+# `live:unverified` (the trust-class gate refusing to assert an unchecked fact).
+
+def load_protocol_index(slug: str) -> dict | None:
+    """Load a repo's protocol index. None on any failure (silent no-op)."""
+    try:
+        return json.loads(pc.index_path(slug).read_text())
+    except Exception:
+        return None
+
+
+def protocol_accessor_path(slug: str) -> Path:
+    """The independent live-watermark accessor — written by the thj promote hook
+    (step 6), read here. Deliberately NOT written by the build (build-seeding
+    would make `verified` always-True by construction, defeating the gate)."""
+    return Path.home() / ".claude" / f"radar_protocol_watermark_{slug}.json"
+
+
+def read_protocol_accessor(slug: str) -> dict | None:
+    try:
+        return json.loads(protocol_accessor_path(slug).read_text())
+    except Exception:
+        return None
+
+
+def protocol_freshness(slug: str, index: dict) -> tuple[bool, bool]:
+    """Return (stale, verified) from the EXTERNAL watermark check.
+
+    `verified=True` ONLY when the independent accessor confirms the index
+    watermark matches live — the external check the trust-class gate requires.
+    Absent accessor → cannot verify → (False, False), fail-closed (the block
+    emits `live:unverified`, never an unchecked `live-oracle`). Accessor present
+    but ahead/different → (True, False): stale → trigger a rebuild, and stay
+    unverified this turn. Silent no-op on any error."""
+    try:
+        accessor = read_protocol_accessor(slug)
+        if accessor is None:
+            return (False, False)
+        if accessor == index.get("watermark"):
+            return (False, True)
+        return (True, False)
+    except Exception:
+        return (False, False)
+
+
+def trigger_protocol_rebuild(slug: str) -> None:
+    """Fire build_protocol_index.py --repo <slug> detached + lock-guarded. Needs
+    DATABASE_URL in the inherited env; if absent the rebuild exits 2 gracefully
+    and the prompt serves the existing index. Never blocks; never raises.
+    (The authoritative, DB-having rebuild is the thj promote hook — step 6; this
+    is the best-effort hot-path fallback.)"""
+    try:
+        lock = Path.home() / ".claude" / f"radar_protocol_rebuild_{slug}.lock"
+        if lock.exists() and (time.time() - lock.stat().st_mtime) < PROTOCOL_REBUILD_LOCK_TTL:
+            return
+        lock.write_text(
+            datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z") + "\n"
+        )
+        uv = "/opt/homebrew/bin/uv"
+        if not Path(uv).exists():
+            import shutil
+            uv = shutil.which("uv") or ""
+        if not uv:
+            return
+        logf = open(PROTOCOL_REBUILD_LOG, "a")
+        subprocess.Popen(
+            [uv, "run", "--project", str(UTILITIES_DIR), "python",
+             str(BUILD_PROTOCOL_INDEX_SCRIPT), "--repo", slug],
+            cwd=str(UTILITIES_DIR),
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
+def match_protocol(prompt: str, index: dict) -> dict | None:
+    """Top-1 protocol chunk over THRESHOLD_PROTOCOL — PURELY semantic (no keyword
+    prefilter; component_keys are opaque and never appear in a prompt). None on
+    no match or embed failure (silent no-op)."""
+    chunks = index.get("chunks", [])
+    if not chunks:
+        return None
+    cleaned = strip_prior_injections(prompt)
+    if not cleaned:
+        return None
+    query_vec = embed(QUERY_PREFIX + cleaned[:1000])
+    if not query_vec:
+        return None
+    best = None
+    best_score = -1.0
+    for c in chunks:
+        emb = c.get("embedding")
+        if not emb:
+            continue
+        s = dot(query_vec, emb)
+        if s > best_score:
+            best_score = s
+            best = c
+    if best and best_score >= THRESHOLD_PROTOCOL:
+        return {"score": best_score, **best}
+    return None
+
+
+def render_protocol_section(match: dict, verified: bool) -> str:
+    """Render via the shared provenance block. `trust="live-oracle"` is gated on
+    `verified` — the gate downgrades to `live:unverified` when the external
+    watermark check hasn't confirmed freshness."""
+    section = f" § {match['section']}" if match.get("section") else ""
+    title = match.get("title") or match["component_key"]
+    body = f"{title}{section}\n---\n{match['text'][:CONTEXT_CHARS]}"
+    return render_radar_block(
+        body,
+        source=f"protocol:{match['component_key']}",
+        trust="live-oracle",
+        verified=verified,
+    )
+
+
+def log_protocol_inject(prompt_text: str, repo: str, match: dict, verified: bool) -> None:
+    """Record a protocol-match injection as a JSONL row (calibration input)."""
+    try:
+        if session_log_append(
+            event_type="protocol_match",
+            tool="UserPromptSubmit",
+            command_or_context=prompt_text[:400],
+            outcome="injected",
+            extra={
+                "repo": repo,
+                "component_key": match.get("component_key", "?"),
+                "section": match.get("section"),
+                "score": round(match.get("score", 0.0), 3),
+                "verified": verified,
+            },
+        ):
+            _touch_heartbeat()
+    except Exception:
+        pass
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -752,6 +910,31 @@ def main():
                     log_schema_inject(prompt, schema_slug, schema_match)
                     print(render_additional_context(
                         render_schema_section(schema_slug, schema_match),
+                        hook_event_name=event.hook_event_name,
+                        runtime=event.runtime,
+                    ))
+    except Exception:
+        pass
+
+    # Protocol Radar (plan thj/26-6-16 Phase 2) — fires INDEPENDENTLY, like
+    # schema/doctrine. Reuses the cwd→repo resolver; engages when a protocol
+    # index exists for the repo. Freshness is the EXTERNAL watermark check:
+    # trust="live-oracle" only when the accessor (thj promote hook) confirms the
+    # index matches live, else fail-closed "live:unverified". No DB in the hot
+    # path; a stale watermark fires a best-effort background rebuild.
+    try:
+        proto_slug, _ = sc.repo_for_cwd(os.getcwd())
+        if proto_slug:
+            proto_idx = load_protocol_index(proto_slug)
+            if proto_idx:
+                stale, verified = protocol_freshness(proto_slug, proto_idx)
+                if stale:
+                    trigger_protocol_rebuild(proto_slug)
+                proto_match = match_protocol(prompt, proto_idx)
+                if proto_match:
+                    log_protocol_inject(prompt, proto_slug, proto_match, verified)
+                    print(render_additional_context(
+                        render_protocol_section(proto_match, verified),
                         hook_event_name=event.hook_event_name,
                         runtime=event.runtime,
                     ))

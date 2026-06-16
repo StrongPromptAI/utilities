@@ -708,20 +708,37 @@ def read_protocol_accessor(slug: str) -> dict | None:
         return None
 
 
-def protocol_freshness(slug: str, index: dict) -> tuple[bool, bool]:
+def read_protocol_manifest_watermark(slug: str):
+    """The watermark the index was last CONFIRMED-current at — read from the
+    MANIFEST, not the index file. The builder's idempotent no-op path (content
+    unchanged but a promote advanced the watermark) updates the manifest watermark
+    WITHOUT rewriting the large index file, so the index file's build-time
+    watermark lags. The freshness gate must read the manifest (the freshness
+    record), matching the schema corpus's manifest-based gate. None on error."""
+    try:
+        return json.loads(pc.manifest_path(slug).read_text()).get("watermark")
+    except Exception:
+        return None
+
+
+def protocol_freshness(slug: str) -> tuple[bool, bool]:
     """Return (stale, verified) from the EXTERNAL watermark check.
 
-    `verified=True` ONLY when the independent accessor confirms the index
-    watermark matches live — the external check the trust-class gate requires.
-    Absent accessor → cannot verify → (False, False), fail-closed (the block
-    emits `live:unverified`, never an unchecked `live-oracle`). Accessor present
-    but ahead/different → (True, False): stale → trigger a rebuild, and stay
-    unverified this turn. Silent no-op on any error."""
+    `verified=True` ONLY when the independent accessor (written by the thj
+    promote hook) matches the manifest's confirmed-current watermark — the
+    external check the trust-class gate requires. Absent accessor OR manifest →
+    cannot verify → (False, False), fail-closed (the block emits `live:unverified`,
+    never an unchecked `live-oracle`). Accessor present but != manifest →
+    (True, False): stale → trigger a rebuild, and stay unverified this turn.
+    Silent no-op on any error."""
     try:
         accessor = read_protocol_accessor(slug)
         if accessor is None:
             return (False, False)
-        if accessor == index.get("watermark"):
+        manifest_wm = read_protocol_manifest_watermark(slug)
+        if manifest_wm is None:
+            return (False, False)
+        if accessor == manifest_wm:
             return (False, True)
         return (True, False)
     except Exception:
@@ -906,7 +923,7 @@ def main():
         if proto_slug:
             proto_idx = load_protocol_index(proto_slug)
             if proto_idx:
-                stale, verified = protocol_freshness(proto_slug, proto_idx)
+                stale, verified = protocol_freshness(proto_slug)
                 if stale:
                     trigger_protocol_rebuild(proto_slug)
                 proto_match = match_protocol(prompt, proto_idx)

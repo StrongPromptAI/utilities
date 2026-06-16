@@ -65,6 +65,31 @@ def main() -> int:
     results.append(_check("source < > escaped", "&lt;tag&gt;" in esc))
     results.append(_check("escaped block still well-formed", _well_formed(esc)))
 
+    # ── trust-class gate: a fact-assertion requires verified=True (Phase 2a) ──
+    fa_ok = render_radar_block(
+        "x", source="protocol:knee_dvt_screening", trust="live-oracle", verified=True
+    )
+    results.append(_check("fact-assertion + verified=True keeps live-oracle",
+                          'trust="live-oracle"' in fa_ok))
+    fa_unver = render_radar_block(
+        "x", source="protocol:knee_dvt_screening", trust="live-oracle"
+    )
+    results.append(_check("fact-assertion w/o verified downgrades to live:unverified",
+                          'trust="live:unverified"' in fa_unver and "live-oracle" not in fa_unver))
+    fa_false = render_radar_block(
+        "x", source="protocol:knee_dvt_screening", trust="live-oracle", verified=False
+    )
+    results.append(_check("fact-assertion + verified=False downgrades",
+                          'trust="live:unverified"' in fa_false))
+    vi = render_radar_block("x", source="schema:r/schema.sql", trust="cached:verify-vs-live")
+    results.append(_check("verify-invitation needs no verified (unchanged)",
+                          'trust="cached:verify-vs-live"' in vi))
+    vi_v = render_radar_block(
+        "x", source="schema:r/schema.sql", trust="cached:verify-vs-live", verified=True
+    )
+    results.append(_check("verify-invitation ignores verified kwarg",
+                          'trust="cached:verify-vs-live"' in vi_v))
+
     # ── body stays raw (not XML-escaped) — it's LLM display context ──
     raw = render_radar_block(
         "see `\\d+` & <table> here", source="schema:r/schema.sql", trust="cached:verify-vs-live"

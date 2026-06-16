@@ -33,12 +33,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from embed_client import embed as _shared_embed
 from event_adapter import PromptEvent, normalize_event
-from output_adapter import render_additional_context
+from output_adapter import render_additional_context, render_radar_block
 from session_log import _slugify_cwd, append_event as session_log_append
 from doctrine_registry import (
     match_doctrine_for_prompt,
     render_doctrine_section,
 )
+import schema_corpus as sc
 
 INDEX_WISDOM_PATH = Path.home() / ".claude/radar_skills_wisdom.json"
 INDEX_WHAT_PATH = Path.home() / ".claude/radar_skills_what.json"
@@ -79,6 +80,15 @@ REBUILD_LOCK_TTL = 600  # seconds — a rebuild is in flight; don't stampede.
 # fires that don't teach anything the routing table doesn't already say.
 THRESHOLD_WISDOM = 0.72
 THRESHOLD_WHAT = 0.72
+
+# Schema Radar (plan thj/26-6-16): schema.sql COMMENT corpus, per-repo.
+# Same conservative bar as wisdom — a table-name token must ALSO appear in the
+# prompt (cheap prefilter), so the threshold only has to separate "mentioned and
+# relevant" from "mentioned in passing." Calibrate in Phase 5 off SCHEMA_INJECT.
+THRESHOLD_SCHEMA = 0.72
+BUILD_SCHEMA_INDEX_SCRIPT = UTILITIES_DIR / "scripts" / "radar" / "build_schema_index.py"
+SCHEMA_REBUILD_LOG = Path.home() / ".claude" / "last-schema-index-rebuild.log"
+SCHEMA_REBUILD_LOCK_TTL = 300  # schema index rebuilds in seconds (no full-corpus blow)
 
 # Top-1 from each dimension: prompts are usually single-intent on each axis.
 # Two surfaces firing at once is fine; two within one surface doubles noise.
@@ -553,6 +563,130 @@ def log_doctrine_auto_inject(prompt_text: str, rule: dict) -> None:
         _touch_heartbeat()
 
 
+# ── Schema Radar (plan thj/26-6-16) ──────────────────────────────────────────
+# A third corpus alongside wisdom + what: per-repo schema.sql COMMENT chunks.
+# Fires INDEPENDENTLY of the skill match (like doctrine) when cwd is a repo
+# registered in ~/.claude/radar_schema_repos.json. Source is the committed
+# schema.sql (durable semantic context, no DATABASE_URL needed); the freshness
+# gate mirrors the skill index's registry-mtime gate, watching schema.sql's
+# mtime (its every-push rewrite keeps the index fresh for free).
+
+def load_schema_index(slug: str) -> dict | None:
+    """Load a repo's schema index. None on any failure (silent no-op discipline)."""
+    try:
+        return json.loads(sc.index_path(slug).read_text())
+    except Exception:
+        return None
+
+
+def schema_index_stale(slug: str, cfg: dict) -> bool:
+    """True when schema.sql's current mtime differs from the value the manifest
+    recorded at the last build. Any error → False (silent no-op)."""
+    try:
+        schema_path = sc.expand(cfg.get("schema_sql", ""))
+        manifest = json.loads(sc.manifest_path(slug).read_text())
+        recorded = manifest.get("schema_mtime")
+        if recorded is None:
+            return False
+        return Path(schema_path).stat().st_mtime != recorded
+    except Exception:
+        return False
+
+
+def trigger_schema_rebuild(slug: str) -> None:
+    """Fire build_schema_index.py --repo <slug> detached + lock-guarded. Never
+    blocks the prompt; never raises. Mirrors trigger_background_rebuild."""
+    try:
+        lock = Path.home() / ".claude" / f"radar_schema_rebuild_{slug}.lock"
+        if lock.exists() and (time.time() - lock.stat().st_mtime) < SCHEMA_REBUILD_LOCK_TTL:
+            return
+        lock.write_text(
+            datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z") + "\n"
+        )
+        uv = "/opt/homebrew/bin/uv"
+        if not Path(uv).exists():
+            import shutil
+            uv = shutil.which("uv") or ""
+        if not uv:
+            return
+        logf = open(SCHEMA_REBUILD_LOG, "a")
+        subprocess.Popen(
+            [uv, "run", "--project", str(UTILITIES_DIR), "python",
+             str(BUILD_SCHEMA_INDEX_SCRIPT), "--repo", slug],
+            cwd=str(UTILITIES_DIR),
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+
+def match_schema(prompt: str, index: dict) -> dict | None:
+    """Top-1 schema chunk over THRESHOLD_SCHEMA, gated on a table-name token
+    actually appearing in the prompt (word-boundary). The prefilter is the
+    distinctive-name guard; the semantic threshold separates 'mentioned and
+    relevant' from 'mentioned in passing' (the `session`/`patient` collision).
+    None on no match or embed failure (silent no-op)."""
+    chunks = index.get("chunks", [])
+    if not chunks:
+        return None
+    cleaned = strip_prior_injections(prompt)
+    if not cleaned:
+        return None
+    low = cleaned.lower()
+    candidates = [
+        c for c in chunks
+        if re.search(r"\b" + re.escape(c["table"].lower()) + r"\b", low)
+    ]
+    if not candidates:
+        return None
+    query_vec = embed(QUERY_PREFIX + cleaned[:1000])
+    if not query_vec:
+        return None
+    scored = sorted(
+        ({"score": dot(query_vec, c["embedding"]), **c} for c in candidates if c.get("embedding")),
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+    if scored and scored[0]["score"] >= THRESHOLD_SCHEMA:
+        return scored[0]
+    return None
+
+
+def render_schema_section(repo: str, match: dict) -> str:
+    """Render a schema-comment match as a shared provenance block (plan
+    thj/26-6-16 Phase 1). `trust="cached:verify-vs-live"` carries what the old
+    "committed snapshot; live `\\d+` is the oracle" prose said — the schema.sql
+    dump is a cached snapshot to verify against the live DB for residency-
+    critical calls. The match score stays retrieval-side (not rendered)."""
+    body = f"{match['table']}\n---\n{match['text'][:CONTEXT_CHARS]}"
+    return render_radar_block(
+        body,
+        source=f"schema:{repo}/schema.sql",
+        trust="cached:verify-vs-live",
+    )
+
+
+def log_schema_inject(prompt_text: str, repo: str, match: dict) -> None:
+    """Record a schema-match injection as a JSONL row (Phase 5 calibration input)."""
+    try:
+        if session_log_append(
+            event_type="schema_match",
+            tool="UserPromptSubmit",
+            command_or_context=prompt_text[:400],
+            outcome="injected",
+            extra={
+                "repo": repo,
+                "table": match.get("table", "?"),
+                "score": round(match.get("score", 0.0), 3),
+            },
+        ):
+            _touch_heartbeat()
+    except Exception:
+        pass
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -600,6 +734,29 @@ def main():
             hook_event_name=event.hook_event_name,
             runtime=event.runtime,
         ))
+
+    # Schema Radar (plan thj/26-6-16) — fires INDEPENDENTLY of the skill match,
+    # like doctrine, so a prompt naming a table gets its comment even when no
+    # skill chunk matches. Only engages when cwd is a registered schema repo.
+    # The freshness gate watches schema.sql's mtime (every-push rewrite keeps it
+    # fresh); the current prompt serves the existing index, converging next turn.
+    try:
+        schema_slug, schema_cfg = sc.repo_for_cwd(os.getcwd())
+        if schema_slug and schema_cfg:
+            if schema_index_stale(schema_slug, schema_cfg):
+                trigger_schema_rebuild(schema_slug)
+            schema_idx = load_schema_index(schema_slug)
+            if schema_idx:
+                schema_match = match_schema(prompt, schema_idx)
+                if schema_match:
+                    log_schema_inject(prompt, schema_slug, schema_match)
+                    print(render_additional_context(
+                        render_schema_section(schema_slug, schema_match),
+                        hook_event_name=event.hook_event_name,
+                        runtime=event.runtime,
+                    ))
+    except Exception:
+        pass
 
     # Index freshness gate (2026-05-29): if the skill corpus changed since the
     # index was built (SKILL_REGISTRY.md mtime drift vs the manifest), fire a
@@ -654,31 +811,36 @@ def main():
 
     log_skill_inject(prompt, all_matches)
 
-    # Render side-by-side: one labeled section per dimension that fired.
-    lines: list[str] = []
-    section_labels = {
-        "wisdom": "Skill Radar — what we've learned (Layers 1+4):",
-        "what":   "Skill Radar — what is (Layer 3, project clusters):",
+    # Render each skill match as a shared provenance block (plan thj/26-6-16
+    # Phase 1): source="skill:<name>" is agent-legible,
+    # trust="learned:judge-applicability" marks it learned guidance. The
+    # wisdom/what layer distinction is folded into the body label; the match
+    # score stays retrieval-side (not rendered).
+    layer_labels = {
+        "wisdom": "Skill Radar — what we've learned (Layers 1+4)",
+        "what":   "Skill Radar — what is (Layer 3, project clusters)",
     }
+    blocks: list[str] = []
     for dim in ("wisdom", "what"):
-        ms = matches_by_dim[dim]
-        if not ms:
-            continue
-        lines.append(section_labels[dim])
-        lines.append("")
-        for m in ms:
+        for m in matches_by_dim[dim]:
             skill = m.get("skill_name", m.get("name", "?"))
             header = m.get("header", "")
             fpath = m.get("file_path", "")
-            score = m["score"]
             text = m.get("text", m.get("description", ""))
-            lines.append(f"[{score:.2f}] {skill} › {header}  ({fpath})")
-            lines.append("---")
-            lines.append(text[:CONTEXT_CHARS])
-            lines.append("")
+            body = (
+                f"{layer_labels[dim]}\n"
+                f"{skill} › {header}  ({fpath})\n"
+                f"---\n"
+                f"{text[:CONTEXT_CHARS]}"
+            )
+            blocks.append(render_radar_block(
+                body,
+                source=f"skill:{skill}",
+                trust="learned:judge-applicability",
+            ))
 
     print(render_additional_context(
-        "\n".join(lines),
+        "\n\n".join(blocks),
         hook_event_name=event.hook_event_name,
         runtime=event.runtime,
     ))

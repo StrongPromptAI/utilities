@@ -37,6 +37,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from embed_client import embed as _shared_embed
 from session_log import _slugify_cwd
+from output_adapter import render_radar_block
 
 # Match threshold — doctrine rules are higher-stakes than skill suggestions,
 # so the bar is set above the skill radar's 0.72. Phase 1 spec proposed 0.85
@@ -282,20 +283,25 @@ def match_doctrine_for_prompt(
 
 
 def render_doctrine_section(rule: dict) -> str:
-    """Render the [doctrine] block injected into the prompt-hook context.
-    Single short stanza — doctrine matches are higher-stakes than skill
-    matches, so the block prioritizes the rule statement + source + receipt
-    one-liner over verbose context."""
+    """Render the doctrine match as a shared provenance block (plan
+    thj/26-6-16 Phase 1). Single short stanza — doctrine matches are
+    higher-stakes than skill matches, so the body prioritizes the rule
+    statement + source + receipt one-liner over verbose context.
+
+    `source="doctrine:<title>"` is agent-legible (grep-able in
+    DOCTRINE_REGISTRY.md); `trust="learned:judge-applicability"` — doctrine,
+    like skills, is learned guidance whose applicability the agent judges. The
+    match score is deliberately NOT shown (it stays retrieval-side)."""
     title = rule.get("title", "")
-    source = rule.get("source", "")
+    rule_source = rule.get("source", "")
     receipt = (rule.get("receipt") or "").split("\n", 1)[0]
-    score = rule.get("score", 0.0)
-    lines = [
-        f"[doctrine match — score {score:.2f}]",
-        f"Rule: {title}",
-    ]
-    if source:
-        lines.append(f"Source: {source}")
+    lines = [f"Rule: {title}"]
+    if rule_source:
+        lines.append(f"Source: {rule_source}")
     if receipt:
         lines.append(f"Receipt: {receipt}")
-    return "\n".join(lines)
+    return render_radar_block(
+        "\n".join(lines),
+        source=f"doctrine:{title}",
+        trust="learned:judge-applicability",
+    )

@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from embed_client import embed as _shared_embed
 from event_adapter import ToolEvent, normalize_event
 from output_adapter import render_additional_context
+import schema_corpus as sc
 from session_log import append_event as session_log_append
 
 INDEX_WISDOM_PATH = Path.home() / ".claude/radar_skills_wisdom.json"
@@ -539,6 +540,108 @@ def emit_grep_redirect(pattern: str, path_signal: str, event: ToolEvent) -> None
     ))
 
 
+# ── Schema-on-code redirect (plan thj/26-6-16) ───────────────────────────────
+# On an Edit/Write to a schema.sql / migration / DDL-bearing file, surface the
+# touched table's authored COMMENT — the residency/gotcha ORACLE — at the edit
+# moment (the point residency-blindness bites, e.g. an out-of-band schema change
+# that forgets the both-schemas rule). Deterministic: parses schema.sql, no embed.
+
+_DDL_DML_RE = re.compile(
+    r"\b(?:CREATE\s+TABLE|ALTER\s+TABLE|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+"
+    r"(?:IF\s+(?:NOT\s+)?EXISTS\s+)?([A-Za-z0-9_.\"]+)",
+    re.IGNORECASE,
+)
+_QUALIFIED_RE = re.compile(r"\b(?:public|sandbox)\.([a-z0-9_]+)", re.IGNORECASE)
+
+
+def _repo_for_path(file_path: str):
+    """Resolve an edited file to (slug, cfg) via the schema-repo registry roots."""
+    for slug, cfg in sc.load_repos().items():
+        root = sc.expand(cfg.get("repo_root", "")).rstrip("/")
+        if root and file_path.startswith(root + "/"):
+            return slug, cfg
+    return None, None
+
+
+def detect_schema_edit(tool_name: str, file_path: str, content: str, cwd: str | None):
+    """Return (slug, [rendered_table_chunks]) when an Edit/Write touches a
+    schema.sql / migration / DDL-bearing file that references commented tables.
+    None otherwise — scoped tight so it never fires on ordinary code edits."""
+    if tool_name not in ("Edit", "Write", "MultiEdit"):
+        return None
+    if not file_path:
+        return None
+    is_schema_file = file_path.endswith("schema.sql") or "/migrations/" in file_path
+    has_ddl = bool(_DDL_DML_RE.search(content or ""))
+    if not (is_schema_file or has_ddl):
+        return None
+
+    slug, cfg = _repo_for_path(file_path)
+    if not slug:
+        slug, cfg = sc.repo_for_cwd(cwd or "")
+    if not slug:
+        return None
+    schema_path = sc.expand(cfg.get("schema_sql", ""))
+    if not Path(schema_path).exists():
+        return None
+
+    names: set[str] = set()
+    for m in _DDL_DML_RE.finditer(content or ""):
+        names.add(m.group(1).split(".")[-1].strip('"').lower())
+    for m in _QUALIFIED_RE.finditer(content or ""):
+        names.add(m.group(1).lower())
+    if not names:
+        return None
+
+    parsed = sc.parse_comments(schema_path)
+    lower_map = {t.lower(): t for t in parsed}
+    hits: list[str] = []
+    for n in names:
+        t = lower_map.get(n)
+        if t and sc.is_substantive(parsed[t]):
+            hits.append(sc.render_chunk(t, parsed[t]))
+    if not hits:
+        return None
+    return slug, hits
+
+
+def emit_schema_redirect(slug: str, hits: list[str], event: ToolEvent) -> None:
+    body = "\n\n".join(hits)
+    msg = (
+        "Schema Radar — schema-on-code (you're editing schema/DDL):\n"
+        "\n"
+        "The table(s) you're touching carry authored COMMENTs — the residency / "
+        "gotcha ORACLE. Per doctrine, per-table facts (public-only? sandbox twin? "
+        "both-schemas?) live in the table COMMENT, not in DATABASE.md (which holds "
+        "the residency CLASSES). For residency-critical changes, the live `\\d+` "
+        "is the oracle; this is the committed-snapshot view.\n"
+        "\n"
+        f"{body}\n"
+        "\n"
+        "Out-of-band schema change reminder: a table present in BOTH schemas must "
+        "be changed in public AND sandbox; a public-only telemetry table has no "
+        "sandbox twin (the comment says which)."
+    )
+    print(render_additional_context(
+        msg,
+        hook_event_name=event.hook_event_name,
+        runtime=event.runtime,
+    ))
+
+
+def log_schema_edit(slug: str, file_path: str, tables: list[str]) -> None:
+    try:
+        session_log_append(
+            event_type="schema_edit_redirect",
+            tool="PostToolUse",
+            command_or_context=file_path[:400],
+            outcome="injected",
+            extra={"repo": slug, "tables": tables[:10]},
+        )
+    except Exception:
+        pass
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -564,6 +667,25 @@ def main():
             log_grep_violation(command, pattern, path_signal)
             emit_grep_redirect(pattern, path_signal, event)
             sys.exit(0)
+
+    # ---- Path 1.5: schema-on-code redirect (deterministic, no embedding) ----
+    tool_input = payload.get("tool_input", {}) or {}
+    edit_file_path = tool_input.get("file_path") or ""
+    edit_content = (
+        tool_input.get("new_string")
+        or tool_input.get("content")
+        or tool_input.get("new_str")
+        or ""
+    )
+    if not edit_content and isinstance(tool_input.get("edits"), list):
+        edit_content = "\n".join(str(e.get("new_string", "")) for e in tool_input["edits"])
+    sed = detect_schema_edit(event.tool_name or "", edit_file_path, edit_content, cwd)
+    if sed:
+        sed_slug, sed_hits = sed
+        sed_tables = [h.split(":", 1)[0].splitlines()[0] for h in sed_hits]
+        log_schema_edit(sed_slug, edit_file_path, sed_tables)
+        emit_schema_redirect(sed_slug, sed_hits, event)
+        sys.exit(0)
 
     # ---- Path 2: error embedding match (existing) ----
     output = event.output

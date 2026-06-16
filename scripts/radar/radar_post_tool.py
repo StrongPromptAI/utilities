@@ -42,6 +42,7 @@ from embed_client import embed as _shared_embed
 from event_adapter import ToolEvent, normalize_event
 from output_adapter import render_additional_context
 import schema_corpus as sc
+import thresholds as th
 from session_log import append_event as session_log_append
 
 INDEX_WISDOM_PATH = Path.home() / ".claude/radar_skills_wisdom.json"
@@ -85,14 +86,10 @@ IDENTIFIER_PATTERN_RE = re.compile(
     r"^[a-zA-Z_][a-zA-Z0-9_]*(?:\\?\|[a-zA-Z_][a-zA-Z0-9_]*)*$"
 )
 
-# Per-dimension thresholds — error text usually wants a code/cluster match
-# (what) more than a wisdom narrative, but wisdom can also fire (e.g.
-# ConnectionRefused → networking skill). Bars are tuned per-distribution.
-# WHAT raised from 0.65 → 0.72 on 2026-05-13 after SKILL_INJECT_LOG analysis
-# (same rationale as prompt_hook.py — cluster digests are identifier soup
-# that embeds broadly; near-threshold matches don't teach anything new).
-THRESHOLD_WISDOM = 0.70
-THRESHOLD_WHAT = 0.72
+# Per-dimension bars live in the central `thresholds` module: th.POST_TOOL_WISDOM
+# / th.POST_TOOL_WHAT. Error text favours a code/cluster "what" match over a
+# wisdom narrative. NOTE: POST_TOOL_WISDOM (0.70) is LOWER than the prompt hook's
+# 0.72 — see thresholds.py's ⚠ VERIFY INTENT note (preserved, not yet reconciled).
 
 # Top-1 from each dimension — same discipline as prompt_hook: side-by-side
 # beats stacked-within-one-pool for noise control.
@@ -729,8 +726,8 @@ def main():
     top_scored: list[dict] = []  # captured for the JSONL row even when nothing fires
 
     for dim, idx, threshold in (
-        ("wisdom", wisdom_idx, THRESHOLD_WISDOM),
-        ("what", what_idx, THRESHOLD_WHAT),
+        ("wisdom", wisdom_idx, th.POST_TOOL_WISDOM),
+        ("what", what_idx, th.POST_TOOL_WHAT),
     ):
         if not idx:
             continue

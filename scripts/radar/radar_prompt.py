@@ -41,6 +41,7 @@ from doctrine_registry import (
 )
 import schema_corpus as sc
 import protocol_corpus as pc
+import thresholds as th
 
 INDEX_WISDOM_PATH = Path.home() / ".claude/radar_skills_wisdom.json"
 INDEX_WHAT_PATH = Path.home() / ".claude/radar_skills_what.json"
@@ -69,34 +70,13 @@ REBUILD_LOCK_TTL = 600  # seconds — a rebuild is in flight; don't stampede.
 # wisdom cache and re-embeds all chunks (~2-4 min). Incremental single-file
 # rebuilds finish in seconds, but the lock has to cover the full-rebuild case.
 
-# Bifurcated radar: two content classes, two distributions, two thresholds.
-# - WISDOM (Layers 1+4): narrative, high semantic signal, conservative bar.
-# - WHAT  (Layer 3 cluster digests): structural tables/symbol lists, lower
-#   semantic signal against natural-language prompts.
-# WHAT raised from 0.65 → 0.72 on 2026-05-13 after SKILL_INJECT_LOG analysis
-# showed cluster-digest chunks (`<cluster> › Entry Points / How to Explore /
-# Key Files`) over-firing in the 0.65-0.71 band — identifier-soup content
-# embeds broadly against most project prompts. Aligning to the wisdom bar
-# preserves high-confidence cluster matches and drops the noisy near-threshold
-# fires that don't teach anything the routing table doesn't already say.
-THRESHOLD_WISDOM = 0.72
-THRESHOLD_WHAT = 0.72
-
-# Schema Radar (plan thj/26-6-16): schema.sql COMMENT corpus, per-repo.
-# Same conservative bar as wisdom — a table-name token must ALSO appear in the
-# prompt (cheap prefilter), so the threshold only has to separate "mentioned and
-# relevant" from "mentioned in passing." Calibrate in Phase 5 off SCHEMA_INJECT.
-THRESHOLD_SCHEMA = 0.72
+# Cosine-match bars live in the central `thresholds` module (single source of
+# truth + per-constant Origin provenance): th.PROMPT_WISDOM / th.PROMPT_WHAT
+# (bifurcated skill radar), th.SCHEMA, th.PROTOCOL, th.PREFILTER_SEMANTIC.
 BUILD_SCHEMA_INDEX_SCRIPT = UTILITIES_DIR / "scripts" / "radar" / "build_schema_index.py"
 SCHEMA_REBUILD_LOG = Path.home() / ".claude" / "last-schema-index-rebuild.log"
 SCHEMA_REBUILD_LOCK_TTL = 300  # schema index rebuilds in seconds (no full-corpus blow)
 
-# Protocol Radar (plan thj/26-6-16 Phase 2): live protocol_component corpus.
-# Matching is PURELY semantic — component_keys are opaque pseudonyms
-# (knee_beartooth_trout_34) that never appear in a topical prompt, so there is
-# no keyword prefilter (unlike schema's distinctive table names); the chunk
-# CONTENT carries the signal. Conservative bar; calibrate off PROTOCOL inject log.
-THRESHOLD_PROTOCOL = 0.72
 BUILD_PROTOCOL_INDEX_SCRIPT = UTILITIES_DIR / "scripts" / "radar" / "build_protocol_index.py"
 PROTOCOL_REBUILD_LOG = Path.home() / ".claude" / "last-protocol-index-rebuild.log"
 PROTOCOL_REBUILD_LOCK_TTL = 600  # protocol rebuild re-embeds the corpus (~30-60s)
@@ -122,9 +102,8 @@ MIN_TRIGGER_LEN = 4
 # fires synthetic 1.00 scores on meta-skill names that double as common English
 # nouns (`versioning`, `implementation`, `utilities`, `skill-agent-curation`).
 # The fix: substring match candidates must ALSO clear a semantic-similarity
-# bar against the prompt, unless the trigger phrase dominates the prompt
-# (e.g. user typed "use gitnexus" — short prompt, intentional invocation).
-PREFILTER_SEMANTIC_THRESHOLD = 0.65
+# bar against the prompt (th.PREFILTER_SEMANTIC), unless the trigger phrase
+# dominates the prompt (e.g. "use gitnexus" — short, intentional invocation).
 PREFILTER_DOMINANCE_RATIO = 0.30  # trigger ≥ 30% of cleaned prompt → deterministic
 
 # Prior-injection contamination (Phase 0a): the Skill Radar injects
@@ -245,7 +224,7 @@ def keyword_prefilter(prompt: str, index: list[dict]) -> list[dict] | None:
         if not chunk_emb:
             continue
         sim = dot(query_vec, chunk_emb)
-        if sim >= PREFILTER_SEMANTIC_THRESHOLD:
+        if sim >= th.PREFILTER_SEMANTIC:
             deterministic.append({"score": sim, **chunk})
 
     return deterministic if deterministic else None
@@ -634,7 +613,7 @@ def trigger_schema_rebuild(slug: str) -> None:
 
 
 def match_schema(prompt: str, index: dict) -> dict | None:
-    """Top-1 schema chunk over THRESHOLD_SCHEMA, gated on a table-name token
+    """Top-1 schema chunk over th.SCHEMA, gated on a table-name token
     actually appearing in the prompt (word-boundary). The prefilter is the
     distinctive-name guard; the semantic threshold separates 'mentioned and
     relevant' from 'mentioned in passing' (the `session`/`patient` collision).
@@ -660,7 +639,7 @@ def match_schema(prompt: str, index: dict) -> dict | None:
         key=lambda x: x["score"],
         reverse=True,
     )
-    if scored and scored[0]["score"] >= THRESHOLD_SCHEMA:
+    if scored and scored[0]["score"] >= th.SCHEMA:
         return scored[0]
     return None
 
@@ -782,7 +761,7 @@ def trigger_protocol_rebuild(slug: str) -> None:
 
 
 def match_protocol(prompt: str, index: dict) -> dict | None:
-    """Top-1 protocol chunk over THRESHOLD_PROTOCOL — PURELY semantic (no keyword
+    """Top-1 protocol chunk over th.PROTOCOL — PURELY semantic (no keyword
     prefilter; component_keys are opaque and never appear in a prompt). None on
     no match or embed failure (silent no-op)."""
     chunks = index.get("chunks", [])
@@ -804,7 +783,7 @@ def match_protocol(prompt: str, index: dict) -> dict | None:
         if s > best_score:
             best_score = s
             best = c
-    if best and best_score >= THRESHOLD_PROTOCOL:
+    if best and best_score >= th.PROTOCOL:
         return {"score": best_score, **best}
     return None
 
@@ -976,8 +955,8 @@ def main():
             sys.exit(0)
 
         for dim, idx, threshold in (
-            ("wisdom", wisdom_idx, THRESHOLD_WISDOM),
-            ("what", what_idx, THRESHOLD_WHAT),
+            ("wisdom", wisdom_idx, th.PROMPT_WISDOM),
+            ("what", what_idx, th.PROMPT_WHAT),
         ):
             if not idx:
                 continue

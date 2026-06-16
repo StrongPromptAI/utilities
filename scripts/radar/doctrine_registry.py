@@ -38,17 +38,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from embed_client import embed as _shared_embed
 from session_log import _slugify_cwd
 from output_adapter import render_radar_block
+import thresholds as th
 
-# Match threshold — doctrine rules are higher-stakes than skill suggestions,
-# so the bar is set above the skill radar's 0.72. Phase 1 spec proposed 0.85
-# but empirical probes against the shared-svcs embed model show even
-# near-verbatim title repetition tops out at ~0.82-0.84 (see the calibration
-# script `~/repos/utilities/scripts/radar/tests/test_precision.py` for
-# the doctrine path). Setting the floor at 0.78 — above the skill radar bar,
-# below the empirical ceiling, leaving headroom for both real fires and noise
-# suppression. Re-tune if the auto-fire rate proves too noisy in practice
-# (track via `match_type='auto'` rows in session-log.jsonl).
-DOCTRINE_MATCH_THRESHOLD = 0.78
+# Doctrine match bar lives in the central `thresholds` module (th.DOCTRINE =
+# 0.78, above the 0.72 skill bar; full calibration rationale in its Origin block).
+DOCTRINE_MATCH_THRESHOLD = th.DOCTRINE
 
 # H2 boundary — each rule starts with `## Rule: <title>` and runs until the
 # next `## ` heading or EOF.

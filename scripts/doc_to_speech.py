@@ -31,15 +31,14 @@ Usage:
   # Strip file paths / names / scaffolding via a cheap LLM so you hear only the meat:
   uv run python scripts/doc_to_speech.py PLAN.md --scrub --speed 1.1
 
-  # Executive recap for a non-technical leadership audience — shorter, low/no jargon,
-  # business/pricing/branding/market-insight boosted over detail, all paths/filenames
-  # scrubbed. Implies an LLM pass; output auto-named "<doc>-exec.mp3" so it sits beside
-  # the full technical reading rather than clobbering it:
-  uv run python scripts/doc_to_speech.py PREHAB.md --audience exec
+  # Distill one or more docs into a NARRATIVE script instead of reading them. 'pm' = a
+  # product-doctrine briefing for the PM (synthesizes, surfaces decisions/tradeoffs/open
+  # questions); 'exec' = tight business recap. Auto-named "<doc>-pm.mp3"/"-exec.mp3":
+  uv run python scripts/doc_to_speech.py HEALING_JOURNEY.md --narrative pm
 
-  # See exactly what will be spoken — no synthesis (with --scrub or --audience exec,
-  # shows the LLM-transformed text):
-  uv run python scripts/doc_to_speech.py PLAN.md --scrub --dry-run
+  # See exactly what will be spoken — no TTS (with --scrub or --narrative, shows the
+  # LLM-distilled text; this is the fastest way to tune the narrative before synth):
+  uv run python scripts/doc_to_speech.py PLAN.md --narrative pm --dry-run
 
   # Use a locally-running TTS (services/tts on :8102, auth-off in dev):
   uv run python scripts/doc_to_speech.py PLAN.md --local-tts
@@ -204,6 +203,31 @@ _EXEC_SYSTEM = (
     "as flowing prose meant to be heard, not seen."
 )
 
+_PM_SYSTEM = (
+    "You are turning one or more internal product-doctrine documents into a spoken "
+    "NARRATIVE BRIEFING for the PRODUCT MANAGER who owns this product — a smart, "
+    "technical-enough listener who wants the *thinking*, not a recital. Produce flowing "
+    "spoken prose that distills and connects the ideas, NOT a section-by-section reading.\n\n"
+    "Do:\n"
+    "- Find the throughline and lead with it: what this product/area IS, the core model, "
+    "and why it's shaped this way.\n"
+    "- Synthesize ACROSS the material — weave related ideas from different parts into one "
+    "narrative; draw out the design decisions, the tradeoffs, the tensions, and the open "
+    "questions a PM needs to weigh.\n"
+    "- Surface what's load-bearing and what's still unsettled, so the listener can tell "
+    "what to tune. Name the boundary cases and the 'this must never happen' rules in plain "
+    "terms.\n"
+    "- Keep a product vocabulary: product concepts, user/patient experience, design "
+    "reasoning. Translate engineering and clinical jargon into plain language; keep a term "
+    "only if it carries product meaning.\n\n"
+    "Do NOT:\n"
+    "- Read document structure aloud, or mention file names, section pointers, headings, "
+    "dates, status tags, citations, or URLs — convey the idea, never the pointer.\n"
+    "- Over-summarize into a teaser — the PM wants the 'why', not just the 'what'. Be "
+    "substantial; this is a briefing, not a blurb.\n"
+    "- Add headings, bullets, labels, or meta-commentary. Output ONLY the narrative as "
+    "flowing prose meant to be heard."
+)
 
 def _segment(text: str, seg_chars: int) -> list[str]:
     """Split on paragraph breaks, packing into ≤ seg_chars segments so each LLM call's
@@ -572,7 +596,10 @@ def synthesize_ordered(
 
 # ── PCM → MP3 (ffmpeg) ───────────────────────────────────────────────────────────
 
-def pcm_to_mp3(pcm: bytes, *, title: str | None, bitrate: str, volume: float = 1.0) -> bytes:
+def pcm_to_mp3(
+    pcm: bytes, *, title: str | None, bitrate: str, volume: float = 1.0,
+    loudness: float | None = -16.0,
+) -> bytes:
     if not _which("ffmpeg"):
         _die("ffmpeg not found on PATH — install it (brew install ffmpeg).")
     fd, tmp = tempfile.mkstemp(suffix=".mp3")
@@ -582,10 +609,17 @@ def pcm_to_mp3(pcm: bytes, *, title: str | None, bitrate: str, volume: float = 1
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-f", "s16le", "-ar", str(KOKORO_SAMPLE_RATE), "-ac", "1", "-i", "pipe:0",
         ]
+        # Filter chain: loudnorm to a target integrated loudness FIRST (EBU R128 — boosts
+        # the quiet ~-28 LUFS Kokoro PCM to the podcast norm while compressing + limiting
+        # peaks, which linear gain can't do without clipping), then an optional extra
+        # linear trim with a soft limiter behind it.
+        filters = []
+        if loudness:
+            filters.append(f"loudnorm=I={loudness}:TP=-1.5:LRA=11")
         if volume and volume != 1.0:
-            # Linear amplitude gain (1.25 = +25%). A soft limiter follows so a boost
-            # that would clip the peaks is caught instead of distorting.
-            cmd += ["-af", f"volume={volume},alimiter=limit=0.97"]
+            filters.append(f"volume={volume},alimiter=limit=0.97")
+        if filters:
+            cmd += ["-af", ",".join(filters)]
         cmd += ["-codec:a", "libmp3lame", "-b:a", bitrate]
         if title:
             cmd += ["-metadata", f"title={title}"]
@@ -645,8 +679,8 @@ def upload_to_oxp(
 
 def _safe_mp3_name(doc_path: Path, override: str | None, audience: str = "technical") -> str:
     name = override or doc_path.stem
-    if not override and audience == "exec":
-        name = f"{name}-exec"          # sit beside the full reading, not clobber it
+    if not override and audience in ("exec", "pm"):
+        name = f"{name}-{audience}"     # sit beside the full reading, not clobber it
     name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")
     if not name:
         name = "document"
@@ -664,17 +698,17 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
     optional LLM pass; safe to call from a worker thread (one per doc).
     """
     raw = doc.read_text(encoding="utf-8")
-    # Exec recaps never read code aloud — drop the "Code block omitted." cue for them.
-    code_cue = "" if args.audience == "exec" else "Code block omitted."
+    # Narrative modes distill the ideas, never read code aloud — drop the code cue.
+    code_cue = "" if args.narrative else "Code block omitted."
     speakable, h1 = normalize_markdown(raw, code_cue=code_cue, section_breaks=True)
-    if args.audience == "exec":
-        if args.scrub:
-            _log(f"ℹ️  [{doc.name}] --scrub is redundant with --audience exec (the recap already strips paths/names).")
-        _log(f"👔 [{doc.name}] exec recap pass ({args.exec_model})…")
+    if args.narrative:
+        system = _PM_SYSTEM if args.narrative == "pm" else _EXEC_SYSTEM
+        label = f"{args.narrative} narrative"
+        _log(f"🎙️  [{doc.name}] {label} pass ({args.narrative_model})…")
         speakable = _llm_pass(
-            speakable, system=_EXEC_SYSTEM, model=args.exec_model,
+            speakable, system=system, model=args.narrative_model,
             api_key=_openrouter_key(), seg_chars=EXEC_SEG_CHARS,
-            max_tokens=4000, label="exec recap",
+            max_tokens=8000, label=label,
         )
     elif args.scrub:
         _log(f"🧽 [{doc.name}] LLM scrub pass ({args.scrub_model})…")
@@ -683,11 +717,25 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
             api_key=_openrouter_key(), seg_chars=SCRUB_SEG_CHARS,
             max_tokens=8000, label="scrub",
         )
+    # Pronunciation: deterministic whole-word/phrase respellings from pron_overrides.json
+    # (Kokoro/espeak pronounces most long words correctly on its own; the overrides file
+    # carries the exceptions — acronyms said as letters, numbers, and the rare botched
+    # word/name). This is the single text-level pronunciation lever; for surgical IPA see
+    # the kokoro-onnx phoneme path. (A prior LLM "normalize/respell" pass was removed: it
+    # mangled long-but-ordinary words espeak already says right — e.g. "reconciliation"
+    # → "reck-un-sil-ee-AY-shun" — making things worse, not better.)
     if not args.no_pron:
         overrides = load_pron_overrides()
         if overrides:
             speakable = apply_pron_overrides(speakable, overrides)
             _log(f"🗣️  [{doc.name}] applied {len(overrides)} pronunciation override(s)")
+    if args.save_script:
+        # Write the full distilled/cleaned spoken text — the transcript of what gets voiced.
+        # Single doc → exact path; multiple docs → infix the doc stem so they don't clobber.
+        sp = args.save_script
+        out_path = sp if len(args.docs) == 1 else sp.with_name(f"{sp.stem}.{doc.stem}{sp.suffix or '.txt'}")
+        out_path.write_text(speakable, encoding="utf-8")
+        _log(f"📝 [{doc.name}] saved spoken script → {out_path}")
     chunks = chunk_text(speakable, args.max_chars)
     if args.max_pause_gap > 0:
         before = sum(1 for c in chunks if c == _SECTION_SENTINEL)
@@ -702,8 +750,8 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
         title = args.title
     else:
         title = h1 or doc.stem
-        if args.audience == "exec":
-            title = f"{title} — exec recap"
+        if args.narrative:
+            title = f"{title} — {args.narrative} narrative"
     return chunks, title, len(raw), sum(len(c) for c in chunks)
 
 
@@ -802,7 +850,8 @@ def _process_doc(
     seconds = len(pcm) / 2 / KOKORO_SAMPLE_RATE
     _log(f"🎚️  [{doc.name}] {seconds/60:.1f} min of audio → MP3 ({args.bitrate})…")
 
-    mp3 = pcm_to_mp3(pcm, title=title, bitrate=args.bitrate, volume=args.volume)
+    mp3 = pcm_to_mp3(pcm, title=title, bitrate=args.bitrate, volume=args.volume,
+                     loudness=args.loudness)
     _log(f"💿 [{doc.name}] MP3: {len(mp3)/1_000_000:.1f} MB")
 
     if args.out:
@@ -813,7 +862,7 @@ def _process_doc(
             _die("--no-upload given but no --out path — nothing would be saved.")
         return None
 
-    filename = _safe_mp3_name(doc, args.name, args.audience)
+    filename = _safe_mp3_name(doc, args.name, args.narrative)
     _log(f"⬆️  [{doc.name}] uploading to {base_url} ({args.folder}/{filename})…")
     loc = upload_to_oxp(
         mp3, filename=filename, folder=args.folder, base_url=base_url,
@@ -842,14 +891,21 @@ def main() -> None:
     p.add_argument("--language", default="en-us")
     p.add_argument("--max-chars", type=int, default=700, help="Per-chunk cap, < TTS's 800.")
     p.add_argument("--gap", type=float, default=0.35, help="Silence between chunks, seconds.")
-    p.add_argument("--section-gap", type=float, default=2.0,
+    p.add_argument("--section-gap", type=float, default=1.4,
                    help="Silence at major topic (heading) boundaries — the 'take a breath' pause, seconds.")
     p.add_argument("--max-pause-gap", type=float, default=150.0,
                    help="Hard cap: max seconds of speech between pauses. A breath is auto-inserted "
                         "at a sentence boundary to enforce it (0 disables). Default 150 = 2.5 min.")
+    p.add_argument("--loudness", type=float, default=-16.0,
+                   help="Target integrated loudness in LUFS via ffmpeg loudnorm (EBU R128), "
+                        "applied at transcode. Raw Kokoro PCM lands ~-28 LUFS — far too quiet "
+                        "for phone speakers; -16 is the podcast/streaming norm. loudnorm both "
+                        "boosts AND compresses+limits, so it can reach the target without "
+                        "clipping (linear gain can't). 0 disables. Default -16.")
     p.add_argument("--volume", type=float, default=1.0,
-                   help="Linear output gain applied at transcode (1.25 = +25%% louder). "
-                        "A soft limiter follows so a boost can't clip. Default 1.0 (no change).")
+                   help="Extra linear gain applied AFTER loudness normalization (1.25 = +25%%). "
+                        "A soft limiter follows so it can't clip. Default 1.0 (no extra trim); "
+                        "normally leave this alone and tune --loudness instead.")
     p.add_argument("--bitrate", default="64k", help="MP3 bitrate (default 64k, good for speech).")
     p.add_argument("--concurrency", type=int, default=TTS_CONCURRENCY_DEFAULT,
                    help=f"Max concurrent synth requests in flight (default {TTS_CONCURRENCY_DEFAULT}, "
@@ -858,23 +914,24 @@ def main() -> None:
                         "(each doc's chunks then go sequentially). 1 = fully sequential.")
     p.add_argument("--name", help="Output filename override (single doc only; without needing .mp3).")
     p.add_argument("--title", help="ID3 title (single doc only; default: doc's first H1, else filename).")
-    p.add_argument("--audience", choices=["technical", "exec"], default="technical",
-                   help="Who the reading is for. 'technical' (default): the full document, "
-                        "read verbatim (use --scrub to also strip paths/scaffolding). "
-                        "'exec': an LLM-generated executive recap — shorter, low/no jargon, "
-                        "business/pricing/branding/market-insight boosted over detail, all "
-                        "paths and file names scrubbed. 'exec' implies an LLM pass and "
-                        "auto-suffixes the output filename with '-exec'.")
+    p.add_argument("--narrative", choices=["exec", "pm"], default=None,
+                   help="Distill the source(s) into a NARRATIVE script (LLM) instead of reading "
+                        "them. 'exec': tight recap for an impatient, non-technical business "
+                        "audience (model/pricing/positioning, no jargon). 'pm': a product-"
+                        "doctrine briefing for the product manager — synthesizes across the "
+                        "docs, surfaces design decisions, tradeoffs, and open questions. "
+                        "Multi-doc capable; auto-suffixes the filename '-exec'/'-pm'. Mutually "
+                        "exclusive with --scrub (narrative is authored fresh — nothing to scrub).")
     p.add_argument("--scrub", action="store_true",
-                   help="(technical audience) LLM cleanup pass: strip file paths/names, "
+                   help="(reading mode only) LLM cleanup pass: strip file paths/names, "
                         "code/CLI fragments, URLs, and cross-ref scaffolding so you hear only "
                         "the substance, WITHOUT summarizing. (Frontmatter + markdown are already "
                         "stripped deterministically; this is the polish pass. NOT PHI scrubbing — "
-                        "that's `kb scrub`. Redundant with --audience exec, which already scrubs.)")
+                        "that's `kb scrub`. Invalid with --narrative — there is nothing to scrub.)")
     p.add_argument("--scrub-model", default=DEFAULT_SCRUB_MODEL,
-                   help=f"OpenRouter model for the --scrub pass (default: {DEFAULT_SCRUB_MODEL}).")
-    p.add_argument("--exec-model", default=DEFAULT_EXEC_MODEL,
-                   help=f"OpenRouter model for the --audience exec recap (default: {DEFAULT_EXEC_MODEL}).")
+                   help=f"OpenRouter model for the --scrub + pronunciation-normalize passes (default: {DEFAULT_SCRUB_MODEL}).")
+    p.add_argument("--narrative-model", default=DEFAULT_EXEC_MODEL,
+                   help=f"OpenRouter model for the --narrative exec/pm distillation (default: {DEFAULT_EXEC_MODEL}).")
     p.add_argument("--local-tts", action="store_true", help="Use localhost:8102 (no token).")
     p.add_argument("--tts-url", help="Override the TTS base URL entirely.")
     p.add_argument("--warmup-timeout", type=float, default=300.0,
@@ -882,6 +939,10 @@ def main() -> None:
                         "synth (polls /health; cold start ~30–40s). 0 = skip the warmup poll.")
     p.add_argument("--email", default=os.environ.get("OXP_FILES_EMAIL", "doc-to-speech@oxp.files"),
                    help="sub claim for the oxp.files bearer (shown in its activity log).")
+    p.add_argument("--save-script", type=Path,
+                   help="Write the full distilled/cleaned spoken text (the transcript of what "
+                        "gets voiced) to this path. Multi-doc infixes the stem. Pairs with "
+                        "--dry-run to get the script without synth.")
     p.add_argument("--out", type=Path, help="Also write the MP3 to this local path (single doc only).")
     p.add_argument("--no-upload", action="store_true", help="Skip the oxp.files upload.")
     p.add_argument("--dry-run", action="store_true",
@@ -893,6 +954,9 @@ def main() -> None:
             _die(f"Document not found: {doc}")
     if not (0.5 <= args.speed <= 2.0):
         _die("--speed must be between 0.5 and 2.0")
+    if args.narrative and args.scrub:
+        _die("--scrub is invalid with --narrative — narrative content is authored fresh, "
+             "there is nothing to scrub.")
     multi = len(args.docs) > 1
     if multi and (args.out or args.name or args.title):
         _die("--out/--name/--title apply to a single document; omit them with multiple docs "

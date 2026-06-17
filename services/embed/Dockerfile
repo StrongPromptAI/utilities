@@ -24,5 +24,11 @@ print('Model + tokenizer baked to /app/models')"
 COPY nomic_embed.py .
 COPY app.py .
 
+# Cap glibc malloc arenas. Under uvicorn + the inference thread pool glibc would
+# otherwise spin up ~8×CPU per-thread arenas that each retain freed memory, bloating
+# RSS over time. Baked here (not a per-service Railway var) so both the embed and
+# embed-batch deployments inherit it with no knob to manage.
+ENV MALLOC_ARENA_MAX=2
+
 ENV PORT=8080
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port $PORT"]

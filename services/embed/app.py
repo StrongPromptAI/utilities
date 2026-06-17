@@ -59,9 +59,21 @@ _bearer = HTTPBearer()
 EMBED_MAX_BATCH = int(os.environ.get("EMBED_MAX_BATCH", "64"))
 EMBED_MAX_CONCURRENCY = int(os.environ.get("EMBED_MAX_CONCURRENCY", "2"))
 
+# Load-shedding queue depth. The semaphore caps how many inferences run at once
+# (the memory ceiling); this caps how many may WAIT for it. Past
+# EMBED_MAX_CONCURRENCY + EMBED_MAX_QUEUE in-flight, new requests get a fast 503 +
+# Retry-After instead of joining an unbounded queue that turns a user spike into a
+# hang for everyone. Clients (embed_client, gitnexus) already retry 503 with backoff,
+# so the spike smooths out. Default = 4× concurrency; no need to tune per box.
+EMBED_MAX_QUEUE = int(os.environ.get("EMBED_MAX_QUEUE", str(EMBED_MAX_CONCURRENCY * 4)))
+
 # Bound to the running loop in startup() so excess concurrent inferences queue
 # instead of stacking and blowing the memory ceiling (mirrors TTS _synth_semaphore).
 _embed_semaphore: asyncio.Semaphore | None = None
+# Admitted requests (running on the semaphore OR waiting for it). Mutated only from
+# the single-threaded event loop, so the read-then-increment below is atomic without
+# a lock. The load-shed gate reads this to reject before the queue grows unbounded.
+_pending: int = 0
 
 _ready: bool = False
 _load_error: str | None = None
@@ -160,19 +172,33 @@ async def _embed_texts(texts: list[str]) -> list[list[float]]:
     if not _ready:
         raise HTTPException(503, "Embedding model loading")
 
+    # Load-shed: refuse fast when the semaphore queue is already full, rather than
+    # joining an unbounded wait. Atomic in the asyncio loop (no await between the
+    # check and the increment). Retry-After tells well-behaved clients to back off.
+    global _pending
+    if _pending >= EMBED_MAX_CONCURRENCY + EMBED_MAX_QUEUE:
+        raise HTTPException(
+            503, "embedding service saturated, retry shortly",
+            headers={"Retry-After": "1"},
+        )
+    _pending += 1
+
     from nomic_embed import _embed
 
     assert _embed_semaphore is not None, "semaphore not initialized (startup not run)"
-    async with _embed_semaphore:
-        try:
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, lambda: _embed(texts))
-            vectors = result.tolist()
-            del result
-            gc.collect()
-            return vectors
-        except Exception as exc:
-            raise HTTPException(500, str(exc))
+    try:
+        async with _embed_semaphore:
+            try:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, lambda: _embed(texts))
+                vectors = result.tolist()
+                del result
+                gc.collect()
+                return vectors
+            except Exception as exc:
+                raise HTTPException(500, str(exc))
+    finally:
+        _pending -= 1
 
 
 @app.post("/embed", dependencies=_AUTH_DEPS)

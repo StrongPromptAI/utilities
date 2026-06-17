@@ -22,6 +22,7 @@ import io
 import json
 import os
 import sys
+import threading
 import time
 import wave
 from pathlib import Path
@@ -82,6 +83,18 @@ _kokoro_pkg_version = "unknown"
 _synth_semaphore: Optional[asyncio.Semaphore] = None
 _in_flight: int = 0
 
+# Serializes phonemization across concurrent synth threads. Kokoro phonemizes via
+# espeak-ng (a C library, reached through `phonemizer`) that holds PROCESS-GLOBAL
+# state — concurrent phonemize() calls interleave inside that state and corrupt each
+# other's output, so two requests can come back with scrambled/cross-contaminated
+# phonemes (audible as garbled, overlapping speech) or trip a shape-mismatch in
+# Kokoro's per-batch np.concatenate (a 500). ONNX InferenceSession.run() IS
+# thread-safe, so we lock ONLY the espeak step (a single up-front call in
+# Kokoro.create) and leave concurrent inference — the expensive, parallel-safe part
+# — untouched. Lock-the-resource, not the whole request: makes the race impossible
+# for every client (doc_to_speech, gitnexus, …), not just one script.
+_phonemize_lock = threading.Lock()
+
 # Ring buffer of recent synthesis end timestamps for short-window load reporting.
 _recent_synths: collections.deque = collections.deque(maxlen=512)
 _LOAD_WINDOW_SECONDS = 60.0
@@ -120,11 +133,23 @@ def require_tts_token(authorization: Optional[str] = Header(None)) -> Optional[d
 
 
 def _patch_kokoro_speed_dtype() -> None:
-    """Workaround upstream kokoro-onnx bug: in the "input_ids" branch of
-    `_create_audio`, the speed array is hardcoded to np.int32, but the v1.0 ONNX
-    model declares speed as tensor(float). Without this patch, every synthesis
-    raises `INVALID_ARGUMENT: Unexpected input data type. Actual: tensor(int32),
-    expected: tensor(float)`. Tracked upstream as kokoro-onnx Issue #155.
+    """Workaround two upstream kokoro-onnx bugs in `_create_audio`, both of which
+    only bite on the v1.0 ONNX model + our usage:
+
+    1. SPEED DTYPE: in the "input_ids" branch the speed array is hardcoded to
+       np.int32, but the v1.0 model declares speed as tensor(float), so every
+       synthesis raises `INVALID_ARGUMENT: Unexpected input data type. Actual:
+       tensor(int32), expected: tensor(float)`. (kokoro-onnx Issue #155.)
+
+    2. MULTI-BATCH SHAPE: the model returns audio shaped (1, N). For a chunk whose
+       phonemes exceed MAX_PHONEME_LENGTH (510), `create()` splits into several
+       batches and `np.concatenate`s the per-batch results along axis 0 — which
+       fails ("array dimensions except for the concatenation axis must match") the
+       moment two batches differ in length, i.e. almost always. It only "works" for
+       single-batch text (one array, nothing to concat) or the rare case of equal
+       batch lengths, which is why short chunks never hit it and long ones 500. We
+       flatten each batch to 1-D so concatenation is length-agnostic; downstream
+       only ever reads `samples.size` / `.tobytes()`, so 1-D is the correct shape.
     """
     import kokoro_onnx as _kk
 
@@ -150,9 +175,25 @@ def _patch_kokoro_speed_dtype() -> None:
                 "speed": _np.ones(1, dtype=_np.float32) * speed,
             }
         audio = self.sess.run(None, inputs)[0]
-        return audio, _kk.SAMPLE_RATE
+        return _np.asarray(audio).reshape(-1), _kk.SAMPLE_RATE
 
     _kk.Kokoro._create_audio = patched
+
+
+def _serialize_phonemize(kokoro) -> None:
+    """Wrap the instance's tokenizer.phonemize in `_phonemize_lock` so the espeak-ng
+    global state is never touched by two synth threads at once. Kokoro.create() calls
+    phonemize exactly once up front, so this serializes only the unsafe step and leaves
+    the ONNX inference loop concurrent. See `_phonemize_lock` for why this is required.
+    """
+    tok = kokoro.tokenizer
+    inner = tok.phonemize
+
+    def locked(*args, **kwargs):
+        with _phonemize_lock:
+            return inner(*args, **kwargs)
+
+    tok.phonemize = locked
 
 
 def _load_kokoro() -> None:
@@ -203,6 +244,7 @@ def _load_kokoro() -> None:
             str(KOKORO_MODEL_PATH), sess_options=so, providers=["CPUExecutionProvider"]
         )
         _kokoro = Kokoro.from_session(sess, str(KOKORO_VOICES_PATH))
+        _serialize_phonemize(_kokoro)
         _ready = True
         _log("[tts] Ready")
 

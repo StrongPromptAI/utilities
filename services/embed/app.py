@@ -66,6 +66,14 @@ EMBED_MAX_CONCURRENCY = int(os.environ.get("EMBED_MAX_CONCURRENCY", "2"))
 # may send any reasonable size and the server sub-batches it; only the absurd is 413'd.
 EMBED_MAX_REQUEST = int(os.environ.get("EMBED_MAX_REQUEST", "4096"))
 
+# Latency-fairness shed (interactive box only). Sub-batching keeps a big request
+# memory-safe, but it still holds ONE concurrency slot for the request's whole duration
+# — a single bulk request could starve interactive traffic for ~a minute. Set this on
+# the always-on box (e.g. 64, above legitimate interactive use) so an over-sized request
+# is shed FAST with 413 ("use the batch endpoint") WITHOUT taking a slot, structurally
+# enforcing the bulk→embed-batch routing preference. 0 = disabled (embed-batch + dev).
+EMBED_BULK_SHED = int(os.environ.get("EMBED_BULK_SHED", "0"))
+
 # Load-shedding queue depth. The semaphore caps how many inferences run at once
 # (the memory ceiling); this caps how many may WAIT for it. Past
 # EMBED_MAX_CONCURRENCY + EMBED_MAX_QUEUE in-flight, new requests get a fast 503 +
@@ -104,6 +112,73 @@ def _require_embed_token(creds: HTTPAuthorizationCredentials = Security(_bearer)
 _AUTH_DEPS = [Depends(_require_embed_token)] if _IS_PROD else []
 
 
+def _rss_mb() -> float:
+    """Process peak RSS in MB (ru_maxrss high-water mark). macOS=bytes, Linux=KB."""
+    import resource
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss / 1024 if os.uname().sysname == "Linux" else rss / (1024 * 1024)
+
+
+def _container_mem_limit_mb() -> float | None:
+    """The container's hard memory limit in MB from cgroup (v2 then v1), or None when
+    unconstrained / unreadable (e.g. local macOS dev). No env knob — read the real
+    ceiling the OOM-killer enforces."""
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            raw = open(path).read().strip()
+        except OSError:
+            continue
+        if raw == "max":  # cgroup v2 unlimited
+            return None
+        try:
+            v = int(raw)
+        except ValueError:
+            continue
+        if v <= 0 or v > (1 << 62):  # v1 unlimited sentinel
+            return None
+        return v / (1024 * 1024)
+    return None
+
+
+# Fraction of the container limit the projected peak must stay under (headroom for the
+# OS, the runtime, and non-embed allocations). Breach = fail-closed at boot.
+_MEM_BUDGET_FRACTION = 0.92
+
+
+def _memory_selfcheck() -> None:
+    """Poka-yoke: at boot, run ONE worst-case slice (EMBED_MAX_BATCH × ~512 tokens) and
+    project the full-concurrency peak (baseline + concurrency × one-slice working set).
+    If that exceeds the container's real memory limit, fail closed — set _load_error so
+    /health returns 500 and /embed never serves — instead of letting the box OOM-crash
+    under live load. This is the gate that would have caught all three mis-sized configs
+    from the 2026-06-17 incident at boot rather than in production. No-ops loudly when the
+    limit is unreadable (local dev)."""
+    global _load_error
+    from nomic_embed import _embed
+    baseline = _rss_mb()
+    probe = ["search_document: " + ("word " * 400)] * EMBED_MAX_BATCH  # ~512 tok each
+    _embed(probe)
+    gc.collect()
+    slice_delta = max(0.0, _rss_mb() - baseline)
+    projected = baseline + EMBED_MAX_CONCURRENCY * slice_delta
+    limit = _container_mem_limit_mb()
+    print(
+        f"[embed] mem self-check: baseline={baseline:.0f}MB slice(batch={EMBED_MAX_BATCH})"
+        f"_delta={slice_delta:.0f}MB projected_peak(conc={EMBED_MAX_CONCURRENCY})="
+        f"{projected:.0f}MB limit={limit:.0f}MB" if limit else
+        f"[embed] mem self-check: baseline={baseline:.0f}MB slice_delta={slice_delta:.0f}MB "
+        f"projected_peak={projected:.0f}MB limit=unknown(dev) — gate skipped"
+    )
+    if limit and projected > _MEM_BUDGET_FRACTION * limit:
+        _load_error = (
+            f"mem self-check FAILED: projected peak {projected:.0f}MB exceeds "
+            f"{_MEM_BUDGET_FRACTION:.0%} of the {limit:.0f}MB container limit at "
+            f"EMBED_MAX_BATCH={EMBED_MAX_BATCH} × EMBED_MAX_CONCURRENCY={EMBED_MAX_CONCURRENCY}. "
+            f"Lower the slice/concurrency or raise the box. Refusing to serve (fail-closed)."
+        )
+        print(f"❌ [embed] {_load_error}")
+
+
 def _warmup() -> None:
     global _ready, _load_error
     try:
@@ -111,6 +186,9 @@ def _warmup() -> None:
         _get_session()
         result = _embed(["warmup"])
         assert result.shape[1] == 768, f"Expected 768-dim, got {result.shape[1]}"
+        _memory_selfcheck()
+        if _load_error:
+            return  # self-check failed — stay not-ready, /health 500, /embed 503
         _ready = True
         print("[embed] Ready (768-dim, warm-up passed)")
     except Exception as exc:
@@ -129,12 +207,8 @@ async def startup() -> None:
 @app.get("/mem")
 def mem() -> Response:
     """Memory usage snapshot — unauthenticated for monitoring."""
-    import resource
-    rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    # macOS reports bytes, Linux reports KB
-    rss_mb = rss_kb / 1024 if os.uname().sysname == "Linux" else rss_kb / (1024 * 1024)
     return Response(
-        content=f'{{"rss_mb":{rss_mb:.1f}}}',
+        content=f'{{"rss_mb":{_rss_mb():.1f}}}',
         status_code=200,
         media_type="application/json",
     )
@@ -176,6 +250,15 @@ async def _embed_texts(texts: list[str]) -> list[list[float]]:
     if len(texts) > EMBED_MAX_REQUEST:
         raise HTTPException(
             413, f"request too large: {len(texts)} > EMBED_MAX_REQUEST={EMBED_MAX_REQUEST}"
+        )
+    # Latency-fairness shed: refuse over-sized requests on the interactive box FAST,
+    # before taking a concurrency slot, so a bulk request can't starve interactive
+    # traffic. Memory is already safe (sub-batching); this protects the latency SLA.
+    if EMBED_BULK_SHED and len(texts) > EMBED_BULK_SHED:
+        raise HTTPException(
+            413,
+            f"request of {len(texts)} exceeds this interactive box's limit "
+            f"(EMBED_BULK_SHED={EMBED_BULK_SHED}); send bulk to the embed-batch endpoint",
         )
     if not _ready:
         raise HTTPException(503, "Embedding model loading")

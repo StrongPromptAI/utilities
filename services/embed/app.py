@@ -51,13 +51,20 @@ _JWT_OPTIONS = {"require": ["exp", "iss", "aud"]}
 
 _bearer = HTTPBearer()
 
-# Per-request memory ceilings. EMBED_MAX_BATCH bounds the WIDTH of one request
-# (peak memory scales batch × 512 × 768 × 4 bytes); EMBED_MAX_CONCURRENCY bounds
-# how many inferences run at once. Together with the intra-op thread cap in
-# nomic_embed.py, peak memory is a known fixed number the box is sized to. Defaults
-# suit the small always-on chat box; the fat batch box raises both via env.
-EMBED_MAX_BATCH = int(os.environ.get("EMBED_MAX_BATCH", "64"))
+# Memory ceiling. EMBED_MAX_BATCH is the per-inference SLICE size — the server
+# sub-batches every request to this width internally (see _embed_texts), so peak
+# memory ≈ baseline + EMBED_MAX_CONCURRENCY × EMBED_MAX_BATCH × (~per-text cost),
+# a fixed number the box is sized to, NO MATTER how large a request a client sends.
+# Tragedy-of-the-commons guard: the server caps the grazing, not the clients — a
+# dumb client can send any size and never overgraze the shared box. Defaults suit the
+# small always-on chat box; the fat batch box can raise the slice via env.
+EMBED_MAX_BATCH = int(os.environ.get("EMBED_MAX_BATCH", "16"))
 EMBED_MAX_CONCURRENCY = int(os.environ.get("EMBED_MAX_CONCURRENCY", "2"))
+
+# Absolute per-request ceiling — an abuse / runaway guard ONLY, not a memory knob
+# (memory is bounded by the slice above regardless of request size). A dumb client
+# may send any reasonable size and the server sub-batches it; only the absurd is 413'd.
+EMBED_MAX_REQUEST = int(os.environ.get("EMBED_MAX_REQUEST", "4096"))
 
 # Load-shedding queue depth. The semaphore caps how many inferences run at once
 # (the memory ceiling); this caps how many may WAIT for it. Past
@@ -158,16 +165,17 @@ class OpenAIEmbedRequest(BaseModel):
 async def _embed_texts(texts: list[str]) -> list[list[float]]:
     """Shared embed path for both endpoints — the single place the caps live.
 
-    Order is deliberate (fail-closed on the cheap checks first): reject empty or
-    oversized batches before touching readiness or the model, so a malformed request
-    is rejected even while the model is still loading. The semaphore then bounds how
-    many inferences run concurrently; excess requests queue rather than stacking.
+    The server protects the commons: a client may send ANY reasonable number of
+    texts (dumb client), and the server sub-batches internally to EMBED_MAX_BATCH so
+    peak memory is bounded no matter the request size. Order is fail-closed: reject
+    empty / absurdly-large before touching the model; the semaphore bounds concurrent
+    inferences; the queue gate sheds load past that.
     """
     if not texts:
         raise HTTPException(400, "inputs is required")
-    if len(texts) > EMBED_MAX_BATCH:
+    if len(texts) > EMBED_MAX_REQUEST:
         raise HTTPException(
-            413, f"batch too large: {len(texts)} > EMBED_MAX_BATCH={EMBED_MAX_BATCH}"
+            413, f"request too large: {len(texts)} > EMBED_MAX_REQUEST={EMBED_MAX_REQUEST}"
         )
     if not _ready:
         raise HTTPException(503, "Embedding model loading")
@@ -190,11 +198,21 @@ async def _embed_texts(texts: list[str]) -> list[list[float]]:
         async with _embed_semaphore:
             try:
                 loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, lambda: _embed(texts))
-                vectors = result.tolist()
-                del result
-                gc.collect()
+                # Server-side sub-batching — the commons cap. Slice the request into
+                # EMBED_MAX_BATCH-wide inferences so peak RSS = baseline + (one slice),
+                # independent of how big a batch the client sent. One semaphore slot
+                # spans the whole request, so concurrency (hence total memory) stays
+                # bounded by EMBED_MAX_CONCURRENCY × slice.
+                vectors: list[list[float]] = []
+                for i in range(0, len(texts), EMBED_MAX_BATCH):
+                    sub = texts[i : i + EMBED_MAX_BATCH]
+                    result = await loop.run_in_executor(None, lambda s=sub: _embed(s))
+                    vectors.extend(result.tolist())
+                    del result
+                    gc.collect()
                 return vectors
+            except HTTPException:
+                raise
             except Exception as exc:
                 raise HTTPException(500, str(exc))
     finally:

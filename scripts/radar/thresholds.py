@@ -25,10 +25,18 @@ from __future__ import annotations
 # Origin: the skill radar's calibrated prompt-match bar. WHAT was raised
 #   0.65 → 0.72 on 2026-05-13 after SKILL_INJECT_LOG analysis (cluster digests
 #   are identifier-soup that embeds broadly; near-threshold matches don't teach
-#   anything the routing table doesn't already say). WISDOM holds the same 0.72
+#   anything the routing table doesn't already say). WISDOM held the same 0.72
 #   conservative bar.
-PROMPT_WISDOM = 0.72
-PROMPT_WHAT = 0.72
+#   2026-06-16 RECALIBRATION (0.72 → 0.66): a 25-question schema-corpus sweep
+#   (questions derived from schema.sql table comments, expected-table labelled)
+#   showed 0.72 MISSED 8/25 (32%) well-formed questions; 0.66 recovered to 21/25
+#   correct with only +1 fired-wrong (both fired-wrong were sibling tables, still
+#   useful context). True-positive band was 0.61–0.77, so 0.72 clipped real hits.
+#   Caveat: that sweep measured RECALL, not false-positive rate on off-topic
+#   prompts (the deferred "threshold calibration loop" owns the FP axis). PREFILTER
+#   (0.65) still gates. See thj/plans/26-6-16_radar-protocol-corpus-and-provenance.md.
+PROMPT_WISDOM = 0.66
+PROMPT_WHAT = 0.66
 
 # ── Post-tool hook (PostToolUse, error text) — error-string distribution ─────
 # Origin: per-distribution tuning — error text favours a code/cluster "what"
@@ -47,7 +55,9 @@ POST_TOOL_WHAT = 0.72
 #   (thj/26-6-16); calibrate in its Phase 5 off the SCHEMA inject log. A
 #   table-name keyword prefilter does most of the precision work, so this cosine
 #   bar only separates "mentioned and relevant" from "mentioned in passing".
-SCHEMA = 0.72
+#   2026-06-16: recalibrated 0.72 → 0.66 off the 25-question schema sweep (see
+#   PROMPT_WISDOM note above) — this is the corpus that sweep directly measured.
+SCHEMA = 0.66
 
 # ── Protocol corpus (prompt hook) ────────────────────────────────────────────
 # Origin: inherited the 0.72 prompt-match bar — UNCALIBRATED for protocol.
@@ -55,7 +65,12 @@ SCHEMA = 0.72
 #   pseudonyms that never appear in a prompt), so this cosine bar is the ONLY
 #   precision gate — calibrate off the PROTOCOL inject log once there is real
 #   traffic (it may need to rise to hold precision without the prefilter).
-PROTOCOL = 0.72
+#   2026-06-16: lowered 0.72 → 0.66 alongside the schema/wisdom recalibration.
+#   ⚠ WATCH: unlike SCHEMA, PROTOCOL has NO keyword prefilter, so 0.66 is the sole
+#   precision gate AND was NOT directly measured by the schema sweep — protocol
+#   traffic is near-zero today, so the FP risk is latent. If protocol injections
+#   read noisy once the corpus sees real bug-hunt traffic, RAISE this first.
+PROTOCOL = 0.66
 
 # ── Doctrine registry (prompt hook) ──────────────────────────────────────────
 # Origin: doctrine is higher-stakes than skill suggestions, so the bar sits

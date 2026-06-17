@@ -1345,7 +1345,7 @@ def file_browser_html(
             download_href = f'/api/files/download/{quote(raw_name, safe="")}'
             if in_folder:
                 download_href += f'?folder={cf_quoted}'
-            cp_label = "Copy public link" if is_public_folder else "Copy download URL"
+            cp_label = "Copy public download URL" if is_public_folder else "Copy private download URL"
             kebab_html = (
                 f'<span class="kebab-wrap">'
                 f'<button type="button" class="kebab-trigger" data-kebab="{name}" '

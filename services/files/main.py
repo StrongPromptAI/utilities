@@ -34,13 +34,14 @@ import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import quote
 
 import boto3
 import httpx
 import markdown
 from botocore.exceptions import ClientError
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from jose import jwt
 from jose.exceptions import JWTError
 from pydantic import BaseModel
@@ -165,37 +166,12 @@ async def lifespan(app: FastAPI):
     except ClientError as exc:
         log.warning("put_bucket_lifecycle_configuration failed: %s", exc)
 
-    # Public-read bucket policy — designated folders are world-readable so
-    # podcast mp3s (and similar) can be embedded in public sites with a
-    # permanent URL instead of an expiring presigned one. Full replace, so
-    # the app owns this config; do not hand-edit via Tigris console.
-    if PUBLIC_FOLDERS:
-        try:
-            resources = [
-                f"arn:aws:s3:::{S3_BUCKET}/{S3_PREFIX}{folder}/*"
-                for folder in sorted(PUBLIC_FOLDERS)
-            ]
-            policy = json.dumps({
-                "Version": "2012-10-17",
-                "Statement": [{
-                    "Sid": "PublicReadDesignatedFolders",
-                    "Effect": "Allow",
-                    "Principal": "*",
-                    "Action": ["s3:GetObject"],
-                    "Resource": resources,
-                }],
-            })
-            s3.put_bucket_policy(Bucket=S3_BUCKET, Policy=policy)
-            log.info("public-read policy applied to: %s", sorted(PUBLIC_FOLDERS))
-        except ClientError as exc:
-            log.warning("put_bucket_policy failed: %s", exc)
-    else:
-        # If no public folders configured, strip any existing policy so we
-        # don't silently leave a stale grant in place.
-        try:
-            s3.delete_bucket_policy(Bucket=S3_BUCKET)
-        except ClientError:
-            pass
+    # Public folders are served by the app's unauthenticated GET /public/{name}
+    # route (below), NOT by a bucket policy. The Tigris backend returns
+    # NotImplemented for PutBucketPolicy, and this bucket is shared with private
+    # data (repo backups, internal briefings), so it must never be made
+    # world-readable at the bucket level. The app proxies reads for the `public`
+    # prefix only — every other prefix stays auth-gated / presigned.
 
     # CORS — required for browser direct PUT/GET to Tigris. Full replace, so
     # the app owns this config; do not hand-edit via Tigris console.
@@ -786,10 +762,11 @@ async def api_presign(
     prefix = _prefix_for(folder or None)
     key = f"{prefix}{name}"
 
-    # Public folders short-circuit to a bare permanent URL — the bucket policy
-    # (see lifespan) grants anonymous s3:GetObject on this prefix.
+    # Public folders return a permanent, no-expiry URL served by the app's
+    # GET /public/{name} route (the bucket stays private — Tigris has no working
+    # bucket-policy/public-ACL path, and this bucket holds private data too).
     if folder and folder in PUBLIC_FOLDERS:
-        url = f"{S3_ENDPOINT.rstrip('/')}/{S3_BUCKET}/{key}"
+        url = f"{PUBLIC_BASE_URL.rstrip('/')}/public/{quote(name)}"
         log_activity(
             user=user, action="presign", request=request,
             file=name, folder=folder,
@@ -851,6 +828,41 @@ async def api_stream(filename: str, folder: str = "", _: str = Depends(require_u
         log.exception("presign stream failed")
         raise HTTPException(500, f"presign failed: {exc}")
     return RedirectResponse(url, status_code=307)
+
+
+@app.get("/public/{filename:path}")
+async def public_download(filename: str):
+    """Unauthenticated permanent download for files in the `public` folder.
+
+    This is how oxp.files serves permanent links: the bucket is private (Tigris
+    has no working public-bucket path and the bucket is shared with private data),
+    so the app proxies reads — scoped STRICTLY to the `public/` prefix, so no
+    other folder is ever reachable here. `_safe_filename` rejects traversal."""
+    if "public" not in PUBLIC_FOLDERS:
+        raise HTTPException(404, "not found")
+    name = _safe_filename(filename)
+    key = f"{S3_PREFIX}public/{name}"
+    try:
+        obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "404", "NotFound"):
+            raise HTTPException(404, "not found")
+        log.exception("public_download get_object failed")
+        raise HTTPException(500, "download failed")
+    ext = name.lower().rsplit(".", 1)
+    content_type = _INLINE_CONTENT_TYPES.get(
+        f".{ext[1]}" if len(ext) == 2 else "", "application/octet-stream"
+    )
+    headers = {
+        "Content-Disposition": f'attachment; filename="{name}"',
+        "Cache-Control": "public, max-age=3600",
+    }
+    if obj.get("ContentLength") is not None:
+        headers["Content-Length"] = str(obj["ContentLength"])
+    return StreamingResponse(
+        obj["Body"].iter_chunks(), media_type=content_type, headers=headers
+    )
 
 
 _MARKDOWN_EXTS = (".md", ".markdown")

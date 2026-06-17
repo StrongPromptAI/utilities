@@ -31,6 +31,21 @@ _IS_PROD = (
 # chat box; the fat batch box raises it via env to use its larger CPU grant.
 _INTRA_OP_THREADS = int(os.environ.get("EMBED_INTRA_OP_THREADS", "2"))
 
+# Memory-appetite caps for the ONNX CPU runtime. Both default OFF because this is
+# the small, always-on box and a heavy/bursty consumer (e.g. a bulk radar reindex
+# pointed at the interactive service instead of embed-batch) must NOT be able to
+# OOM it:
+#   - CPU mem arena: ORT's arena pre-allocates and *retains* large blocks; with this
+#     model's dynamic batch/seq shapes it keeps extending and never gives the memory
+#     back, so RSS creeps up across requests until the container is OOM-killed (the
+#     observed `Killed` crash-loop). Disabled, memory is released after each run —
+#     small latency cost, stable RSS. This is the "don't eat like a goldfish" knob.
+#   - mem pattern: assumes STATIC shapes; with our dynamic shapes ORT recommends
+#     disabling it (it only wastes memory here).
+# The fat batch box (8 GB) can re-enable either via env if it wants the throughput.
+_CPU_MEM_ARENA = os.environ.get("EMBED_CPU_MEM_ARENA", "0") == "1"
+_MEM_PATTERN = os.environ.get("EMBED_MEM_PATTERN", "0") == "1"
+
 
 @lru_cache(maxsize=1)
 def _get_session():
@@ -70,10 +85,15 @@ def _get_session():
     sess_opts = ort.SessionOptions()
     sess_opts.intra_op_num_threads = _INTRA_OP_THREADS
     sess_opts.inter_op_num_threads = 1
+    sess_opts.enable_cpu_mem_arena = _CPU_MEM_ARENA
+    sess_opts.enable_mem_pattern = _MEM_PATTERN
     session = ort.InferenceSession(
         model_path, sess_options=sess_opts, providers=["CPUExecutionProvider"]
     )
-    logger.info(f"ONNX embedding model loaded (intra_op_threads={_INTRA_OP_THREADS})")
+    logger.info(
+        f"ONNX embedding model loaded (intra_op_threads={_INTRA_OP_THREADS}, "
+        f"cpu_mem_arena={_CPU_MEM_ARENA}, mem_pattern={_MEM_PATTERN})"
+    )
     return tokenizer, session
 
 

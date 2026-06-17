@@ -37,6 +37,7 @@ from typing import Optional
 
 import boto3
 import httpx
+import markdown
 from botocore.exceptions import ClientError
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -101,7 +102,7 @@ PRESIGN_EXPIRES = 3600  # 1 hour
 ACTIVITY_PREFIX = "_activity/"
 ACTIVITY_ACTIONS = {
     "login", "logout", "upload", "download", "delete", "rename", "move",
-    "presign",
+    "presign", "preview",
 }
 
 
@@ -850,6 +851,55 @@ async def api_stream(filename: str, folder: str = "", _: str = Depends(require_u
         log.exception("presign stream failed")
         raise HTTPException(500, f"presign failed: {exc}")
     return RedirectResponse(url, status_code=307)
+
+
+_MARKDOWN_EXTS = (".md", ".markdown")
+_MAX_PREVIEW_BYTES = 2_000_000  # 2 MB — previews are docs, not data dumps
+
+# Render the markdown server-side, then serve it under a strict, script-blocking
+# CSP. The source file is user-uploaded and this origin holds the SSO session
+# cookie, so any HTML/JS embedded in the markdown must be inert: no scripts, no
+# same-origin fetch, only inline styles (ours) and https/data images.
+_PREVIEW_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:"
+
+
+@app.get("/api/files/preview/{filename:path}", response_class=HTMLResponse)
+async def api_preview(
+    filename: str, request: Request, folder: str = "", user: str = Depends(require_user)
+):
+    """Server-rendered HTML preview of a markdown file, for opening in a new tab."""
+    name = _safe_filename(filename)
+    if not name.lower().endswith(_MARKDOWN_EXTS):
+        raise HTTPException(415, "preview is only available for markdown files")
+    prefix = _prefix_for(folder or None)
+    key = f"{prefix}{name}"
+    try:
+        obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404", "NotFound"):
+            raise HTTPException(404, "file not found")
+        log.exception("preview get_object failed")
+        raise HTTPException(500, f"preview failed: {exc}")
+    # Fail closed on oversize whether or not ContentLength is reported: read at
+    # most the cap + 1 byte and reject if it overflows.
+    if obj.get("ContentLength", 0) > _MAX_PREVIEW_BYTES:
+        raise HTTPException(413, "file too large to preview")
+    raw = obj["Body"].read(_MAX_PREVIEW_BYTES + 1)
+    if len(raw) > _MAX_PREVIEW_BYTES:
+        raise HTTPException(413, "file too large to preview")
+    text = raw.decode("utf-8", errors="replace")
+    body_html = markdown.markdown(
+        text, extensions=["extra", "sane_lists", "toc"], output_format="html5"
+    )
+    log_activity(user=user, action="preview", request=request, file=name, folder=folder or None)
+    return HTMLResponse(
+        templates.markdown_preview_html(name, body_html),
+        headers={
+            "Content-Security-Policy": _PREVIEW_CSP,
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
 
 
 class RenameRequest(BaseModel):

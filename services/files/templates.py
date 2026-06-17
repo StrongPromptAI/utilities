@@ -835,6 +835,66 @@ def error_html(title: str, message: str) -> str:
     return _page(title, body)
 
 
+# Self-contained stylesheet for the markdown preview page. System fonts + zero
+# scripts so the page renders cleanly under the strict, script-blocking CSP the
+# preview route sets (the source file is user-uploaded — no JS may run here, and
+# no external font/style fetch is needed).
+_MD_PREVIEW_CSS = """
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 48px 20px 96px;
+  background: #0a0b0d; color: #f5f1e8;
+  font: 16px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.md { max-width: 760px; margin: 0 auto; }
+.md h1, .md h2, .md h3, .md h4 { line-height: 1.25; font-weight: 700; margin: 1.6em 0 0.6em; }
+.md h1 { font-size: 1.9em; border-bottom: 1px solid #2a2b2f; padding-bottom: 0.3em; margin-top: 0; }
+.md h2 { font-size: 1.45em; border-bottom: 1px solid #2a2b2f; padding-bottom: 0.25em; }
+.md h3 { font-size: 1.2em; }
+.md p, .md li { color: #e7e2d6; }
+.md a { color: #3fb950; text-decoration: none; }
+.md a:hover { text-decoration: underline; }
+.md code {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em; background: rgba(255,255,255,0.06);
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.md pre {
+  background: rgba(255,255,255,0.04); border: 1px solid #2a2b2f; border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto;
+}
+.md pre code { background: none; padding: 0; }
+.md blockquote {
+  margin: 1em 0; padding: 0.2em 1em; color: #b9b3a6;
+  border-left: 3px solid #c71a2f; background: rgba(255,255,255,0.02);
+}
+.md table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.95em; }
+.md th, .md td { border: 1px solid #2a2b2f; padding: 8px 12px; text-align: left; }
+.md th { background: rgba(255,255,255,0.04); }
+.md img { max-width: 100%; height: auto; }
+.md hr { border: 0; border-top: 1px solid #2a2b2f; margin: 2em 0; }
+.md ul, .md ol { padding-left: 1.4em; }
+"""
+
+
+def markdown_preview_html(filename: str, body_html: str) -> str:
+    """Standalone preview page for an already-rendered markdown body.
+
+    Deliberately does NOT use _page(): it ships its own system-font stylesheet and
+    no scripts, so it stays valid under the preview route's strict CSP. `body_html`
+    is markdown-rendered HTML; the route serves it with a script-blocking CSP, so
+    any HTML embedded in the source file is inert on this authenticated origin."""
+    safe_title = escape(filename)
+    return (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<title>{safe_title} &middot; preview</title>'
+        f'<style>{_MD_PREVIEW_CSS}</style></head>'
+        f'<body><article class="md">{body_html}</article></body></html>'
+    )
+
+
 _ICON_PLAY = (
     '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" '
     'stroke="currentColor" stroke-width="1" stroke-linecap="round" '
@@ -1088,6 +1148,7 @@ _ACTION_LABELS = {
     "delete": "Delete",
     "rename": "Rename",
     "move": "Move",
+    "preview": "Preview",
 }
 
 
@@ -1257,6 +1318,7 @@ def file_browser_html(
             lower = raw_name.lower()
             is_audio = any(lower.endswith(ext) for ext in (".wav", ".mp3", ".m4a", ".ogg", ".flac"))
             is_pdf = lower.endswith(".pdf")
+            is_markdown = lower.endswith((".md", ".markdown"))
             play_link = (
                 f'<a class="icon play" href="#" data-play="{name}" title="Play" aria-label="Play {name}">{_ICON_PLAY}</a>'
                 if is_audio else ''
@@ -1264,10 +1326,21 @@ def file_browser_html(
             stream_href = f'/api/files/stream/{quote(raw_name, safe="")}'
             if in_folder:
                 stream_href += f'?folder={cf_quoted}'
+            # Preview in a new tab: PDFs render inline straight from the stream URL;
+            # markdown gets a server-rendered HTML page (the /preview route). Both land
+            # in the leading icon slot — where audio shows its play button.
+            if is_pdf:
+                preview_href = stream_href
+            elif is_markdown:
+                preview_href = f'/api/files/preview/{quote(raw_name, safe="")}'
+                if in_folder:
+                    preview_href += f'?folder={cf_quoted}'
+            else:
+                preview_href = ''
             preview_link = (
-                f'<a class="icon preview" href="{stream_href}" target="_blank" rel="noopener" '
+                f'<a class="icon preview" href="{preview_href}" target="_blank" rel="noopener" '
                 f'data-preview="{name}" title="Preview" aria-label="Preview {name}">{_ICON_PREVIEW}</a>'
-                if is_pdf else ''
+                if preview_href else ''
             )
             download_href = f'/api/files/download/{quote(raw_name, safe="")}'
             if in_folder:

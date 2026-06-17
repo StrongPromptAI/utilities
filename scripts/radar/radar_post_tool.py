@@ -38,7 +38,7 @@ from pathlib import Path
 
 # Local import — Skill Radar embed client, backed by the utilities ONNX service.
 sys.path.insert(0, str(Path(__file__).parent))
-from embed_client import embed as _shared_embed
+from embed_client import embed as _shared_embed, EmbedUnavailable
 from event_adapter import ToolEvent, normalize_event
 from output_adapter import render_additional_context
 import schema_corpus as sc
@@ -176,10 +176,16 @@ def dot(a: list[float], b: list[float]) -> float:
 
 
 def embed(text: str) -> list[float] | None:
-    """Single-text embed via shared-svcs. Returns None on any failure so the
-    hook silently no-ops instead of blocking Claude Code."""
+    """Single-text embed via shared-svcs.
+
+    Returns None when the backend is up but the call failed (503 shedding, etc.) so
+    the hook degrades quietly. Propagates EmbedUnavailable — no backend reachable at
+    all — so main() hard-fails loudly instead of silently dropping radar. retries=1
+    keeps down-detection snappy."""
     try:
-        return _shared_embed([text], timeout=3.0)[0]
+        return _shared_embed([text], timeout=3.0, retries=1)[0]
+    except EmbedUnavailable:
+        raise
     except Exception:
         return None
 
@@ -708,10 +714,30 @@ def main():
             _touch_heartbeat()
         sys.exit(0)
 
-    query_vec = embed(QUERY_PREFIX + error_text)
+    try:
+        query_vec = embed(QUERY_PREFIX + error_text)
+    except EmbedUnavailable as e:
+        # No embed backend reachable at all (neither local ONNX nor Railway). Record
+        # the signal so harvest still sees the error, then fail LOUD (exit 2) rather
+        # than silently dropping radar coverage. (503/busy is "up" → None below.)
+        if session_log_append(
+            event_type="bash_error",
+            tool=event.tool_name or "Bash",
+            command_or_context=command_context,
+            error_text=error_text,
+            outcome="missed",
+        ):
+            _touch_heartbeat()
+        print(
+            f"❌ Skill Radar: embed backend unavailable — {e}\n"
+            "Start local ONNX (services/embed on :8100) or point SKILL_RADAR_EMBED_URL "
+            "at Railway.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if not query_vec:
-        # Embed unavailable — record the error so we still capture signal;
-        # harvest can decide what to do with un-matched rows.
+        # Backend up but the call failed (busy/transient) — record the error so we
+        # still capture signal; harvest can decide what to do with un-matched rows.
         if session_log_append(
             event_type="bash_error",
             tool=event.tool_name or "Bash",

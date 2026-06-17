@@ -34,7 +34,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from embed_client import EMBED_URL, embed as _embed
+from embed_client import EMBED_URL, embed as _embed, wait_for_ready
 
 print(f"[build_index] Embed backend: {EMBED_URL}")
 
@@ -52,8 +52,9 @@ CONFIG_SIGNATURE = f"v4|min={MIN_CHUNK_CHARS}|max={MAX_CHUNK_CHARS}|prefix={DOCU
 
 
 def embed(texts: list[str]) -> list[list[float]]:
-    """Delegate to the Skill Radar embed client."""
-    return _embed(texts, timeout=30.0)
+    """Delegate to the Skill Radar embed client. batch=True so a remote reindex
+    routes to embed-batch (local ONNX still serves everything when EMBED_URL is local)."""
+    return _embed(texts, batch=True, timeout=30.0)
 
 
 def parse_registry(path: Path) -> list[dict]:
@@ -409,8 +410,9 @@ def main():
             print(f"  {err}", file=sys.stderr)
         sys.exit(1)
 
-    # Warmup embed service before per-dimension batches
+    # Wake the (possibly hibernating) batch box, then warm up, before per-dimension batches
     try:
+        wait_for_ready(batch=True)
         embed(["warmup"])
     except Exception as e:
         print(f"ERROR: embed service not reachable: {e}", file=sys.stderr)

@@ -32,7 +32,7 @@ from pathlib import Path
 
 # Local import — Skill Radar embed client, backed by the utilities ONNX service.
 sys.path.insert(0, str(Path(__file__).parent))
-from embed_client import embed as _shared_embed
+from embed_client import embed as _shared_embed, EmbedUnavailable
 from event_adapter import PromptEvent, normalize_event
 from output_adapter import render_additional_context, render_radar_block
 from session_log import _slugify_cwd, append_event as session_log_append, project_log_path
@@ -254,10 +254,16 @@ def dot(a: list[float], b: list[float]) -> float:
 
 
 def embed(text: str) -> list[float] | None:
-    """Single-text embed via shared-svcs. Returns None on any failure so the
-    hook silently no-ops instead of blocking Claude Code."""
+    """Single-text embed via shared-svcs.
+
+    Returns None when the service is up but the call failed (503 shedding, etc.) so
+    the hook degrades quietly. But propagates EmbedUnavailable — no backend reachable
+    at all (neither local ONNX nor Railway) — so main() can hard-fail loudly instead
+    of silently losing radar coverage. retries=1 keeps the down-detection snappy."""
     try:
-        return _shared_embed([text], timeout=3.0)[0]
+        return _shared_embed([text], timeout=3.0, retries=1)[0]
+    except EmbedUnavailable:
+        raise
     except Exception:
         return None
 
@@ -1146,33 +1152,47 @@ def main():
     # Search the union; if the matched chunk is in the what index, it goes
     # to the "what" surface, otherwise wisdom. Score is 1.0 either way.
     matches_by_dim: dict[str, list[dict]] = {"wisdom": [], "what": []}
-    kw_matches = keyword_prefilter(prompt, wisdom_idx + what_idx)
-    if kw_matches:
-        # Bucket each match by which index it came from
-        what_paths = {(e.get("file_path"), e.get("skill_name")) for e in what_idx}
-        for m in kw_matches:
-            key = (m.get("file_path"), m.get("skill_name"))
-            dim = "what" if key in what_paths else "wisdom"
-            matches_by_dim[dim].append(m)
-    else:
-        # Tier 2: semantic — single embed, score against each index, apply
-        # per-dimension threshold, take top-N from each.
-        query_vec = embed(QUERY_PREFIX + prompt[:1000])
-        if not query_vec:
-            sys.exit(0)
+    try:
+        kw_matches = keyword_prefilter(prompt, wisdom_idx + what_idx)
+        if kw_matches:
+            # Bucket each match by which index it came from
+            what_paths = {(e.get("file_path"), e.get("skill_name")) for e in what_idx}
+            for m in kw_matches:
+                key = (m.get("file_path"), m.get("skill_name"))
+                dim = "what" if key in what_paths else "wisdom"
+                matches_by_dim[dim].append(m)
+        else:
+            # Tier 2: semantic — single embed, score against each index, apply
+            # per-dimension threshold, take top-N from each.
+            query_vec = embed(QUERY_PREFIX + prompt[:1000])
+            if not query_vec:
+                sys.exit(0)
 
-        for dim, idx, threshold in (
-            ("wisdom", wisdom_idx, th.PROMPT_WISDOM),
-            ("what", what_idx, th.PROMPT_WHAT),
-        ):
-            if not idx:
-                continue
-            scored = sorted(
-                [{"score": dot(query_vec, s["embedding"]), **s} for s in idx],
-                key=lambda x: x["score"],
-                reverse=True,
-            )
-            matches_by_dim[dim] = [s for s in scored[:TOP_PER_DIM] if s["score"] >= threshold]
+            for dim, idx, threshold in (
+                ("wisdom", wisdom_idx, th.PROMPT_WISDOM),
+                ("what", what_idx, th.PROMPT_WHAT),
+            ):
+                if not idx:
+                    continue
+                scored = sorted(
+                    [{"score": dot(query_vec, s["embedding"]), **s} for s in idx],
+                    key=lambda x: x["score"],
+                    reverse=True,
+                )
+                matches_by_dim[dim] = [s for s in scored[:TOP_PER_DIM] if s["score"] >= threshold]
+    except EmbedUnavailable as e:
+        # No embed backend reachable at all (neither local ONNX nor Railway). Fail
+        # closed and LOUD — exit 2 blocks the prompt with the message — rather than
+        # silently dropping radar coverage. (A 503/busy backend is "up" and degrades
+        # to None above, not here.)
+        print(
+            f"❌ Skill Radar: embed backend unavailable — {e}\n"
+            "Start local ONNX (services/embed on :8100) or point SKILL_RADAR_EMBED_URL "
+            "at Railway. (This block is deliberate: radar fails loud when no embed "
+            "backend is reachable.)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     all_matches = matches_by_dim["wisdom"] + matches_by_dim["what"]
     if not all_matches:

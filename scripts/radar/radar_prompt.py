@@ -600,7 +600,11 @@ def log_doctrine_auto_inject(prompt_text: str, rule: dict) -> None:
         "match_type": "auto",
         "evidence": f"prompt_hook semantic match (score {score:.3f})",
         "receipt": (rule.get("receipt") or "").split("\n", 1)[0][:600],
-        "match_score": round(score, 3),
+        # Field name aligned with schema_match / protocol_match rows (both use
+        # "score") — doctrine was the lone outlier on "match_score", which left
+        # `r.get("score")` NULL on every doctrine row. No consumer read
+        # match_score; the rename is back-compat-safe.
+        "score": round(score, 3),
     }
     if session_log_append(
         event_type="doctrine_match",

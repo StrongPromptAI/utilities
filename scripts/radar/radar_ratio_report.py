@@ -111,10 +111,30 @@ def main() -> int:
         for s in set(r.get("surfaces", [])):
             surfaces[s] = surfaces.get(s, 0) + 1
 
-    # corpus coverage: which of the 4 substantive corpora fired at all in this window
-    EXPECTED_SUBSTANCE = {"schema", "protocol", "doctrine", "skill"}
+    # corpus coverage — two CATEGORIES with different silence semantics:
+    #
+    #   TOPIC corpora (schema / protocol / skill) are ambient context: they fire
+    #   on semantic proximity to a table / component / skill doc. If the loop
+    #   clearly TOUCHED that domain and the corpus stayed silent, that IS the
+    #   mis-thresholded/broken signal — silence-while-touched = a real fault.
+    #
+    #   DOCTRINE is NOT a topic corpus — it is a violation-restatement ALARM. It
+    #   matches the PROMPT against DOCTRINE_REGISTRY.md *rules* at the 0.78 bar
+    #   (above the topic bars) and fires only when a prompt near-verbatim
+    #   restates a rule's forbidden-action scenario (e.g. the 2026-05-26 fire:
+    #   "skip classify_clinical_concern when the prior turn already classified"
+    #   → "Safety inspector runs unconditionally", score 0.808). Editing or
+    #   reasoning ABOUT doctrine docs (AUTH_LANES_DEF.md, CONVERSATION_DESIGN.md)
+    #   does NOT trip it — those docs are skill-radar-indexed and surface as
+    #   `skill:` fires. So doctrine=0% is the NORMAL, healthy state (no proposed
+    #   action tripped a known rule); flagging it as broken is a false alarm, and
+    #   lowering its bar to force fires only injects the WRONG rule as a
+    #   high-stakes warning. Reported below as an alarm count, never as a
+    #   not-firing fault. (Diagnosis: thj session 2026-06-17, repo_docs e89f01f.)
+    TOPIC_CORPORA = {"schema", "protocol", "skill"}
     fired = set(surfaces.keys())
-    corpora_not_firing = sorted(EXPECTED_SUBSTANCE - fired)
+    corpora_not_firing = sorted(TOPIC_CORPORA - fired)
+    doctrine_alarms = surfaces.get("doctrine", 0)
 
     nag_turns = sum(1 for r in rows if r.get("n_nag", 0) > 0)
     nag_only = sum(1 for r in rows if r.get("n_nag", 0) > 0 and r.get("n_substance", 0) == 0)
@@ -132,7 +152,8 @@ def main() -> int:
         "surface_fire_pct": {s: round(100.0 * c / n, 1) for s, c in sorted(surfaces.items(), key=lambda x: -x[1])},
         "nag_turns": nag_turns,
         "nag_only_turns": nag_only,
-        "corpora_not_firing": corpora_not_firing,
+        "topic_corpora_not_firing": corpora_not_firing,
+        "doctrine_alarms": doctrine_alarms,
     }
 
     if args.json:
@@ -150,12 +171,17 @@ def main() -> int:
     print("\nSurface fire frequency")
     for s, pct in summary["surface_fire_pct"].items():
         print(f"  {s:10s} {pct}%")
-    print("\nCorpus coverage (substantive: schema / protocol / doctrine / skill)")
+    print("\nTopic-corpus coverage (ambient context: schema / protocol / skill)")
     if corpora_not_firing:
         print(f"  ⚠ NOT firing in this window: {corpora_not_firing}")
         print(f"    → if the loop touched that domain, the corpus is mis-thresholded or broken; else expected.")
     else:
-        print(f"  ✓ all four substantive corpora fired at least once")
+        print(f"  ✓ all three topic corpora fired at least once")
+    print("\nDoctrine alarms (violation-restatement detector — silence is healthy)")
+    if doctrine_alarms:
+        print(f"  ⚠ {doctrine_alarms} turn(s) restated a known doctrine rule — review the fire(s).")
+    else:
+        print(f"  ✓ 0 — no prompt tripped a DOCTRINE_REGISTRY rule (the normal state; NOT a coverage gap)")
     print("\nNag health")
     print(f"  turns with a nag:   {nag_turns} ({_pct(nag_turns, n)})")
     print(f"  NAG-ONLY turns:     {nag_only} ({_pct(nag_only, n)})  ← wasted budget (no substance)")

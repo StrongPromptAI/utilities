@@ -74,12 +74,21 @@ curl -s -X POST https://backboard.railway.com/graphql/v2 \
 
 ## Shared Services (embed + STT + TTS + Whisper)
 
-Shared services live under `services/` and are deployed in the `shared-svcs` Railway project. Four services today:
+Shared services live under `services/` and are deployed in the `shared-svcs` Railway project. **Five** services today (two share the `services/embed/` codebase — see "Embed: chat vs batch split" below):
 
-- `services/embed/` — nomic-embed-text-v1.5 ONNX, 768 dims, port 8100. Two endpoints: TEI-native `/embed` and OpenAI-compatible `/v1/embeddings`.
+- `services/embed/` — nomic-embed-text-v1.5 ONNX, 768 dims, port 8100. Two endpoints: TEI-native `/embed` and OpenAI-compatible `/v1/embeddings`. Deployed **twice**: always-on `embed` (interactive) and hibernated `embed-batch` (ingest).
 - `services/stt/` — sherpa-onnx streaming speech-to-text. Port 8101. WebSocket `/transcribe`.
 - `services/tts/` — Kokoro-82M ONNX text-to-speech, 24 kHz mono. Port 8102. OpenAI-compatible REST `/v1/audio/speech`. Prod allowlist `af_heart,af_nova,am_adam`, default voice `af_nova`; the `af_nova` (F) + `am_adam` (M) pair are the two-voice podcast defaults (see `scripts/doc_to_podcast.py`). Env-tunable via `TTS_VOICE_ALLOWLIST` / `TTS_DEFAULT_VOICE`.
 - `services/whisper/` — faster-whisper batch transcription. OpenAI-compatible REST `/v1/audio/transcriptions`.
+
+#### Embed: chat vs batch split
+
+The `embed` codebase is deployed as **two** shared-svcs services to isolate interactive latency from heavy batch load (a DME catalog ingest used to OOM the single box and take chat down with it):
+
+- **`embed`** (always-on, 4 vCPU / 3 GB) — interactive consumers: thj chat/search/PM/care-plan, gitnexus, radar hook. Caps at defaults (`EMBED_INTRA_OP_THREADS=2`, `EMBED_MAX_CONCURRENCY=2`, `EMBED_MAX_BATCH=64`).
+- **`embed-batch`** (Railway app-sleeping, 8 vCPU / 8 GB) — DME catalog ingest **only**, via thj `ingestion_mineru`. Hibernates when idle (fixed 10-min window; cold-wakes on first request), zero idle cost. Caps raised via env (`EMBED_INTRA_OP_THREADS=8`, `EMBED_MAX_CONCURRENCY=6`, `EMBED_MAX_BATCH=512`).
+
+Same image, **config-only difference** (one codebase — do not fork `app.py`). The per-request caps (batch-size guard `→413`, concurrency semaphore, ORT `intra_op_num_threads` cap) live in `services/embed/{app.py,nomic_embed.py}` and are env-tuned per deployment. The ingest client points at `EMBED_BATCH_SERVICE_URL` and polls `/health` to wake the box before sending (`EMBED_WARMUP_TIMEOUT`). The **ORT thread cap is the real OOM fix** — uncapped `intra_op` sizes to the CPU grant (32 → 32 thread arenas), ballooning a small model to multiple GB; the same fix TTS uses.
 
 ### Environment-gated auth (dev = off, prod/staging = on)
 
@@ -154,7 +163,7 @@ See `~/repo_docs/skills/gitnexus/SKILL.md` for the gitnexus-side env-var contrac
 
 ### Railway env
 
-Production on `shared-svcs` project: `JWT_SECRET` set (64 chars) on all four services (embed, stt, whisper, tts). `RAILWAY_ENVIRONMENT=production` auto-populated. Explicit `ENVIRONMENT` not needed on Railway — the fallback to `RAILWAY_ENVIRONMENT` handles it. If setting up a new Railway environment (e.g. staging), Railway's auto `RAILWAY_ENVIRONMENT` value will be that environment's name, which must be one of `production` / `staging` for auth to turn on.
+Production on `shared-svcs` project: `JWT_SECRET` set (64 chars) on all five services (embed, embed-batch, stt, whisper, tts) — embed-batch shares embed's `aud="embed"` secret so one token works for both. `RAILWAY_ENVIRONMENT=production` auto-populated. Explicit `ENVIRONMENT` not needed on Railway — the fallback to `RAILWAY_ENVIRONMENT` handles it. If setting up a new Railway environment (e.g. staging), Railway's auto `RAILWAY_ENVIRONMENT` value will be that environment's name, which must be one of `production` / `staging` for auth to turn on.
 
 ### Railway IDs & URLs
 
@@ -166,6 +175,7 @@ Production on `shared-svcs` project: `JWT_SECRET` set (64 chars) on all four ser
 |---------|-----|-----|
 | stt | `d86f18dc-b843-41e2-b67a-c8ffbeca3817` | `wss://shared-svcs-stt.up.railway.app/transcribe` |
 | embed | `ab604f00-e72c-4865-b362-843f585e2051` | `https://shared-svcs-embed.up.railway.app/embed` |
+| embed-batch | `e1794c8a-b31b-40eb-9fa4-f60c8f75359a` | `https://embed-batch-production.up.railway.app/embed` |
 | whisper | `2fe8a99d-8e57-47de-b7e5-f7ef4371cf66` | `https://shared-svcs-whisper.up.railway.app/v1/audio/transcriptions` |
 | tts | `02ff6d94-a49c-464e-b1e0-44f6933d5209` | `https://shared-svcs-tts.up.railway.app/v1/audio/speech` |
 

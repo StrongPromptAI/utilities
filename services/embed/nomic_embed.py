@@ -33,14 +33,22 @@ _INTRA_OP_THREADS = int(os.environ.get("EMBED_INTRA_OP_THREADS", "2"))
 
 
 @lru_cache(maxsize=1)
-def _get_session(model_id: str = None):
-    """Load ONNX session + tokenizer from baked image paths.
+def _get_session():
+    """Load ONNX session + tokenizer from baked image paths, once per process.
+
+    No `model_id` parameter on purpose. This is a single-model service, so there
+    is exactly ONE lru_cache key and the model loads once. A defaulted
+    `model_id=None` arg here was the OOM bug: `_get_session()` (key `()`) and
+    `_get_session(None)` (key `(None,)`) hash to different cache keys, so the
+    warmup path double-loaded the model every boot — peak ≈ 2× the model, which
+    eats a 3 GB chat box. (Same lru_cache key-mismatch class as the in-process
+    regression fixed in 02203d7, reincarnated in the sidecar.)
 
     Prod/staging: baked paths are required — missing files raise RuntimeError
     (never silently re-download, which can OOM concurrent with ORT init).
     Dev: falls back to HF download so fresh clones work with no setup.
     """
-    model_id = model_id or _MODEL_ID
+    model_id = _MODEL_ID
     logger.info(f"Loading ONNX model: {model_id}")
 
     baked_present = os.path.exists(_LOCAL_MODEL_PATH) and os.path.exists(_LOCAL_TOKENIZER_DIR)
@@ -69,9 +77,9 @@ def _get_session(model_id: str = None):
     return tokenizer, session
 
 
-def _embed(texts: list[str], model_id: str = None) -> np.ndarray:
+def _embed(texts: list[str]) -> np.ndarray:
     """Encode texts to normalized 768-dim embeddings."""
-    tokenizer, session = _get_session(model_id)
+    tokenizer, session = _get_session()
 
     inputs = tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors="np")
 
@@ -100,15 +108,15 @@ def _embed(texts: list[str], model_id: str = None) -> np.ndarray:
     return pooled / np.clip(norms, a_min=1e-9, a_max=None)
 
 
-async def generate_embedding(text: str, model_id: str = None) -> list[float]:
+async def generate_embedding(text: str) -> list[float]:
     """Generate embedding for a single text."""
-    result = _embed([text], model_id)
+    result = _embed([text])
     return result[0].tolist()
 
 
-async def generate_embeddings(texts: list[str], model_id: str = None) -> list[list[float]]:
+async def generate_embeddings(texts: list[str]) -> list[list[float]]:
     """Generate embeddings for multiple texts."""
     if not texts:
         return []
-    result = _embed(texts, model_id)
+    result = _embed(texts)
     return [emb.tolist() for emb in result]

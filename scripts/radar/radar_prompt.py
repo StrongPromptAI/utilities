@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from embed_client import embed as _shared_embed
 from event_adapter import PromptEvent, normalize_event
 from output_adapter import render_additional_context, render_radar_block
-from session_log import _slugify_cwd, append_event as session_log_append
+from session_log import _slugify_cwd, append_event as session_log_append, project_log_path
 from doctrine_registry import (
     match_doctrine_for_prompt,
     render_doctrine_section,
@@ -338,6 +338,47 @@ QUEUE_BLOAT_THRESHOLD = 20  # nag when queue exceeds this
 QUEUE_STALE_DAYS = 14  # Phase 4.5 — nag when queue hasn't changed in N days
                        # (per GLM 5.1 quick-take 2026-05-26: "pipeline runs
                        #  but learns nothing" failure mode)
+
+
+# When the per-project radar log accrues this many `radar_turn_aggregate` rows,
+# there's enough data to read the enhancement-ratio distribution and revisit
+# Phase 2 (coverage) of the prompt-amplifier plan. A data-threshold trigger that
+# surfaces a decision — the radar's own purpose, dogfooded.
+RADAR_COVERAGE_THRESHOLD = 50
+
+
+def check_radar_coverage_review(cwd: str | None = None) -> str | None:
+    """Phase 2 trigger (plan 26-6-16 radar-prompt-amplifier-spry): once the radar
+    log reaches RADAR_COVERAGE_THRESHOLD amplifier turns, surface a reminder to
+    read `radar_ratio_report.py` and revisit coverage. Fires once per session
+    (the lifecycle-nag demotion handles cadence) until dismissed via a marker.
+    Counts only this project's log (where the data is accruing). Silent no-op on
+    any error."""
+    try:
+        cwd = cwd or os.getcwd()
+        slug = _slugify_cwd(cwd)
+        dismiss = Path.home() / ".claude" / "projects" / slug / "radar-phase2-dismissed.txt"
+        if dismiss.exists():
+            return None
+        log_path = project_log_path(cwd)
+        if not log_path.exists():
+            return None
+        count = sum(
+            1 for line in log_path.read_text(errors="replace").splitlines()
+            if '"event_type": "radar_turn_aggregate"' in line or '"event_type":"radar_turn_aggregate"' in line
+        )
+        if count < RADAR_COVERAGE_THRESHOLD:
+            return None
+        return (
+            f"Radar log hit {count} amplifier turns (≥{RADAR_COVERAGE_THRESHOLD}) — enough data to "
+            "read the enhancement-ratio distribution and revisit **Phase 2 (coverage)** of "
+            "`symlink_docs/plans/26-6-16_radar-prompt-amplifier-spry.md`.\n"
+            "  Read it:  `uv run --project ~/repos/utilities python "
+            "~/repos/utilities/scripts/radar/radar_ratio_report.py`\n"
+            f"  Dismiss:  `touch {dismiss}`"
+        )
+    except Exception:
+        return None
 
 
 def check_harvest_overdue() -> str | None:
@@ -991,6 +1032,7 @@ def main():
         ("brief_pending", check_brief_pending),
         ("harvest_overdue", check_harvest_overdue),
         ("queue_zero", check_queue_zero_candidates),
+        ("radar_phase2", check_radar_coverage_review),
     ):
         notice = notice_fn()
         if not notice:

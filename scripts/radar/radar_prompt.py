@@ -20,6 +20,7 @@ Design choices (differ from hook.py):
 Exits silently (code 0) on any failure — never blocks the agent runtime.
 """
 
+import atexit
 import json
 import os
 import re
@@ -34,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from embed_client import embed as _shared_embed
 from event_adapter import PromptEvent, normalize_event
 from output_adapter import render_additional_context, render_radar_block
-from session_log import _slugify_cwd, append_event as session_log_append
+from session_log import _slugify_cwd, append_event as session_log_append, project_log_path
 from doctrine_registry import (
     match_doctrine_for_prompt,
     render_doctrine_section,
@@ -88,9 +89,27 @@ TOP_PER_DIM = 1
 CONTEXT_CHARS = 800
 MIN_PROMPT_CHARS = 30
 
+# Minimum-viable-prompt gate (Tier-3 suppression — NOT meaning interpretation):
+# a continuation / acknowledgment prompt ("go ahead", "1-yes, 2-no", "let's keep
+# going") doesn't need radar amplification — the context is already in the
+# conversation. Suppress amplification on these even when they run past
+# MIN_PROMPT_CHARS. Failure is cheap + symmetric (a false skip = one un-amplified
+# turn; a false fire = a few hundred tokens), which is what licenses a regex here.
+# Kept to SAFE leads (rarely start a substantive instruction); risky single
+# adjectives (good/great/right/perfect) are deliberately excluded to avoid
+# suppressing real prompts that open with them.
 SKIP_PATTERNS = re.compile(
-    r"^(yes|no|ok|okay|sure|thanks|thank you|continue|go|do it|proceed|"
-    r"__greeting__|__check_in__)\b",
+    r"^(?:"
+    # word-shaped acks need \b so "good" doesn't match "goodness"-style longer words
+    r"(?:yes|yeah|yep|yup|no|nope|ok|okay|k|sure|thanks|thank you|ty|"
+    r"continue|carry on|go|go ahead|do it|do that|proceed|ship it|send it|"
+    r"keep going|keep it up|let'?s (?:go|keep|continue|proceed)|"
+    r"sounds good|looks good|lgtm|agreed)\b"
+    # numbered answers ("1-yes", "2) no", "3. maybe") — separate alt; NO trailing
+    # \b (a ")"/"."/" " after the separator is a non-word char, so \b would fail)
+    r"|\d+\s*[-.):]"
+    r"|__greeting__|__check_in__"
+    r")",
     re.IGNORECASE,
 )
 
@@ -321,6 +340,47 @@ QUEUE_STALE_DAYS = 14  # Phase 4.5 — nag when queue hasn't changed in N days
                        #  but learns nothing" failure mode)
 
 
+# When the per-project radar log accrues this many `radar_turn_aggregate` rows,
+# there's enough data to read the enhancement-ratio distribution and revisit
+# Phase 2 (coverage) of the prompt-amplifier plan. A data-threshold trigger that
+# surfaces a decision — the radar's own purpose, dogfooded.
+RADAR_COVERAGE_THRESHOLD = 50
+
+
+def check_radar_coverage_review(cwd: str | None = None) -> str | None:
+    """Phase 2 trigger (plan 26-6-16 radar-prompt-amplifier-spry): once the radar
+    log reaches RADAR_COVERAGE_THRESHOLD amplifier turns, surface a reminder to
+    read `radar_ratio_report.py` and revisit coverage. Fires once per session
+    (the lifecycle-nag demotion handles cadence) until dismissed via a marker.
+    Counts only this project's log (where the data is accruing). Silent no-op on
+    any error."""
+    try:
+        cwd = cwd or os.getcwd()
+        slug = _slugify_cwd(cwd)
+        dismiss = Path.home() / ".claude" / "projects" / slug / "radar-phase2-dismissed.txt"
+        if dismiss.exists():
+            return None
+        log_path = project_log_path(cwd)
+        if not log_path.exists():
+            return None
+        count = sum(
+            1 for line in log_path.read_text(errors="replace").splitlines()
+            if '"event_type": "radar_turn_aggregate"' in line or '"event_type":"radar_turn_aggregate"' in line
+        )
+        if count < RADAR_COVERAGE_THRESHOLD:
+            return None
+        return (
+            f"Radar log hit {count} amplifier turns (≥{RADAR_COVERAGE_THRESHOLD}) — enough data to "
+            "read the enhancement-ratio distribution and revisit **Phase 2 (coverage)** of "
+            "`symlink_docs/plans/26-6-16_radar-prompt-amplifier-spry.md`.\n"
+            "  Read it:  `uv run --project ~/repos/utilities python "
+            "~/repos/utilities/scripts/radar/radar_ratio_report.py`\n"
+            f"  Dismiss:  `touch {dismiss}`"
+        )
+    except Exception:
+        return None
+
+
 def check_harvest_overdue() -> str | None:
     """Phase 4 fallback path — return a nag notice if the weekly harvest
     routine hasn't fired in HARVEST_STALE_DAYS. Reads ~/.claude/last-skill-harvest.txt;
@@ -540,7 +600,11 @@ def log_doctrine_auto_inject(prompt_text: str, rule: dict) -> None:
         "match_type": "auto",
         "evidence": f"prompt_hook semantic match (score {score:.3f})",
         "receipt": (rule.get("receipt") or "").split("\n", 1)[0][:600],
-        "match_score": round(score, 3),
+        # Field name aligned with schema_match / protocol_match rows (both use
+        # "score") — doctrine was the lone outlier on "match_score", which left
+        # `r.get("score")` NULL on every doctrine row. No consumer read
+        # match_score; the rename is back-compat-safe.
+        "score": round(score, 3),
     }
     if session_log_append(
         event_type="doctrine_match",
@@ -613,35 +677,45 @@ def trigger_schema_rebuild(slug: str) -> None:
 
 
 def match_schema(prompt: str, index: dict) -> dict | None:
-    """Top-1 schema chunk over th.SCHEMA, gated on a table-name token
-    actually appearing in the prompt (word-boundary). The prefilter is the
-    distinctive-name guard; the semantic threshold separates 'mentioned and
-    relevant' from 'mentioned in passing' (the `session`/`patient` collision).
-    None on no match or embed failure (silent no-op)."""
+    """Top-1 schema chunk over th.SCHEMA by pure semantic similarity — NO
+    table-name-token gate.
+
+    The exact-name prefilter was removed 2026-06-16: a concept-only sweep
+    (questions asked the way a dev actually asks — no snake_case table name)
+    showed it surfaced the right table for **0/53** natural questions, and fired
+    the WRONG table 11× (almost all `patient`, a common word semantically near
+    most patient-domain prompts). Real questions almost never type the table
+    name, so the gate that required it was the dominant recall limiter. Pure
+    cosine recovered 30/53. The name token is deliberately NOT reintroduced as a
+    boost: boosting a common single-word name (`patient`, `session`, `alert`)
+    would amplify the same wrong-fire pathology.
+
+    The remaining wrong-fires (a broad table edging out the specific one) are
+    suppressed by a top-1-vs-top-2 MARGIN (th.SCHEMA_MARGIN): fire only if the
+    winner clears the bar AND beats #2 by the margin — an ambiguous near-tie
+    stays silent rather than confidently injecting the wrong table's comment.
+    Cut concept wrong-fires 16 → 5 at margin 0.02. None on no match / embed
+    failure / ambiguous near-tie (silent no-op).
+    See thj/plans/26-6-16_schema-comment-enrichment-agent.md § Folded-in findings."""
     chunks = index.get("chunks", [])
     if not chunks:
         return None
     cleaned = strip_prior_injections(prompt)
     if not cleaned:
         return None
-    low = cleaned.lower()
-    candidates = [
-        c for c in chunks
-        if re.search(r"\b" + re.escape(c["table"].lower()) + r"\b", low)
-    ]
-    if not candidates:
-        return None
     query_vec = embed(QUERY_PREFIX + cleaned[:1000])
     if not query_vec:
         return None
     scored = sorted(
-        ({"score": dot(query_vec, c["embedding"]), **c} for c in candidates if c.get("embedding")),
+        ({"score": dot(query_vec, c["embedding"]), **c} for c in chunks if c.get("embedding")),
         key=lambda x: x["score"],
         reverse=True,
     )
-    if scored and scored[0]["score"] >= th.SCHEMA:
-        return scored[0]
-    return None
+    if not scored or scored[0]["score"] < th.SCHEMA:
+        return None
+    if len(scored) > 1 and (scored[0]["score"] - scored[1]["score"]) < th.SCHEMA_MARGIN:
+        return None  # ambiguous near-tie — don't confidently inject the wrong table
+    return scored[0]
 
 
 def render_schema_section(repo: str, match: dict) -> str:
@@ -841,6 +915,87 @@ def log_protocol_inject(prompt_text: str, repo: str, match: dict, verified: bool
         pass
 
 
+def _nag_state_path() -> Path:
+    """Per-project file recording which lifecycle nag last fired for which
+    session (or day). Lives beside the session log."""
+    return Path.home() / ".claude" / "projects" / _slugify_cwd(os.getcwd()) / "radar-nag-state.json"
+
+
+def nag_already_fired(key: str, session_token: str) -> bool:
+    """Phase 1 (plan 26-6-16 radar-prompt-amplifier-spry): a lifecycle nag is
+    TRUE every turn until its condition resolves, so it must not RE-fire every
+    turn — it crowds the substantive corpora out of the prompt budget (doctrine
+    principle #3). Fire once per session (or per day if no session id), then
+    stay silent until the condition is acted on or a new session starts."""
+    try:
+        p = _nag_state_path()
+        if not p.exists():
+            return False
+        return json.loads(p.read_text()).get(key) == session_token
+    except Exception:
+        return False  # fail open — a missed suppression just nags once more, never blocks
+
+
+def record_nag_fired(key: str, session_token: str) -> None:
+    try:
+        p = _nag_state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        st = {}
+        if p.exists():
+            try:
+                st = json.loads(p.read_text())
+            except Exception:
+                st = {}
+        st[key] = session_token
+        p.write_text(json.dumps(st))
+    except Exception:
+        pass
+
+
+def log_turn_aggregate(prompt: str, emitted: list[dict]) -> None:
+    """Phase 0 (plan thj/26-6-16 radar-prompt-amplifier-spry): ONE observation
+    row per turn — the prompt-amplifier enhancement ratio (radar bytes vs typed
+    bytes), block count, substance-vs-nag split, surfaces, collision count, and
+    per-injection evidence. Logging ONLY — writes to session-log.jsonl, never to
+    stdout (stdout is the agent's injected context). Registered via atexit so it
+    fires once per turn even when the hook takes an early sys.exit(0). Silent
+    no-op on any error (never block Claude Code)."""
+    try:
+        if not emitted and len(prompt or "") < MIN_PROMPT_CHARS:
+            return  # nothing fired and not a real prompt turn — don't log noise
+        typed = len(prompt or "")
+        radar_bytes = sum(int(e.get("bytes", 0)) for e in emitted)
+        substance = [e for e in emitted if e.get("kind") == "substance"]
+        nags = [e for e in emitted if e.get("kind") == "nag"]
+        substance_surfaces = sorted({e["surface"] for e in substance})
+        session_log_append(
+            event_type="radar_turn_aggregate",
+            command_or_context=(prompt or "")[:200],
+            outcome="recorded",
+            extra={
+                "typed_bytes": typed,
+                "radar_bytes": radar_bytes,
+                "ratio": round(radar_bytes / max(typed, 1), 3),
+                "n_blocks": len(emitted),
+                "n_substance": len(substance),
+                "n_nag": len(nags),
+                "n_collision": len(substance_surfaces),  # distinct substance corpora firing together
+                "surfaces": sorted({e["surface"] for e in emitted}),
+                "injections": [
+                    {"surface": e.get("surface"), "kind": e.get("kind"),
+                     "bytes": int(e.get("bytes", 0)), "score": e.get("score"),
+                     "ref": e.get("ref")}
+                    for e in emitted
+                ],
+            },
+            # high-entropy dedupe so every turn logs (metrics row, not an event to suppress)
+            dedupe_parts=("radar_turn_aggregate", (prompt or "")[:80],
+                          str(radar_bytes), str(len(emitted)), str(int(time.time()))),
+        )
+    except Exception:
+        pass
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -859,14 +1014,37 @@ def main():
     if SKIP_PATTERNS.match(prompt):
         sys.exit(0)
 
+    # Phase 0 (prompt-amplifier instrumentation): accumulate every block this turn
+    # emits; an atexit flush writes one aggregate metrics row even on early exit.
+    # Pure observation — mutated by reference at each emission site below.
+    emitted: list[dict] = []
+    atexit.register(log_turn_aggregate, prompt, emitted)
+
     # Phase 2 + Phase 4 + Phase 4.5 — lifecycle nag notices fire INDEPENDENTLY
     # of the skill-match injection. They render before the skill match so
     # session-discipline signals lead. Each can return None to skip.
+    # Phase 1 — a lifecycle nag fires at most ONCE per session (it stays true
+    # every turn, but re-emitting it every turn taxes the prompt budget). Key on
+    # the session id when present, else the calendar day. Demotes cadence only —
+    # the obligation stands and re-surfaces next session until acted on.
+    session_token = (
+        str(payload.get("session_id") or payload.get("sessionId") or "").strip()
+        or datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+    )
     lifecycle_notices: list[str] = []
-    for notice_fn in (check_brief_pending, check_harvest_overdue, check_queue_zero_candidates):
+    for notice_key, notice_fn in (
+        ("brief_pending", check_brief_pending),
+        ("harvest_overdue", check_harvest_overdue),
+        ("queue_zero", check_queue_zero_candidates),
+        ("radar_phase2", check_radar_coverage_review),
+    ):
         notice = notice_fn()
-        if notice:
-            lifecycle_notices.append(notice)
+        if not notice:
+            continue
+        if nag_already_fired(notice_key, session_token):
+            continue  # already nagged this session — don't crowd substance
+        record_nag_fired(notice_key, session_token)
+        lifecycle_notices.append(notice)
 
     if lifecycle_notices:
         combined = "\n\n---\n\n".join(lifecycle_notices)
@@ -875,6 +1053,8 @@ def main():
             hook_event_name=event.hook_event_name,
             runtime=event.runtime,
         ))
+        for _notice in lifecycle_notices:
+            emitted.append({"surface": "lifecycle", "kind": "nag", "bytes": len(_notice)})
 
     # Phase 1 — doctrine match runs INDEPENDENTLY of the skill radar so a
     # prompt can fire both surfaces. Doctrine is higher-stakes (threshold
@@ -883,11 +1063,15 @@ def main():
     doctrine_rule = match_doctrine_for_prompt(prompt)
     if doctrine_rule:
         log_doctrine_auto_inject(prompt, doctrine_rule)
+        doctrine_section = render_doctrine_section(doctrine_rule)
         print(render_additional_context(
-            render_doctrine_section(doctrine_rule),
+            doctrine_section,
             hook_event_name=event.hook_event_name,
             runtime=event.runtime,
         ))
+        emitted.append({"surface": "doctrine", "kind": "substance", "bytes": len(doctrine_section),
+                        "score": doctrine_rule.get("score") if isinstance(doctrine_rule, dict) else None,
+                        "ref": doctrine_rule.get("rule") if isinstance(doctrine_rule, dict) else None})
 
     # Schema Radar (plan thj/26-6-16) — fires INDEPENDENTLY of the skill match,
     # like doctrine, so a prompt naming a table gets its comment even when no
@@ -904,11 +1088,14 @@ def main():
                 schema_match = match_schema(prompt, schema_idx)
                 if schema_match:
                     log_schema_inject(prompt, schema_slug, schema_match)
+                    schema_section = render_schema_section(schema_slug, schema_match)
                     print(render_additional_context(
-                        render_schema_section(schema_slug, schema_match),
+                        schema_section,
                         hook_event_name=event.hook_event_name,
                         runtime=event.runtime,
                     ))
+                    emitted.append({"surface": "schema", "kind": "substance", "bytes": len(schema_section),
+                                    "score": schema_match.get("score"), "ref": schema_match.get("table")})
     except Exception:
         pass
 
@@ -929,11 +1116,14 @@ def main():
                 proto_match = match_protocol(prompt, proto_idx)
                 if proto_match:
                     log_protocol_inject(prompt, proto_slug, proto_match, verified)
+                    proto_section = render_protocol_section(proto_match, verified)
                     print(render_additional_context(
-                        render_protocol_section(proto_match, verified),
+                        proto_section,
                         hook_event_name=event.hook_event_name,
                         runtime=event.runtime,
                     ))
+                    emitted.append({"surface": "protocol", "kind": "substance", "bytes": len(proto_section),
+                                    "score": proto_match.get("score"), "ref": proto_match.get("component_key")})
     except Exception:
         pass
 
@@ -1018,11 +1208,15 @@ def main():
                 trust="learned:judge-applicability",
             ))
 
+    skill_body = "\n\n".join(blocks)
     print(render_additional_context(
-        "\n\n".join(blocks),
+        skill_body,
         hook_event_name=event.hook_event_name,
         runtime=event.runtime,
     ))
+    emitted.append({"surface": "skill", "kind": "substance", "bytes": len(skill_body),
+                    "score": max((m.get("score", 0) for m in all_matches), default=None),
+                    "ref": [m.get("skill_name", m.get("name", "?")) for m in all_matches]})
 
 
 if __name__ == "__main__":

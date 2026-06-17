@@ -1,0 +1,267 @@
+{
+  "alert": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.77,
+    "real_hit": true
+  },
+  "care_plan": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.803,
+    "real_hit": true
+  },
+  "care_plan_item": {
+    "exp_raw_rank": 2,
+    "exp_raw_score": 0.745,
+    "real_hit": false
+  },
+  "care_plan_item_bullet": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.74,
+    "real_hit": true
+  },
+  "care_plan_modification": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.794,
+    "real_hit": true
+  },
+  "check_in": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.784,
+    "real_hit": true
+  },
+  "check_in_response": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.764,
+    "real_hit": true
+  },
+  "clinic_feedback": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.791,
+    "real_hit": true
+  },
+  "component_delivery": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.815,
+    "real_hit": true
+  },
+  "component_type": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.759,
+    "real_hit": true
+  },
+  "conversation_scenario": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.822,
+    "real_hit": true
+  },
+  "convo_feedback": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.823,
+    "real_hit": true
+  },
+  "cpt_reference": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.764,
+    "real_hit": true
+  },
+  "document_type": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.751,
+    "real_hit": true
+  },
+  "equipment": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.746,
+    "real_hit": true
+  },
+  "equipment_qa": {
+    "exp_raw_rank": 2,
+    "exp_raw_score": 0.738,
+    "real_hit": false
+  },
+  "equipment_qa_comment": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.833,
+    "real_hit": true
+  },
+  "equipment_qa_edit_log": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.804,
+    "real_hit": true
+  },
+  "equipment_qa_proposal": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.767,
+    "real_hit": true
+  },
+  "equipment_resource": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.812,
+    "real_hit": true
+  },
+  "exercises_library": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.777,
+    "real_hit": true
+  },
+  "faithfulness_verdict": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.781,
+    "real_hit": true
+  },
+  "feedback_messages": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.759,
+    "real_hit": true
+  },
+  "icd10_reference": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.826,
+    "real_hit": true
+  },
+  "llm_call_log": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.794,
+    "real_hit": true
+  },
+  "login_codes": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.749,
+    "real_hit": true
+  },
+  "medical_concept": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.826,
+    "real_hit": true
+  },
+  "patient": {
+    "exp_raw_rank": 3,
+    "exp_raw_score": 0.702,
+    "real_hit": false
+  },
+  "patient_alert_seen": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.806,
+    "real_hit": true
+  },
+  "patient_care_team": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.838,
+    "real_hit": true
+  },
+  "patient_consent": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.793,
+    "real_hit": true
+  },
+  "patient_equipment": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.861,
+    "real_hit": true
+  },
+  "patient_goal": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.809,
+    "real_hit": true
+  },
+  "patient_medication_log": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.816,
+    "real_hit": true
+  },
+  "patient_provider": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.803,
+    "real_hit": true
+  },
+  "patient_symptom_state": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.792,
+    "real_hit": true
+  },
+  "phase_retrospective": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.8,
+    "real_hit": false
+  },
+  "phase_retrospective_quote": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.847,
+    "real_hit": true
+  },
+  "probe_turn": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.812,
+    "real_hit": true
+  },
+  "protocol_component": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.774,
+    "real_hit": true
+  },
+  "protocol_resource": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.768,
+    "real_hit": true
+  },
+  "protocol_transaction": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.724,
+    "real_hit": true
+  },
+  "protocols": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.737,
+    "real_hit": true
+  },
+  "provider": {
+    "exp_raw_rank": 4,
+    "exp_raw_score": 0.743,
+    "real_hit": false
+  },
+  "provider_protocol": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.801,
+    "real_hit": true
+  },
+  "provider_roles": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.77,
+    "real_hit": true
+  },
+  "provider_staff": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.83,
+    "real_hit": true
+  },
+  "resource": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.669,
+    "real_hit": false
+  },
+  "resource_chunk": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.733,
+    "real_hit": true
+  },
+  "scenario_studio_analysis": {
+    "exp_raw_rank": 3,
+    "exp_raw_score": 0.759,
+    "real_hit": false
+  },
+  "session": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.66,
+    "real_hit": false
+  },
+  "sessions": {
+    "exp_raw_rank": 12,
+    "exp_raw_score": 0.625,
+    "real_hit": false
+  },
+  "settings": {
+    "exp_raw_rank": 1,
+    "exp_raw_score": 0.731,
+    "real_hit": true
+  }
+}

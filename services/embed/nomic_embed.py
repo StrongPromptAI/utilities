@@ -22,6 +22,15 @@ _IS_PROD = (
     os.environ.get("ENVIRONMENT") or os.environ.get("RAILWAY_ENVIRONMENT") or ""
 ) in ("production", "staging")
 
+# onnxruntime intra-op thread cap. Without it, ORT sizes its intra-op pool to the
+# CPU grant (cpu=N on Railway → ~N threads, each with a memory arena), so a single
+# batch can balloon to multiple GB and OOM-kill the container — the identical failure
+# TTS hit and fixed (services/tts/app.py). The pip onnxruntime wheel is not OpenMP-built,
+# so OMP_NUM_THREADS is ignored — SessionOptions.intra_op_num_threads is the only reliable
+# knob. inter_op is pinned to 1 (single graph, serial). Default 2 suits the small always-on
+# chat box; the fat batch box raises it via env to use its larger CPU grant.
+_INTRA_OP_THREADS = int(os.environ.get("EMBED_INTRA_OP_THREADS", "2"))
+
 
 @lru_cache(maxsize=1)
 def _get_session(model_id: str = None):
@@ -50,8 +59,13 @@ def _get_session(model_id: str = None):
         model_path = hf_hub_download(repo_id=model_id, filename=_ONNX_FILE)
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
 
-    session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
-    logger.info("ONNX embedding model loaded")
+    sess_opts = ort.SessionOptions()
+    sess_opts.intra_op_num_threads = _INTRA_OP_THREADS
+    sess_opts.inter_op_num_threads = 1
+    session = ort.InferenceSession(
+        model_path, sess_options=sess_opts, providers=["CPUExecutionProvider"]
+    )
+    logger.info(f"ONNX embedding model loaded (intra_op_threads={_INTRA_OP_THREADS})")
     return tokenizer, session
 
 

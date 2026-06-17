@@ -51,6 +51,18 @@ _JWT_OPTIONS = {"require": ["exp", "iss", "aud"]}
 
 _bearer = HTTPBearer()
 
+# Per-request memory ceilings. EMBED_MAX_BATCH bounds the WIDTH of one request
+# (peak memory scales batch × 512 × 768 × 4 bytes); EMBED_MAX_CONCURRENCY bounds
+# how many inferences run at once. Together with the intra-op thread cap in
+# nomic_embed.py, peak memory is a known fixed number the box is sized to. Defaults
+# suit the small always-on chat box; the fat batch box raises both via env.
+EMBED_MAX_BATCH = int(os.environ.get("EMBED_MAX_BATCH", "64"))
+EMBED_MAX_CONCURRENCY = int(os.environ.get("EMBED_MAX_CONCURRENCY", "2"))
+
+# Bound to the running loop in startup() so excess concurrent inferences queue
+# instead of stacking and blowing the memory ceiling (mirrors TTS _synth_semaphore).
+_embed_semaphore: asyncio.Semaphore | None = None
+
 _ready: bool = False
 _load_error: str | None = None
 
@@ -89,6 +101,8 @@ def _warmup() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
+    global _embed_semaphore
+    _embed_semaphore = asyncio.Semaphore(EMBED_MAX_CONCURRENCY)
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _warmup)
 
@@ -129,49 +143,50 @@ class OpenAIEmbedRequest(BaseModel):
     model: str = "nomic-embed-text-v1.5"
 
 
-@app.post("/embed", dependencies=_AUTH_DEPS)
-async def embed(req: EmbedRequest):
-    """TEI-compatible batch embedding."""
+async def _embed_texts(texts: list[str]) -> list[list[float]]:
+    """Shared embed path for both endpoints — the single place the caps live.
+
+    Order is deliberate (fail-closed on the cheap checks first): reject empty or
+    oversized batches before touching readiness or the model, so a malformed request
+    is rejected even while the model is still loading. The semaphore then bounds how
+    many inferences run concurrently; excess requests queue rather than stacking.
+    """
+    if not texts:
+        raise HTTPException(400, "inputs is required")
+    if len(texts) > EMBED_MAX_BATCH:
+        raise HTTPException(
+            413, f"batch too large: {len(texts)} > EMBED_MAX_BATCH={EMBED_MAX_BATCH}"
+        )
     if not _ready:
         raise HTTPException(503, "Embedding model loading")
 
-    texts = [req.inputs] if isinstance(req.inputs, str) else req.inputs
-    if not texts:
-        raise HTTPException(400, "inputs is required")
-
     from nomic_embed import _embed
 
-    try:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, lambda: _embed(texts))
-        vectors = result.tolist()
-        del result
-        gc.collect()
-        return vectors
-    except Exception as exc:
-        raise HTTPException(500, str(exc))
+    assert _embed_semaphore is not None, "semaphore not initialized (startup not run)"
+    async with _embed_semaphore:
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, lambda: _embed(texts))
+            vectors = result.tolist()
+            del result
+            gc.collect()
+            return vectors
+        except Exception as exc:
+            raise HTTPException(500, str(exc))
+
+
+@app.post("/embed", dependencies=_AUTH_DEPS)
+async def embed(req: EmbedRequest):
+    """TEI-compatible batch embedding."""
+    texts = [req.inputs] if isinstance(req.inputs, str) else req.inputs
+    return await _embed_texts(texts)
 
 
 @app.post("/v1/embeddings", dependencies=_AUTH_DEPS)
 async def openai_embeddings(req: OpenAIEmbedRequest):
     """OpenAI-compatible embeddings endpoint for OpenWebUI RAG."""
-    if not _ready:
-        raise HTTPException(503, "Embedding model loading")
-
     texts = [req.input] if isinstance(req.input, str) else req.input
-    if not texts:
-        raise HTTPException(400, "input is required")
-
-    from nomic_embed import _embed
-
-    try:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, lambda: _embed(texts))
-        vectors = result.tolist()
-        del result
-        gc.collect()
-    except Exception as exc:
-        raise HTTPException(500, str(exc))
+    vectors = await _embed_texts(texts)
 
     return {
         "object": "list",

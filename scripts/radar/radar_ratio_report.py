@@ -71,6 +71,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Radar prompt-amplifier report (reads radar_turn_aggregate rows).")
     ap.add_argument("--log", help="explicit session-log.jsonl path")
     ap.add_argument("--all", action="store_true", help="scan every ~/.claude/projects/*/session-log.jsonl")
+    ap.add_argument("--last", type=int, default=0, help="only the most recent N turns (e.g. scope to one bug-hunt loop)")
     ap.add_argument("--json", action="store_true", help="emit the summary as JSON")
     args = ap.parse_args()
 
@@ -86,6 +87,9 @@ def main() -> int:
         print(f"No radar_turn_aggregate rows in: {', '.join(str(p) for p in paths)}")
         print("(Fire a few prompts with the instrumented hook first.)")
         return 0
+
+    if args.last and len(rows) > args.last:
+        rows = rows[-args.last:]  # scope to the most recent N turns (one loop's worth)
 
     n = len(rows)
     ratios = [float(r.get("ratio", 0)) for r in rows]
@@ -107,6 +111,11 @@ def main() -> int:
         for s in set(r.get("surfaces", [])):
             surfaces[s] = surfaces.get(s, 0) + 1
 
+    # corpus coverage: which of the 4 substantive corpora fired at all in this window
+    EXPECTED_SUBSTANCE = {"schema", "protocol", "doctrine", "skill"}
+    fired = set(surfaces.keys())
+    corpora_not_firing = sorted(EXPECTED_SUBSTANCE - fired)
+
     nag_turns = sum(1 for r in rows if r.get("n_nag", 0) > 0)
     nag_only = sum(1 for r in rows if r.get("n_nag", 0) > 0 and r.get("n_substance", 0) == 0)
 
@@ -123,6 +132,7 @@ def main() -> int:
         "surface_fire_pct": {s: round(100.0 * c / n, 1) for s, c in sorted(surfaces.items(), key=lambda x: -x[1])},
         "nag_turns": nag_turns,
         "nag_only_turns": nag_only,
+        "corpora_not_firing": corpora_not_firing,
     }
 
     if args.json:
@@ -140,6 +150,12 @@ def main() -> int:
     print("\nSurface fire frequency")
     for s, pct in summary["surface_fire_pct"].items():
         print(f"  {s:10s} {pct}%")
+    print("\nCorpus coverage (substantive: schema / protocol / doctrine / skill)")
+    if corpora_not_firing:
+        print(f"  ⚠ NOT firing in this window: {corpora_not_firing}")
+        print(f"    → if the loop touched that domain, the corpus is mis-thresholded or broken; else expected.")
+    else:
+        print(f"  ✓ all four substantive corpora fired at least once")
     print("\nNag health")
     print(f"  turns with a nag:   {nag_turns} ({_pct(nag_turns, n)})")
     print(f"  NAG-ONLY turns:     {nag_only} ({_pct(nag_only, n)})  ← wasted budget (no substance)")

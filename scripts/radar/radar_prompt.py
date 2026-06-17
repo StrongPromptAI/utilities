@@ -20,6 +20,7 @@ Design choices (differ from hook.py):
 Exits silently (code 0) on any failure — never blocks the agent runtime.
 """
 
+import atexit
 import json
 import os
 import re
@@ -88,9 +89,27 @@ TOP_PER_DIM = 1
 CONTEXT_CHARS = 800
 MIN_PROMPT_CHARS = 30
 
+# Minimum-viable-prompt gate (Tier-3 suppression — NOT meaning interpretation):
+# a continuation / acknowledgment prompt ("go ahead", "1-yes, 2-no", "let's keep
+# going") doesn't need radar amplification — the context is already in the
+# conversation. Suppress amplification on these even when they run past
+# MIN_PROMPT_CHARS. Failure is cheap + symmetric (a false skip = one un-amplified
+# turn; a false fire = a few hundred tokens), which is what licenses a regex here.
+# Kept to SAFE leads (rarely start a substantive instruction); risky single
+# adjectives (good/great/right/perfect) are deliberately excluded to avoid
+# suppressing real prompts that open with them.
 SKIP_PATTERNS = re.compile(
-    r"^(yes|no|ok|okay|sure|thanks|thank you|continue|go|do it|proceed|"
-    r"__greeting__|__check_in__)\b",
+    r"^(?:"
+    # word-shaped acks need \b so "good" doesn't match "goodness"-style longer words
+    r"(?:yes|yeah|yep|yup|no|nope|ok|okay|k|sure|thanks|thank you|ty|"
+    r"continue|carry on|go|go ahead|do it|do that|proceed|ship it|send it|"
+    r"keep going|keep it up|let'?s (?:go|keep|continue|proceed)|"
+    r"sounds good|looks good|lgtm|agreed)\b"
+    # numbered answers ("1-yes", "2) no", "3. maybe") — separate alt; NO trailing
+    # \b (a ")"/"."/" " after the separator is a non-word char, so \b would fail)
+    r"|\d+\s*[-.):]"
+    r"|__greeting__|__check_in__"
+    r")",
     re.IGNORECASE,
 )
 
@@ -851,6 +870,87 @@ def log_protocol_inject(prompt_text: str, repo: str, match: dict, verified: bool
         pass
 
 
+def _nag_state_path() -> Path:
+    """Per-project file recording which lifecycle nag last fired for which
+    session (or day). Lives beside the session log."""
+    return Path.home() / ".claude" / "projects" / _slugify_cwd(os.getcwd()) / "radar-nag-state.json"
+
+
+def nag_already_fired(key: str, session_token: str) -> bool:
+    """Phase 1 (plan 26-6-16 radar-prompt-amplifier-spry): a lifecycle nag is
+    TRUE every turn until its condition resolves, so it must not RE-fire every
+    turn — it crowds the substantive corpora out of the prompt budget (doctrine
+    principle #3). Fire once per session (or per day if no session id), then
+    stay silent until the condition is acted on or a new session starts."""
+    try:
+        p = _nag_state_path()
+        if not p.exists():
+            return False
+        return json.loads(p.read_text()).get(key) == session_token
+    except Exception:
+        return False  # fail open — a missed suppression just nags once more, never blocks
+
+
+def record_nag_fired(key: str, session_token: str) -> None:
+    try:
+        p = _nag_state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        st = {}
+        if p.exists():
+            try:
+                st = json.loads(p.read_text())
+            except Exception:
+                st = {}
+        st[key] = session_token
+        p.write_text(json.dumps(st))
+    except Exception:
+        pass
+
+
+def log_turn_aggregate(prompt: str, emitted: list[dict]) -> None:
+    """Phase 0 (plan thj/26-6-16 radar-prompt-amplifier-spry): ONE observation
+    row per turn — the prompt-amplifier enhancement ratio (radar bytes vs typed
+    bytes), block count, substance-vs-nag split, surfaces, collision count, and
+    per-injection evidence. Logging ONLY — writes to session-log.jsonl, never to
+    stdout (stdout is the agent's injected context). Registered via atexit so it
+    fires once per turn even when the hook takes an early sys.exit(0). Silent
+    no-op on any error (never block Claude Code)."""
+    try:
+        if not emitted and len(prompt or "") < MIN_PROMPT_CHARS:
+            return  # nothing fired and not a real prompt turn — don't log noise
+        typed = len(prompt or "")
+        radar_bytes = sum(int(e.get("bytes", 0)) for e in emitted)
+        substance = [e for e in emitted if e.get("kind") == "substance"]
+        nags = [e for e in emitted if e.get("kind") == "nag"]
+        substance_surfaces = sorted({e["surface"] for e in substance})
+        session_log_append(
+            event_type="radar_turn_aggregate",
+            command_or_context=(prompt or "")[:200],
+            outcome="recorded",
+            extra={
+                "typed_bytes": typed,
+                "radar_bytes": radar_bytes,
+                "ratio": round(radar_bytes / max(typed, 1), 3),
+                "n_blocks": len(emitted),
+                "n_substance": len(substance),
+                "n_nag": len(nags),
+                "n_collision": len(substance_surfaces),  # distinct substance corpora firing together
+                "surfaces": sorted({e["surface"] for e in emitted}),
+                "injections": [
+                    {"surface": e.get("surface"), "kind": e.get("kind"),
+                     "bytes": int(e.get("bytes", 0)), "score": e.get("score"),
+                     "ref": e.get("ref")}
+                    for e in emitted
+                ],
+            },
+            # high-entropy dedupe so every turn logs (metrics row, not an event to suppress)
+            dedupe_parts=("radar_turn_aggregate", (prompt or "")[:80],
+                          str(radar_bytes), str(len(emitted)), str(int(time.time()))),
+        )
+    except Exception:
+        pass
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -869,14 +969,36 @@ def main():
     if SKIP_PATTERNS.match(prompt):
         sys.exit(0)
 
+    # Phase 0 (prompt-amplifier instrumentation): accumulate every block this turn
+    # emits; an atexit flush writes one aggregate metrics row even on early exit.
+    # Pure observation — mutated by reference at each emission site below.
+    emitted: list[dict] = []
+    atexit.register(log_turn_aggregate, prompt, emitted)
+
     # Phase 2 + Phase 4 + Phase 4.5 — lifecycle nag notices fire INDEPENDENTLY
     # of the skill-match injection. They render before the skill match so
     # session-discipline signals lead. Each can return None to skip.
+    # Phase 1 — a lifecycle nag fires at most ONCE per session (it stays true
+    # every turn, but re-emitting it every turn taxes the prompt budget). Key on
+    # the session id when present, else the calendar day. Demotes cadence only —
+    # the obligation stands and re-surfaces next session until acted on.
+    session_token = (
+        str(payload.get("session_id") or payload.get("sessionId") or "").strip()
+        or datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+    )
     lifecycle_notices: list[str] = []
-    for notice_fn in (check_brief_pending, check_harvest_overdue, check_queue_zero_candidates):
+    for notice_key, notice_fn in (
+        ("brief_pending", check_brief_pending),
+        ("harvest_overdue", check_harvest_overdue),
+        ("queue_zero", check_queue_zero_candidates),
+    ):
         notice = notice_fn()
-        if notice:
-            lifecycle_notices.append(notice)
+        if not notice:
+            continue
+        if nag_already_fired(notice_key, session_token):
+            continue  # already nagged this session — don't crowd substance
+        record_nag_fired(notice_key, session_token)
+        lifecycle_notices.append(notice)
 
     if lifecycle_notices:
         combined = "\n\n---\n\n".join(lifecycle_notices)
@@ -885,6 +1007,8 @@ def main():
             hook_event_name=event.hook_event_name,
             runtime=event.runtime,
         ))
+        for _notice in lifecycle_notices:
+            emitted.append({"surface": "lifecycle", "kind": "nag", "bytes": len(_notice)})
 
     # Phase 1 — doctrine match runs INDEPENDENTLY of the skill radar so a
     # prompt can fire both surfaces. Doctrine is higher-stakes (threshold
@@ -893,11 +1017,15 @@ def main():
     doctrine_rule = match_doctrine_for_prompt(prompt)
     if doctrine_rule:
         log_doctrine_auto_inject(prompt, doctrine_rule)
+        doctrine_section = render_doctrine_section(doctrine_rule)
         print(render_additional_context(
-            render_doctrine_section(doctrine_rule),
+            doctrine_section,
             hook_event_name=event.hook_event_name,
             runtime=event.runtime,
         ))
+        emitted.append({"surface": "doctrine", "kind": "substance", "bytes": len(doctrine_section),
+                        "score": doctrine_rule.get("score") if isinstance(doctrine_rule, dict) else None,
+                        "ref": doctrine_rule.get("rule") if isinstance(doctrine_rule, dict) else None})
 
     # Schema Radar (plan thj/26-6-16) — fires INDEPENDENTLY of the skill match,
     # like doctrine, so a prompt naming a table gets its comment even when no
@@ -914,11 +1042,14 @@ def main():
                 schema_match = match_schema(prompt, schema_idx)
                 if schema_match:
                     log_schema_inject(prompt, schema_slug, schema_match)
+                    schema_section = render_schema_section(schema_slug, schema_match)
                     print(render_additional_context(
-                        render_schema_section(schema_slug, schema_match),
+                        schema_section,
                         hook_event_name=event.hook_event_name,
                         runtime=event.runtime,
                     ))
+                    emitted.append({"surface": "schema", "kind": "substance", "bytes": len(schema_section),
+                                    "score": schema_match.get("score"), "ref": schema_match.get("table")})
     except Exception:
         pass
 
@@ -939,11 +1070,14 @@ def main():
                 proto_match = match_protocol(prompt, proto_idx)
                 if proto_match:
                     log_protocol_inject(prompt, proto_slug, proto_match, verified)
+                    proto_section = render_protocol_section(proto_match, verified)
                     print(render_additional_context(
-                        render_protocol_section(proto_match, verified),
+                        proto_section,
                         hook_event_name=event.hook_event_name,
                         runtime=event.runtime,
                     ))
+                    emitted.append({"surface": "protocol", "kind": "substance", "bytes": len(proto_section),
+                                    "score": proto_match.get("score"), "ref": proto_match.get("component_key")})
     except Exception:
         pass
 
@@ -1028,11 +1162,15 @@ def main():
                 trust="learned:judge-applicability",
             ))
 
+    skill_body = "\n\n".join(blocks)
     print(render_additional_context(
-        "\n\n".join(blocks),
+        skill_body,
         hook_event_name=event.hook_event_name,
         runtime=event.runtime,
     ))
+    emitted.append({"surface": "skill", "kind": "substance", "bytes": len(skill_body),
+                    "score": max((m.get("score", 0) for m in all_matches), default=None),
+                    "ref": [m.get("skill_name", m.get("name", "?")) for m in all_matches]})
 
 
 if __name__ == "__main__":

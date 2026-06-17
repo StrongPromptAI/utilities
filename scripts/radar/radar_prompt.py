@@ -613,35 +613,45 @@ def trigger_schema_rebuild(slug: str) -> None:
 
 
 def match_schema(prompt: str, index: dict) -> dict | None:
-    """Top-1 schema chunk over th.SCHEMA, gated on a table-name token
-    actually appearing in the prompt (word-boundary). The prefilter is the
-    distinctive-name guard; the semantic threshold separates 'mentioned and
-    relevant' from 'mentioned in passing' (the `session`/`patient` collision).
-    None on no match or embed failure (silent no-op)."""
+    """Top-1 schema chunk over th.SCHEMA by pure semantic similarity — NO
+    table-name-token gate.
+
+    The exact-name prefilter was removed 2026-06-16: a concept-only sweep
+    (questions asked the way a dev actually asks — no snake_case table name)
+    showed it surfaced the right table for **0/53** natural questions, and fired
+    the WRONG table 11× (almost all `patient`, a common word semantically near
+    most patient-domain prompts). Real questions almost never type the table
+    name, so the gate that required it was the dominant recall limiter. Pure
+    cosine recovered 30/53. The name token is deliberately NOT reintroduced as a
+    boost: boosting a common single-word name (`patient`, `session`, `alert`)
+    would amplify the same wrong-fire pathology.
+
+    The remaining wrong-fires (a broad table edging out the specific one) are
+    suppressed by a top-1-vs-top-2 MARGIN (th.SCHEMA_MARGIN): fire only if the
+    winner clears the bar AND beats #2 by the margin — an ambiguous near-tie
+    stays silent rather than confidently injecting the wrong table's comment.
+    Cut concept wrong-fires 16 → 5 at margin 0.02. None on no match / embed
+    failure / ambiguous near-tie (silent no-op).
+    See thj/plans/26-6-16_schema-comment-enrichment-agent.md § Folded-in findings."""
     chunks = index.get("chunks", [])
     if not chunks:
         return None
     cleaned = strip_prior_injections(prompt)
     if not cleaned:
         return None
-    low = cleaned.lower()
-    candidates = [
-        c for c in chunks
-        if re.search(r"\b" + re.escape(c["table"].lower()) + r"\b", low)
-    ]
-    if not candidates:
-        return None
     query_vec = embed(QUERY_PREFIX + cleaned[:1000])
     if not query_vec:
         return None
     scored = sorted(
-        ({"score": dot(query_vec, c["embedding"]), **c} for c in candidates if c.get("embedding")),
+        ({"score": dot(query_vec, c["embedding"]), **c} for c in chunks if c.get("embedding")),
         key=lambda x: x["score"],
         reverse=True,
     )
-    if scored and scored[0]["score"] >= th.SCHEMA:
-        return scored[0]
-    return None
+    if not scored or scored[0]["score"] < th.SCHEMA:
+        return None
+    if len(scored) > 1 and (scored[0]["score"] - scored[1]["score"]) < th.SCHEMA_MARGIN:
+        return None  # ambiguous near-tie — don't confidently inject the wrong table
+    return scored[0]
 
 
 def render_schema_section(repo: str, match: dict) -> str:

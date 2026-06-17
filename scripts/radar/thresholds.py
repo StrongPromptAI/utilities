@@ -59,6 +59,22 @@ POST_TOOL_WHAT = 0.72
 #   PROMPT_WISDOM note above) — this is the corpus that sweep directly measured.
 SCHEMA = 0.66
 
+# ── Schema corpus — top-1 vs top-2 margin (prompt hook) ──────────────────────
+# Origin: the schema-recall margin sweep (thj/26-6-16,
+#   scripts/radar/tests/schema_recall_sweep.py --sweep-margin). After the
+#   exact-name prefilter was removed (match_schema = pure cosine top-1 >= SCHEMA,
+#   2026-06-16), top-1 ALWAYS fires when it clears the bar — so a broad table
+#   (`patient`, semantically near most patient-domain prompts) can edge out the
+#   specific table the user meant: 16/53 concept questions fired the WRONG table
+#   at margin 0. Requiring top-1 to beat top-2 by >= 0.02 cut concept wrong-fires
+#   16 → 5 and named 6 → 2 for only 3 lost correct (concept 30 → 27) — the
+#   OK-minus-WRONG maximum on BOTH the concept (no table name) and named
+#   distributions. 0.03 is the precision-leaning alternative (wrong → 3, neg-FP
+#   2 → 1, costs 4 more correct). Residual at 0.02: 2 benign FPs ("how is the
+#   patient doing this week" → check_in) — topically adjacent, not chased.
+#   Re-tune off the SCHEMA inject log once there is real traffic.
+SCHEMA_MARGIN = 0.02
+
 # ── Protocol corpus (prompt hook) ────────────────────────────────────────────
 # Origin: inherited the 0.72 prompt-match bar — UNCALIBRATED for protocol.
 #   Unlike schema there is NO keyword prefilter (component_keys are opaque

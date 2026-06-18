@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from embed_client import EMBED_URL, embed as _embed
+from embed_client import EMBED_URL, embed as _embed, wait_for_ready
 import protocol_corpus as pc
 
 DOCUMENT_PREFIX = "search_document: "
@@ -130,9 +130,10 @@ def main() -> int:
         print(f"[build_protocol_index] {args.repo}: {len(chunks)} sections | embed {EMBED_URL}")
         embeddings: list[list[float]] = []
         try:
+            wait_for_ready(batch=True)  # wake embed-batch if remote/hibernating
             for i in range(0, len(chunks), BATCH):
                 batch = chunks[i:i + BATCH]
-                embeddings.extend(_embed([DOCUMENT_PREFIX + c["text"] for c in batch], timeout=30.0))
+                embeddings.extend(_embed([DOCUMENT_PREFIX + c["text"] for c in batch], batch=True, timeout=30.0))
                 print(f"  embedded {min(i + BATCH, len(chunks))}/{len(chunks)}")
         except Exception as e:
             print(f"ERROR: embed service unreachable: {e}", file=sys.stderr)

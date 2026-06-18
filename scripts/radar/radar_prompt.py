@@ -32,7 +32,7 @@ from pathlib import Path
 
 # Local import — Skill Radar embed client, backed by the utilities ONNX service.
 sys.path.insert(0, str(Path(__file__).parent))
-from embed_client import embed as _shared_embed
+from embed_client import embed as _shared_embed, EmbedUnavailable, EmbedAuthError
 from event_adapter import PromptEvent, normalize_event
 from output_adapter import render_additional_context, render_radar_block
 from session_log import _slugify_cwd, append_event as session_log_append, project_log_path
@@ -254,10 +254,16 @@ def dot(a: list[float], b: list[float]) -> float:
 
 
 def embed(text: str) -> list[float] | None:
-    """Single-text embed via shared-svcs. Returns None on any failure so the
-    hook silently no-ops instead of blocking Claude Code."""
+    """Single-text embed via shared-svcs.
+
+    Returns None when the service is up but the call failed (503 shedding, etc.) so
+    the hook degrades quietly. But propagates EmbedUnavailable — no backend reachable
+    at all (neither local ONNX nor Railway) — so main() can hard-fail loudly instead
+    of silently losing radar coverage. retries=1 keeps the down-detection snappy."""
     try:
-        return _shared_embed([text], timeout=3.0)[0]
+        return _shared_embed([text], timeout=3.0, retries=1)[0]
+    except EmbedUnavailable:
+        raise
     except Exception:
         return None
 
@@ -921,17 +927,43 @@ def _nag_state_path() -> Path:
     return Path.home() / ".claude" / "projects" / _slugify_cwd(os.getcwd()) / "radar-nag-state.json"
 
 
+# How many recent session tokens to remember per nag key. Bounds the state
+# file under heavy multi-session usage; far more than any plausible number of
+# concurrent/recent sessions, so an already-fired session is never forgotten.
+_NAG_TOKENS_PER_KEY = 100
+
+
+def _nag_tokens(st: dict, key: str) -> list[str]:
+    """The session tokens that have already fired `key`. Tolerates the legacy
+    scalar shape ({key: token}) by coercing it to a one-element list, so an
+    in-place upgrade doesn't re-fire every standing nag once."""
+    v = st.get(key)
+    if v is None:
+        return []
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, list):
+        return [t for t in v if isinstance(t, str)]
+    return []
+
+
 def nag_already_fired(key: str, session_token: str) -> bool:
     """Phase 1 (plan 26-6-16 radar-prompt-amplifier-spry): a lifecycle nag is
     TRUE every turn until its condition resolves, so it must not RE-fire every
     turn — it crowds the substantive corpora out of the prompt budget (doctrine
     principle #3). Fire once per session (or per day if no session id), then
-    stay silent until the condition is acted on or a new session starts."""
+    stay silent until the condition is acted on or a new session starts.
+
+    State is a SET of recent session tokens per key, not a single token: the old
+    scalar shape lost a session under concurrency — two overlapping sessions each
+    overwrote the other's token in the shared file, so both re-fired every turn
+    (soak 2026-06-17 showed nag re-fires seconds apart). Membership is per-token,
+    so concurrent sessions no longer clobber each other."""
     try:
         p = _nag_state_path()
         if not p.exists():
             return False
-        return json.loads(p.read_text()).get(key) == session_token
+        return session_token in _nag_tokens(json.loads(p.read_text()), key)
     except Exception:
         return False  # fail open — a missed suppression just nags once more, never blocks
 
@@ -946,7 +978,13 @@ def record_nag_fired(key: str, session_token: str) -> None:
                 st = json.loads(p.read_text())
             except Exception:
                 st = {}
-        st[key] = session_token
+        # Re-read just before write narrows (does not close) the concurrent
+        # read-modify-write window: append this session's token without dropping
+        # a sibling session's, then cap to the most-recent N.
+        tokens = _nag_tokens(st, key)
+        if session_token not in tokens:
+            tokens.append(session_token)
+        st[key] = tokens[-_NAG_TOKENS_PER_KEY:]
         p.write_text(json.dumps(st))
     except Exception:
         pass
@@ -1146,33 +1184,56 @@ def main():
     # Search the union; if the matched chunk is in the what index, it goes
     # to the "what" surface, otherwise wisdom. Score is 1.0 either way.
     matches_by_dim: dict[str, list[dict]] = {"wisdom": [], "what": []}
-    kw_matches = keyword_prefilter(prompt, wisdom_idx + what_idx)
-    if kw_matches:
-        # Bucket each match by which index it came from
-        what_paths = {(e.get("file_path"), e.get("skill_name")) for e in what_idx}
-        for m in kw_matches:
-            key = (m.get("file_path"), m.get("skill_name"))
-            dim = "what" if key in what_paths else "wisdom"
-            matches_by_dim[dim].append(m)
-    else:
-        # Tier 2: semantic — single embed, score against each index, apply
-        # per-dimension threshold, take top-N from each.
-        query_vec = embed(QUERY_PREFIX + prompt[:1000])
-        if not query_vec:
-            sys.exit(0)
+    try:
+        kw_matches = keyword_prefilter(prompt, wisdom_idx + what_idx)
+        if kw_matches:
+            # Bucket each match by which index it came from
+            what_paths = {(e.get("file_path"), e.get("skill_name")) for e in what_idx}
+            for m in kw_matches:
+                key = (m.get("file_path"), m.get("skill_name"))
+                dim = "what" if key in what_paths else "wisdom"
+                matches_by_dim[dim].append(m)
+        else:
+            # Tier 2: semantic — single embed, score against each index, apply
+            # per-dimension threshold, take top-N from each.
+            query_vec = embed(QUERY_PREFIX + prompt[:1000])
+            if not query_vec:
+                sys.exit(0)
 
-        for dim, idx, threshold in (
-            ("wisdom", wisdom_idx, th.PROMPT_WISDOM),
-            ("what", what_idx, th.PROMPT_WHAT),
-        ):
-            if not idx:
-                continue
-            scored = sorted(
-                [{"score": dot(query_vec, s["embedding"]), **s} for s in idx],
-                key=lambda x: x["score"],
-                reverse=True,
+            for dim, idx, threshold in (
+                ("wisdom", wisdom_idx, th.PROMPT_WISDOM),
+                ("what", what_idx, th.PROMPT_WHAT),
+            ):
+                if not idx:
+                    continue
+                scored = sorted(
+                    [{"score": dot(query_vec, s["embedding"]), **s} for s in idx],
+                    key=lambda x: x["score"],
+                    reverse=True,
+                )
+                matches_by_dim[dim] = [s for s in scored[:TOP_PER_DIM] if s["score"] >= threshold]
+    except EmbedUnavailable as e:
+        # Backend not usable — either unreachable (EmbedUnavailable) or auth-rejected
+        # (EmbedAuthError subclass: bad/wrong/expired JWT). BOTH fail closed and LOUD
+        # — exit 2 blocks the prompt — rather than silently dropping radar coverage.
+        # (A 503/busy backend is "up" and degrades to None above, not here.)
+        if isinstance(e, EmbedAuthError):
+            print(
+                f"❌ Skill Radar: embed auth rejected — {e}\n"
+                "Fix shared_svc_jwt_secret in ~/.config/keys.json (= shared-svcs Railway "
+                "JWT_SECRET), or unset SKILL_RADAR_EMBED_URL to use local ONNX. (A bad "
+                "secret is wrong every turn — this block is deliberate so it can't hide.)",
+                file=sys.stderr,
             )
-            matches_by_dim[dim] = [s for s in scored[:TOP_PER_DIM] if s["score"] >= threshold]
+        else:
+            print(
+                f"❌ Skill Radar: embed backend unavailable — {e}\n"
+                "Start local ONNX (services/embed on :8100) or point SKILL_RADAR_EMBED_URL "
+                "at Railway. (This block is deliberate: radar fails loud when no embed "
+                "backend is reachable.)",
+                file=sys.stderr,
+            )
+        sys.exit(2)
 
     all_matches = matches_by_dim["wisdom"] + matches_by_dim["what"]
     if not all_matches:

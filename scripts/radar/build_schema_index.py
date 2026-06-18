@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from embed_client import EMBED_URL, embed as _embed
+from embed_client import EMBED_URL, embed as _embed, wait_for_ready
 import schema_corpus as sc
 
 DOCUMENT_PREFIX = "search_document: "
@@ -57,9 +57,10 @@ def main() -> int:
 
     embeddings: list[list[float]] = []
     try:
+        wait_for_ready(batch=True)  # wake embed-batch if remote/hibernating
         for i in range(0, len(chunks), BATCH):
             batch = chunks[i : i + BATCH]
-            vecs = _embed([DOCUMENT_PREFIX + c["text"] for c in batch], timeout=30.0)
+            vecs = _embed([DOCUMENT_PREFIX + c["text"] for c in batch], batch=True, timeout=30.0)
             embeddings.extend(vecs)
             print(f"  embedded {min(i + BATCH, len(chunks))}/{len(chunks)}")
     except Exception as e:

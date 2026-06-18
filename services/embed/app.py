@@ -51,17 +51,44 @@ _JWT_OPTIONS = {"require": ["exp", "iss", "aud"]}
 
 _bearer = HTTPBearer()
 
-# Per-request memory ceilings. EMBED_MAX_BATCH bounds the WIDTH of one request
-# (peak memory scales batch × 512 × 768 × 4 bytes); EMBED_MAX_CONCURRENCY bounds
-# how many inferences run at once. Together with the intra-op thread cap in
-# nomic_embed.py, peak memory is a known fixed number the box is sized to. Defaults
-# suit the small always-on chat box; the fat batch box raises both via env.
-EMBED_MAX_BATCH = int(os.environ.get("EMBED_MAX_BATCH", "64"))
+# Memory ceiling. EMBED_MAX_BATCH is the per-inference SLICE size — the server
+# sub-batches every request to this width internally (see _embed_texts), so peak
+# memory ≈ baseline + EMBED_MAX_CONCURRENCY × EMBED_MAX_BATCH × (~per-text cost),
+# a fixed number the box is sized to, NO MATTER how large a request a client sends.
+# Tragedy-of-the-commons guard: the server caps the grazing, not the clients — a
+# dumb client can send any size and never overgraze the shared box. Defaults suit the
+# small always-on chat box; the fat batch box can raise the slice via env.
+EMBED_MAX_BATCH = int(os.environ.get("EMBED_MAX_BATCH", "16"))
 EMBED_MAX_CONCURRENCY = int(os.environ.get("EMBED_MAX_CONCURRENCY", "2"))
+
+# Absolute per-request ceiling — an abuse / runaway guard ONLY, not a memory knob
+# (memory is bounded by the slice above regardless of request size). A dumb client
+# may send any reasonable size and the server sub-batches it; only the absurd is 413'd.
+EMBED_MAX_REQUEST = int(os.environ.get("EMBED_MAX_REQUEST", "4096"))
+
+# Latency-fairness shed (interactive box only). Sub-batching keeps a big request
+# memory-safe, but it still holds ONE concurrency slot for the request's whole duration
+# — a single bulk request could starve interactive traffic for ~a minute. Set this on
+# the always-on box (e.g. 64, above legitimate interactive use) so an over-sized request
+# is shed FAST with 413 ("use the batch endpoint") WITHOUT taking a slot, structurally
+# enforcing the bulk→embed-batch routing preference. 0 = disabled (embed-batch + dev).
+EMBED_BULK_SHED = int(os.environ.get("EMBED_BULK_SHED", "0"))
+
+# Load-shedding queue depth. The semaphore caps how many inferences run at once
+# (the memory ceiling); this caps how many may WAIT for it. Past
+# EMBED_MAX_CONCURRENCY + EMBED_MAX_QUEUE in-flight, new requests get a fast 503 +
+# Retry-After instead of joining an unbounded queue that turns a user spike into a
+# hang for everyone. Clients (embed_client, gitnexus) already retry 503 with backoff,
+# so the spike smooths out. Default = 4× concurrency; no need to tune per box.
+EMBED_MAX_QUEUE = int(os.environ.get("EMBED_MAX_QUEUE", str(EMBED_MAX_CONCURRENCY * 4)))
 
 # Bound to the running loop in startup() so excess concurrent inferences queue
 # instead of stacking and blowing the memory ceiling (mirrors TTS _synth_semaphore).
 _embed_semaphore: asyncio.Semaphore | None = None
+# Admitted requests (running on the semaphore OR waiting for it). Mutated only from
+# the single-threaded event loop, so the read-then-increment below is atomic without
+# a lock. The load-shed gate reads this to reject before the queue grows unbounded.
+_pending: int = 0
 
 _ready: bool = False
 _load_error: str | None = None
@@ -85,6 +112,73 @@ def _require_embed_token(creds: HTTPAuthorizationCredentials = Security(_bearer)
 _AUTH_DEPS = [Depends(_require_embed_token)] if _IS_PROD else []
 
 
+def _rss_mb() -> float:
+    """Process peak RSS in MB (ru_maxrss high-water mark). macOS=bytes, Linux=KB."""
+    import resource
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss / 1024 if os.uname().sysname == "Linux" else rss / (1024 * 1024)
+
+
+def _container_mem_limit_mb() -> float | None:
+    """The container's hard memory limit in MB from cgroup (v2 then v1), or None when
+    unconstrained / unreadable (e.g. local macOS dev). No env knob — read the real
+    ceiling the OOM-killer enforces."""
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            raw = open(path).read().strip()
+        except OSError:
+            continue
+        if raw == "max":  # cgroup v2 unlimited
+            return None
+        try:
+            v = int(raw)
+        except ValueError:
+            continue
+        if v <= 0 or v > (1 << 62):  # v1 unlimited sentinel
+            return None
+        return v / (1024 * 1024)
+    return None
+
+
+# Fraction of the container limit the projected peak must stay under (headroom for the
+# OS, the runtime, and non-embed allocations). Breach = fail-closed at boot.
+_MEM_BUDGET_FRACTION = 0.92
+
+
+def _memory_selfcheck() -> None:
+    """Poka-yoke: at boot, run ONE worst-case slice (EMBED_MAX_BATCH × ~512 tokens) and
+    project the full-concurrency peak (baseline + concurrency × one-slice working set).
+    If that exceeds the container's real memory limit, fail closed — set _load_error so
+    /health returns 500 and /embed never serves — instead of letting the box OOM-crash
+    under live load. This is the gate that would have caught all three mis-sized configs
+    from the 2026-06-17 incident at boot rather than in production. No-ops loudly when the
+    limit is unreadable (local dev)."""
+    global _load_error
+    from nomic_embed import _embed
+    baseline = _rss_mb()
+    probe = ["search_document: " + ("word " * 400)] * EMBED_MAX_BATCH  # ~512 tok each
+    _embed(probe)
+    gc.collect()
+    slice_delta = max(0.0, _rss_mb() - baseline)
+    projected = baseline + EMBED_MAX_CONCURRENCY * slice_delta
+    limit = _container_mem_limit_mb()
+    print(
+        f"[embed] mem self-check: baseline={baseline:.0f}MB slice(batch={EMBED_MAX_BATCH})"
+        f"_delta={slice_delta:.0f}MB projected_peak(conc={EMBED_MAX_CONCURRENCY})="
+        f"{projected:.0f}MB limit={limit:.0f}MB" if limit else
+        f"[embed] mem self-check: baseline={baseline:.0f}MB slice_delta={slice_delta:.0f}MB "
+        f"projected_peak={projected:.0f}MB limit=unknown(dev) — gate skipped"
+    )
+    if limit and projected > _MEM_BUDGET_FRACTION * limit:
+        _load_error = (
+            f"mem self-check FAILED: projected peak {projected:.0f}MB exceeds "
+            f"{_MEM_BUDGET_FRACTION:.0%} of the {limit:.0f}MB container limit at "
+            f"EMBED_MAX_BATCH={EMBED_MAX_BATCH} × EMBED_MAX_CONCURRENCY={EMBED_MAX_CONCURRENCY}. "
+            f"Lower the slice/concurrency or raise the box. Refusing to serve (fail-closed)."
+        )
+        print(f"❌ [embed] {_load_error}")
+
+
 def _warmup() -> None:
     global _ready, _load_error
     try:
@@ -92,6 +186,9 @@ def _warmup() -> None:
         _get_session()
         result = _embed(["warmup"])
         assert result.shape[1] == 768, f"Expected 768-dim, got {result.shape[1]}"
+        _memory_selfcheck()
+        if _load_error:
+            return  # self-check failed — stay not-ready, /health 500, /embed 503
         _ready = True
         print("[embed] Ready (768-dim, warm-up passed)")
     except Exception as exc:
@@ -110,12 +207,8 @@ async def startup() -> None:
 @app.get("/mem")
 def mem() -> Response:
     """Memory usage snapshot — unauthenticated for monitoring."""
-    import resource
-    rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    # macOS reports bytes, Linux reports KB
-    rss_mb = rss_kb / 1024 if os.uname().sysname == "Linux" else rss_kb / (1024 * 1024)
     return Response(
-        content=f'{{"rss_mb":{rss_mb:.1f}}}',
+        content=f'{{"rss_mb":{_rss_mb():.1f}}}',
         status_code=200,
         media_type="application/json",
     )
@@ -146,33 +239,67 @@ class OpenAIEmbedRequest(BaseModel):
 async def _embed_texts(texts: list[str]) -> list[list[float]]:
     """Shared embed path for both endpoints — the single place the caps live.
 
-    Order is deliberate (fail-closed on the cheap checks first): reject empty or
-    oversized batches before touching readiness or the model, so a malformed request
-    is rejected even while the model is still loading. The semaphore then bounds how
-    many inferences run concurrently; excess requests queue rather than stacking.
+    The server protects the commons: a client may send ANY reasonable number of
+    texts (dumb client), and the server sub-batches internally to EMBED_MAX_BATCH so
+    peak memory is bounded no matter the request size. Order is fail-closed: reject
+    empty / absurdly-large before touching the model; the semaphore bounds concurrent
+    inferences; the queue gate sheds load past that.
     """
     if not texts:
         raise HTTPException(400, "inputs is required")
-    if len(texts) > EMBED_MAX_BATCH:
+    if len(texts) > EMBED_MAX_REQUEST:
         raise HTTPException(
-            413, f"batch too large: {len(texts)} > EMBED_MAX_BATCH={EMBED_MAX_BATCH}"
+            413, f"request too large: {len(texts)} > EMBED_MAX_REQUEST={EMBED_MAX_REQUEST}"
+        )
+    # Latency-fairness shed: refuse over-sized requests on the interactive box FAST,
+    # before taking a concurrency slot, so a bulk request can't starve interactive
+    # traffic. Memory is already safe (sub-batching); this protects the latency SLA.
+    if EMBED_BULK_SHED and len(texts) > EMBED_BULK_SHED:
+        raise HTTPException(
+            413,
+            f"request of {len(texts)} exceeds this interactive box's limit "
+            f"(EMBED_BULK_SHED={EMBED_BULK_SHED}); send bulk to the embed-batch endpoint",
         )
     if not _ready:
         raise HTTPException(503, "Embedding model loading")
 
+    # Load-shed: refuse fast when the semaphore queue is already full, rather than
+    # joining an unbounded wait. Atomic in the asyncio loop (no await between the
+    # check and the increment). Retry-After tells well-behaved clients to back off.
+    global _pending
+    if _pending >= EMBED_MAX_CONCURRENCY + EMBED_MAX_QUEUE:
+        raise HTTPException(
+            503, "embedding service saturated, retry shortly",
+            headers={"Retry-After": "1"},
+        )
+    _pending += 1
+
     from nomic_embed import _embed
 
     assert _embed_semaphore is not None, "semaphore not initialized (startup not run)"
-    async with _embed_semaphore:
-        try:
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, lambda: _embed(texts))
-            vectors = result.tolist()
-            del result
-            gc.collect()
-            return vectors
-        except Exception as exc:
-            raise HTTPException(500, str(exc))
+    try:
+        async with _embed_semaphore:
+            try:
+                loop = asyncio.get_event_loop()
+                # Server-side sub-batching — the commons cap. Slice the request into
+                # EMBED_MAX_BATCH-wide inferences so peak RSS = baseline + (one slice),
+                # independent of how big a batch the client sent. One semaphore slot
+                # spans the whole request, so concurrency (hence total memory) stays
+                # bounded by EMBED_MAX_CONCURRENCY × slice.
+                vectors: list[list[float]] = []
+                for i in range(0, len(texts), EMBED_MAX_BATCH):
+                    sub = texts[i : i + EMBED_MAX_BATCH]
+                    result = await loop.run_in_executor(None, lambda s=sub: _embed(s))
+                    vectors.extend(result.tolist())
+                    del result
+                    gc.collect()
+                return vectors
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(500, str(exc))
+    finally:
+        _pending -= 1
 
 
 @app.post("/embed", dependencies=_AUTH_DEPS)

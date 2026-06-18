@@ -28,8 +28,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import hook
-import prompt_hook
+# Modules were renamed (hook → radar_post_tool, prompt_hook → radar_prompt) and
+# split: extract_error lives in radar_post_tool; embed / keyword_prefilter /
+# strip_prior_injections live in radar_prompt. Alias to keep the test body as-is.
+import radar_post_tool as hook
+import radar_prompt as prompt_hook
 
 
 FAILURES: list[str] = []

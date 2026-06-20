@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """
-doc_to_speech — turn a markdown/text document into an MP3 and land it in oxp.files.
+doc_to_speech — the shared TTS engine + one-voice (monologue) render pipeline.
+
+This module is a LIBRARY, not a CLI — the command lives in doc_to_audio.py. It holds
+the engine both render formats share (markdown→speakable normalization, chunking, «…»
+emphasis pacing, pronunciation overrides, per-chunk PCM synth, ffmpeg→MP3, podcast-server
+publish + episode-description pass, Railway secret pulls) plus the one-voice pipeline
+(_normalize_and_chunk, _process_doc, _publish_episode). dialogue.py adds the two-voice
+pipeline; doc_to_audio.py drives either.
 
 Pipeline:
   read doc → normalize markdown to *speakable* prose → chunk to ≤ N chars
   → synthesize each chunk via the shared-svcs TTS service (Kokoro) as raw PCM
   → concatenate (with a short pause between chunks) → ffmpeg transcode to MP3
-  → upload to the oxp.files Tigris bucket via a presigned PUT.
+  → PUT to a podcast show's volume (services/podcast) + a brief description sidecar.
 
 This is an on-demand driver — run it per document; nothing is deployed. It is the
 first production consumer of services/tts.
 
-Why each step exists (the gaps between the raw TTS service and "MP3 in oxp.files"):
+Why each step exists (the gaps between the raw TTS service and "MP3 in the feed"):
   • TTS emits WAV/PCM, never MP3            → ffmpeg transcodes (MP3 is ~12× smaller
                                               and plays on every car head unit).
   • TTS caps input at 800 chars/request     → chunk sentence-aware, synth, concat.
@@ -43,14 +50,15 @@ Usage:
   # Use a locally-running TTS (services/tts on :8102, auth-off in dev):
   uv run python scripts/doc_to_speech.py PLAN.md --local-tts
 
-  # Produce a local MP3 only, skip the oxp.files upload:
+  # Produce a local MP3 only, skip the podcast publish:
   uv run python scripts/doc_to_speech.py PLAN.md --no-upload --out /tmp/doc.mp3
 
-Auth (see symlink_docs/registries/AUTH_REGISTRY.md scenarios 4 + 5):
-  • TTS prod   — HS256 JWT, aud="tts", signed with the shared-svcs JWT_SECRET.
-  • oxp.files  — HS256 session bearer {sub,iat,exp}, signed with the files JWT_SECRET.
+Auth:
+  • TTS prod  — HS256 JWT, aud="tts", signed with the shared-svcs JWT_SECRET.
+  • podcast   — HS256 bearer, aud="podcast-upload", signed with the show server's
+                PODCAST_UPLOAD_SECRET (services/podcast/app.py _verify_upload).
   Both secrets are pulled live from Railway (Railway GraphQL API); nothing is written
-  to disk. --local-tts skips the TTS secret; --no-upload skips the files secret.
+  to disk. --local-tts skips the TTS secret; --no-upload skips the podcast secret.
 """
 
 from __future__ import annotations
@@ -67,7 +75,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -82,21 +92,28 @@ SHARED_SVCS = {
     "env": "1ea8ab63-10af-4b83-b562-68a4a5c4f670",
     "tts_service": "02ff6d94-a49c-464e-b1e0-44f6933d5209",
 }
-OXP_KB = {
-    "project": "96a6d9dd-b680-4821-bee6-ed850a19074b",
-    "env": "30bf77ef-ec92-472d-b92a-93e3806bd7e4",
-    "files_service": "56aebab1-320e-48d2-9053-44cacc82c241",
+# StrongPrompt podcast server (services/podcast) — the synth-publish target. A show is a
+# slug; the MP3 + a `<base>.md` description sidecar PUT straight onto its volume. This is the
+# sole sink: oxp.files was retired as a doc_to_audio target at cutover (its podcast content
+# migrated to the `tech` show; oxp.files is now OrthoXpress-client-only).
+PODCAST = {
+    "project": "f4451750-12a8-4cff-9bc8-1796a9c15508",
+    "env": "844d5562-ac1d-4a22-b249-986be610a0a5",
+    "service": "5a1fc29d-3556-4fd3-b039-dd9cb0d43ec7",
 }
 
 PROD_TTS_URL = "https://shared-svcs-tts.up.railway.app"
 LOCAL_TTS_URL = "http://localhost:8102"
-OXP_FILES_FALLBACK_URL = "https://oxp.files.strongprompt.ai"
+PODCAST_FALLBACK_URL = "https://podcast-production-31c9.up.railway.app"
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_SCRUB_MODEL = "google/gemini-3.5-flash"  # cheap; matches kb's backup LLM — mechanical cleanup
-DEFAULT_EXEC_MODEL = "anthropic/claude-opus-4.8"  # exec recap needs judgment — matches doc_to_podcast's script model
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_VERSION = "2023-06-01"
+DEFAULT_SCRUB_MODEL = "google/gemini-3.5-flash"  # cheap mechanical cleanup — OpenRouter (no native Gemini)
+DEFAULT_EXEC_MODEL = "claude-sonnet-4-6"  # native Anthropic (Anthropic credits); post-processing, not SOTA authoring
 SCRUB_SEG_CHARS = 6000   # scrub output ≈ input size → cap input to bound output tokens
 EXEC_SEG_CHARS = 24000   # exec recap output ≪ input → input can be larger (most docs → one pass)
+EMPHASIS_SEG_CHARS = 4000  # emphasis must reproduce its input verbatim → small segments reproduce reliably
 
 KOKORO_SAMPLE_RATE = 24000  # Kokoro's native PCM rate (see services/tts/app.py)
 CHARS_PER_SECOND = 20  # ~Kokoro speech rate; converts the max-pause-gap (seconds) to a char budget
@@ -153,7 +170,85 @@ def _openrouter_key() -> str:
         key = json.loads(KEYS_JSON.read_text()).get("openrouter")
         if key:
             return key
-    _die("No OpenRouter key for --scrub. Expected ~/.config/keys.json → openrouter.")
+    _die("No OpenRouter key. Expected ~/.config/keys.json → openrouter.")
+
+
+def _anthropic_key() -> str:
+    if KEYS_JSON.exists():
+        key = json.loads(KEYS_JSON.read_text()).get("ANTHROPIC_API_KEY")
+        if key:
+            return key
+    _die("No ANTHROPIC_API_KEY for a native-Anthropic model. Expected ~/.config/keys.json → ANTHROPIC_API_KEY.")
+
+
+# ── One chat-completion call, routed by model id ─────────────────────────────────
+#
+# A BARE model id (no "/", e.g. "claude-opus-4-8") hits the NATIVE Anthropic Messages
+# API and draws on Anthropic usage credits. A router-prefixed id ("google/…",
+# "anthropic/…") goes to OpenRouter. So the Anthropic-authored work (pm/exec narrative,
+# dialogue script) uses credits directly; Gemini (scrub) stays on OpenRouter. The two
+# wire shapes differ — native puts `system` top-level and rejects sampling params on
+# Opus 4.7/4.8, and the text lands in content[].text, not choices[].message.content.
+
+def llm_chat(
+    *, system: str, user: str, model: str, max_tokens: int, temperature: float, label: str,
+) -> str:
+    """Run one chat completion and return the response text. Retries transient/5xx 3×;
+    _die()s on auth, 4xx, or hard failure. Routes native-Anthropic vs OpenRouter by model id."""
+    native = "/" not in model
+    if native:
+        url = ANTHROPIC_API_URL
+        headers = {
+            "x-api-key": _anthropic_key(),
+            "anthropic-version": ANTHROPIC_VERSION,
+            "content-type": "application/json",
+        }
+        # Native Messages API: `system` is a top-level field (NOT a system-role message),
+        # and Opus 4.7/4.8 reject temperature/top_p — omit sampling params entirely.
+        body = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
+    else:
+        url = OPENROUTER_URL
+        headers = {"Authorization": f"Bearer {_openrouter_key()}", "Content-Type": "application/json"}
+        body = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+    provider = "Anthropic" if native else "OpenRouter"
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.post(url, headers=headers, json=body, timeout=180)
+            if r.status_code == 200:
+                data = r.json()
+                if native:
+                    out = "".join(
+                        b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
+                    ).strip()
+                else:
+                    out = data["choices"][0]["message"]["content"].strip()
+                if not out:
+                    _die(f"{label} LLM returned empty content")
+                return out
+            if r.status_code in (401, 403):
+                _die(f"{provider} auth rejected ({r.status_code}): {r.text[:200]}")
+            if r.status_code < 500:
+                _die(f"{label} LLM error {r.status_code} ({provider}): {r.text[:300]}")
+            last_err = f"{r.status_code}: {r.text[:200]}"
+        except (requests.RequestException, KeyError, ValueError) as exc:
+            last_err = str(exc)
+        if attempt < 2:
+            time.sleep(1.0 * (attempt + 1))
+    _die(f"{label} LLM failed after 3 attempts ({provider}): {last_err}")
 
 
 # ── LLM passes: audience-specific rewrites of the speakable prose ─────────────────
@@ -190,7 +285,11 @@ _EXEC_SYSTEM = (
     "- Translate any technical, clinical, or product-internal jargon into plain language "
     "an executive would actually use; drop terms that don't carry business meaning.\n"
     "- Be substantially shorter than the source — keep only what a busy executive needs "
-    "to grasp the thesis, the bet, and the open decisions.\n\n"
+    "to grasp the thesis, the bet, and the open decisions.\n"
+    "- Mark emphasis SPARINGLY for the ear: wrap a small number of the single most "
+    "load-bearing lines in guillemets, «like this» (a whole clause or sentence, never a "
+    "single word, never a whole paragraph; only a handful in the whole recap), so they are "
+    "read a touch slower for weight. Used rarely they land; used often they deaden.\n\n"
     "Do NOT:\n"
     "- Mention or read aloud ANY file path, file name, document name, section pointer, "
     "URL, code, or cross-reference scaffolding (e.g. 'see X dot M D', 'per the registry'). "
@@ -219,15 +318,109 @@ _PM_SYSTEM = (
     "terms.\n"
     "- Keep a product vocabulary: product concepts, user/patient experience, design "
     "reasoning. Translate engineering and clinical jargon into plain language; keep a term "
-    "only if it carries product meaning.\n\n"
+    "only if it carries product meaning.\n"
+    "- Mark emphasis SPARINGLY for the ear. Wrap a SMALL number of the single most "
+    "load-bearing lines in guillemets, «like this», so they are read a touch slower for "
+    "weight. Rules: wrap a WHOLE clause or sentence, never a single word; at most one per "
+    "few paragraphs and only a handful in the whole briefing (well under one line in "
+    "twenty); include the trailing punctuation inside the marks. Used rarely they land; "
+    "used often they deaden — when in doubt, leave it unmarked.\n\n"
     "Do NOT:\n"
     "- Read document structure aloud, or mention file names, section pointers, headings, "
     "dates, status tags, citations, or URLs — convey the idea, never the pointer.\n"
     "- Over-summarize into a teaser — the PM wants the 'why', not just the 'what'. Be "
     "substantial; this is a briefing, not a blurb.\n"
+    "- Over-mark emphasis, wrap a bare word or a whole paragraph in «…», or use the "
+    "guillemets for anything other than the rare load-bearing line.\n"
     "- Add headings, bullets, labels, or meta-commentary. Output ONLY the narrative as "
     "flowing prose meant to be heard."
 )
+
+# Emphasis-ONLY post-processing: the text is already authored (e.g. on a SOTA model
+# outside the CLI). The model must NOT write — it may only wrap a few load-bearing clauses
+# in «…». A verification step (below) guarantees this: if the returned text differs from
+# the input by anything other than inserted guillemets, the markers are discarded and the
+# input is kept verbatim. So this pass can add emphasis but can never reword.
+_EMPHASIZE_SYSTEM = (
+    "You are a post-processor that marks emphasis for a text-to-speech reading. You are "
+    "given a FINISHED, authored passage of spoken prose. Your ONLY job is to wrap a SMALL "
+    "number of the single most load-bearing lines in guillemets «like this», so the narrator "
+    "reads them a touch slower for weight.\n\n"
+    "ABSOLUTE RULES:\n"
+    "- Reproduce the passage VERBATIM — every word, number, punctuation mark, and line break "
+    "EXACTLY as given. Do NOT rewrite, reword, summarize, shorten, expand, correct, translate, "
+    "or reorder anything. The text is final and authored by someone else.\n"
+    "- The ONLY characters you may ADD anywhere are the guillemets « and ». Add nothing else — "
+    "no other punctuation, no markdown, no commentary, no headings, no labels.\n"
+    "- Wrap a WHOLE clause or sentence, never a single word, never a whole paragraph. Mark at "
+    "most a handful in the entire passage — well under one line in twenty; include the trailing "
+    "punctuation inside the marks. When in doubt, leave it unmarked.\n"
+    "- Output ONLY the passage, verbatim, with the guillemets inserted."
+)
+
+
+# A SHORT podcast episode description (show notes), written by the in-CLI Sonnet tier from
+# the finished spoken script. Lands as the `<base>.md` sidecar the feed turns into
+# <description> — a purpose-written blurb, NOT the truncated transcript.
+_DESCRIBE_SYSTEM = (
+    "You are writing a SHORT podcast episode description (show notes) for ONE episode, given "
+    "its full spoken script. Write 1–3 sentences, under about 60 words, that tell a "
+    "prospective listener what the episode covers and why it's worth hearing. Present tense. "
+    "Do NOT open with a cliché like 'In this episode'. No markdown, headings, bullet points, "
+    "hashtags, emoji, or quotation marks around the whole thing. Output ONLY the description text."
+)
+
+
+def _episode_description(text: str, *, model: str, label: str = "description") -> str:
+    """One LLM call → a brief podcast episode description from the spoken script. The script's
+    lead carries the gist, so a long episode is capped on input to bound tokens. Markup the model
+    might emit despite the instruction is stripped (the feed shows it as plain text)."""
+    src = text.strip()
+    if len(src) > EXEC_SEG_CHARS:
+        src = src[:EXEC_SEG_CHARS]
+    out = llm_chat(
+        system=_DESCRIBE_SYSTEM, user=src, model=model,
+        max_tokens=400, temperature=0.3, label=label,
+    )
+    return strip_llm_markup(out).strip()
+
+
+def _emphasis_text_preserved(original: str, annotated: str) -> bool:
+    """True iff `annotated` is `original` with only «…» guillemets inserted — i.e. the model
+    added emphasis and changed nothing else (whitespace-normalized). The guarantee that the
+    emphasize pass is annotation-only, never a rewrite."""
+    strip = lambda s: re.sub(r"\s+", " ", s.replace("«", "").replace("»", "")).strip()
+    return strip(original) == strip(annotated)
+
+
+def _emphasis_pass(text: str, *, model: str, label: str = "emphasis") -> str:
+    """Mark «…» emphasis on already-authored prose WITHOUT rewriting it. Segmented small so
+    each call reproduces its input reliably; every segment is verified annotation-only and, if
+    the model altered the words, its markers are dropped and the segment kept verbatim (one
+    retry first). The text can gain emphasis but can never be reworded by this pass."""
+    out_parts: list[str] = []
+    marked = altered = 0
+    for seg in _segment(text, EMPHASIS_SEG_CHARS):
+        annotated = None
+        for _ in range(2):
+            cand = llm_chat(
+                system=_EMPHASIZE_SYSTEM, user=seg, model=model,
+                max_tokens=max(1024, len(seg) // 3 + 512), temperature=0.0, label=label,
+            )
+            if _emphasis_text_preserved(seg, cand):
+                annotated = cand
+                break
+        if annotated is None:
+            altered += 1
+            annotated = seg  # model reworded — keep authored text verbatim, no emphasis here
+        elif "«" in annotated:
+            marked += 1
+        out_parts.append(annotated)
+    if altered:
+        _log(f"⚠️  emphasis: {altered} segment(s) came back reworded — kept verbatim (no emphasis) to protect your text")
+    _log(f"✍️  emphasis: annotated {marked} segment(s); text preserved verbatim")
+    return "\n\n".join(out_parts)
+
 
 def _segment(text: str, seg_chars: int) -> list[str]:
     """Split on paragraph breaks, packing into ≤ seg_chars segments so each LLM call's
@@ -245,46 +438,21 @@ def _segment(text: str, seg_chars: int) -> list[str]:
 
 
 def _llm_pass(
-    text: str, *, system: str, model: str, api_key: str,
+    text: str, *, system: str, model: str,
     seg_chars: int, max_tokens: int, label: str,
 ) -> str:
     """Run one LLM rewrite over the speakable prose, segmenting so each call's output
-    never truncates. `system` selects the transform (content-preserving scrub vs.
-    executive recap); the request shape is identical across audiences — one happy path."""
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    never truncates. `system` selects the transform (content-preserving scrub vs. pm/exec
+    recap); the provider (native Anthropic vs OpenRouter) is chosen by `model` in llm_chat."""
     out_parts: list[str] = []
     segments = _segment(text, seg_chars)
     for i, seg in enumerate(segments, 1):
         if len(segments) > 1:
             _log(f"   {label} segment {i}/{len(segments)}…")
-        body = {
-            "model": model,
-            "temperature": 0,
-            "max_tokens": max_tokens,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": seg},
-            ],
-        }
-        last_err = None
-        for attempt in range(3):
-            try:
-                r = requests.post(OPENROUTER_URL, headers=headers, json=body, timeout=120)
-                if r.status_code == 200:
-                    out = r.json()["choices"][0]["message"]["content"].strip()
-                    if not out:
-                        _die(f"{label} LLM returned empty content")
-                    out_parts.append(out)
-                    break
-                if r.status_code in (401, 403):
-                    _die(f"OpenRouter auth rejected ({r.status_code}): {r.text[:200]}")
-                last_err = f"{r.status_code}: {r.text[:200]}"
-            except (requests.RequestException, KeyError, ValueError) as exc:
-                last_err = str(exc)
-            if attempt < 2:
-                time.sleep(1.0 * (attempt + 1))
-        else:
-            _die(f"{label} LLM failed after 3 attempts: {last_err}")
+        out_parts.append(
+            llm_chat(system=system, user=seg, model=model, max_tokens=max_tokens,
+                     temperature=0.0, label=label)
+        )
     return "\n\n".join(out_parts)
 
 
@@ -322,6 +490,14 @@ def _strip_inline(text: str) -> str:
     text = re.sub(r"https?://\S+", "", text)                      # bare URLs
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text
+
+
+def strip_llm_markup(text: str) -> str:
+    """Strip inline markup an LLM may emit despite a 'no markers' instruction — *emphasis*,
+    **bold**, inline code, link/image syntax, bare URLs. Both front-ends apply this to LLM
+    output: normalize_markdown only ran on the SOURCE, before the LLM rewrote it, so without
+    this the TTS voices a literal asterisk. Shared so the fix can't drift between tools."""
+    return _strip_inline(text)
 
 
 def _ensure_sentence_end(s: str) -> str:
@@ -444,6 +620,42 @@ def chunk_text(text: str, max_chars: int) -> list[str]:
     return chunks
 
 
+# ── Emphasis (Lever 3: pace a load-bearing span slower, with a beat before it) ───
+#
+# Kokoro has no per-word prosody control — its only knobs are per-call speed and the
+# silence we splice between calls. So "emphasis" is: isolate a marked span into its own
+# synth call at a slower speed, and put a short anticipatory pause in front of it. This
+# reads as weight WITHOUT the broken-island sound you get from slowing a single word,
+# *provided the span is a whole clause or sentence* (it then has its own complete
+# intonation arc). Mark spans in the source with guillemets «…» — never emitted by
+# markdown, so they survive normalization untouched.
+
+class Emph(str):
+    """A chunk to synthesize at --emphasis-speed with an anticipatory pause before it.
+    Subclasses str so it flows through the chunk list, len(), the pause-cap, and the
+    dry-run preview unchanged — only _process_doc treats it specially."""
+    __slots__ = ()
+
+
+_EMPHASIS_MARK = re.compile(r"«(.+?)»", re.DOTALL)
+
+
+def split_emphasis_chunks(text: str, max_chars: int) -> list[str]:
+    """Chunk `text` normally, but isolate each «…»-marked span into its own Emph chunk.
+    The marker delimiters themselves are consumed (never voiced). Author spans at
+    clause/sentence boundaries with trailing punctuation *inside* the span, so the split
+    lands cleanly and the surrounding prose isn't fragmented mid-clause."""
+    out: list[str] = []
+    for i, seg in enumerate(_EMPHASIS_MARK.split(text)):
+        if not seg.strip():
+            continue
+        seg_chunks = chunk_text(seg, max_chars)
+        if i % 2 == 1:  # odd segments are the captured «…» interiors
+            seg_chunks = [c if c == _SECTION_SENTINEL else Emph(c) for c in seg_chunks]
+        out.extend(seg_chunks)
+    return out
+
+
 def enforce_pause_cap(chunks: list[str], max_chars: int) -> list[str]:
     """Guarantee no run of speech between pauses exceeds ~max_chars (a char proxy for
     seconds at Kokoro's rate). Walks the chunk list and inserts a _SECTION_SENTINEL at a
@@ -494,6 +706,38 @@ def apply_pron_overrides(text: str, overrides: dict[str, str]) -> str:
     return text
 
 
+def resolve_pron_overrides(
+    *, no_pron: bool, pron_files: list[Path], ad_hoc: list[str]
+) -> dict[str, str]:
+    """Assemble the active override map for one run — the single happy path shared by
+    the one-voice and two-voice pipelines. Layers, later wins:
+
+      1. the global default file scripts/pron_overrides.json (skipped if --no-pron),
+      2. each --pron-file sidecar in order,
+      3. ad-hoc --pron WORD=SPOKEN.
+
+    The layering is the holistic homograph answer. The global file stays doctrine-pure
+    (phrase-disambiguated entries only, NO bare homograph whose sense flips with context
+    — 'content' the noun vs adjective, 'live' reside vs broadcast), because it colors
+    EVERY project's audio. A bare-homograph override whose sense is fixed *within one
+    doc-set* (clinical briefings: 'content' is always the noun, 'live(s)' always means
+    reside) belongs in a per-DOMAIN --pron-file sidecar pointed at by that doc-set's
+    runs — declared where the sense is known, never guessed globally. Position-triggered
+    homographs (espeak flips 'content' to the adjective on a sentence-final '…content.',
+    which no *phrase* key can catch) can ONLY be fixed this way."""
+    overrides: dict[str, str] = {} if no_pron else load_pron_overrides()
+    for f in pron_files:
+        if not f.exists():
+            _die(f"--pron-file not found: {f}")
+        overrides.update(load_pron_overrides(f))
+    for spec in ad_hoc:
+        if "=" not in spec:
+            _die(f"--pron expects WORD=SPOKEN, got {spec!r}")
+        w, _, s = spec.partition("=")
+        overrides[w.strip()] = s.strip()
+    return overrides
+
+
 # ── TTS synthesis ────────────────────────────────────────────────────────────────
 
 def synthesize(
@@ -542,11 +786,12 @@ class _Synth:
     resolves these concurrently; silence segments in the same list are plain bytes
     that need no network call and pass straight through."""
 
-    __slots__ = ("text", "voice")
+    __slots__ = ("text", "voice", "speed")
 
-    def __init__(self, text: str, voice: str) -> None:
+    def __init__(self, text: str, voice: str, speed: float | None = None) -> None:
         self.text = text
         self.voice = voice
+        self.speed = speed  # None → use the run-global --speed; set for emphasis spans
 
 
 def synthesize_ordered(
@@ -580,7 +825,8 @@ def synthesize_ordered(
         futs = {
             ex.submit(
                 synthesize, job.text, tts_url=tts_url, voice=job.voice,
-                speed=speed, language=language, token=token,
+                speed=job.speed if job.speed is not None else speed,
+                language=language, token=token,
             ): idx
             for idx, job in jobs
         }
@@ -592,6 +838,48 @@ def synthesize_ordered(
         results[i] if isinstance(part, _Synth) else part
         for i, part in enumerate(parts)
     )
+
+
+# ── Chunks → ordered parts list (shared by both front-ends) ──────────────────────
+
+def _silence(seconds: float) -> bytes:
+    """Raw s16le @ 24 kHz mono silence of `seconds` length (2 bytes/sample)."""
+    return b"\x00" * (int(max(0.0, seconds) * KOKORO_SAMPLE_RATE) * 2)
+
+
+def chunks_to_parts(
+    chunks: list[str], voice: str, *,
+    gap: float, section_gap: float,
+    emphasis_gap: float = 0.0, emphasis_speed: float | None = None,
+) -> list:
+    """Turn a chunk list (plain strings, `_SECTION_SENTINEL`s, and `Emph` spans) into the
+    ordered parts list `synthesize_ordered` consumes: `_Synth` markers interleaved with
+    silence bytes. Shared by the one-voice pipeline (one voice per doc) and dialogue (one voice
+    per turn) so emphasis + pacing behave identically in both — the drift-prone seam, made
+    structural. `gap` is the normal inter-chunk pause, `section_gap` the longer topic-break;
+    an `Emph` chunk gets an `emphasis_gap` beat before it and synthesizes at `emphasis_speed`.
+    """
+    gap_b = _silence(gap)
+    section_b = _silence(section_gap)
+    emph_b = _silence(emphasis_gap)
+    n_synth = sum(1 for c in chunks if c != _SECTION_SENTINEL)
+    parts: list = []
+    done = 0
+    for i, chunk in enumerate(chunks):
+        if chunk == _SECTION_SENTINEL:
+            parts.append(section_b)
+            continue
+        done += 1
+        if isinstance(chunk, Emph):
+            if emphasis_gap > 0:
+                parts.append(emph_b)                 # anticipatory beat before the span
+            parts.append(_Synth(chunk, voice, speed=emphasis_speed))
+        else:
+            parts.append(_Synth(chunk, voice))
+        nxt = chunks[i + 1] if i + 1 < len(chunks) else None
+        if done < n_synth and nxt != _SECTION_SENTINEL:
+            parts.append(gap_b)
+    return parts
 
 
 # ── PCM → MP3 (ffmpeg) ───────────────────────────────────────────────────────────
@@ -637,45 +925,156 @@ def _which(name: str) -> bool:
     return which(name) is not None
 
 
-# ── oxp.files upload (presigned PUT, see services/files/main.py) ─────────────────
+# ── podcast server upload (PUT /upload/{slug}/{name}, see services/podcast/app.py) ─
 
-def upload_to_oxp(
-    mp3: bytes, *, filename: str, folder: str, base_url: str, secret: str, email: str
+def upload_to_podcast(
+    data: bytes, *, filename: str, slug: str, base_url: str, secret: str,
+    duration_seconds: float | None = None, published_at: str | None = None,
+    content_type: str = "audio/mpeg",
 ) -> str:
+    """PUT one file (MP3 or transcript sidecar) onto a podcast show's volume folder.
+    Service-token auth: an HS256 bearer with aud="podcast-upload" signed by the show
+    server's PODCAST_UPLOAD_SECRET. The producer already holds the bytes + duration, so
+    this is a single direct PUT (the server's /import pull-path is migration-only). For an
+    MP3, X-Duration-Seconds (integer seconds) and X-Published-At (ISO-8601 with offset) ride
+    along so the feed gets <itunes:duration> + <pubDate> without ffprobe or a mtime fallback."""
     now = int(time.time())
-    bearer = _hs256_jwt({"sub": email, "iat": now, "exp": now + 600}, secret)
-    auth = {"Authorization": f"Bearer {bearer}"}
+    bearer = _hs256_jwt({"aud": "podcast-upload", "iat": now, "exp": now + 1800}, secret)
+    headers = {"Authorization": f"Bearer {bearer}", "Content-Type": content_type}
+    if duration_seconds is not None:
+        headers["X-Duration-Seconds"] = str(int(round(duration_seconds)))
+    if published_at is not None:
+        headers["X-Published-At"] = published_at
+    url = f"{base_url}/upload/{slug}/{filename}"
+    # Retry transient network/5xx failures (a large MP3 over a slow uplink can time out
+    # mid-write); auth and 4xx fail closed immediately. Mirrors synthesize()'s retry shape.
+    last_err = None
+    for attempt in range(3):
+        try:
+            # (connect, read) — generous read window so a large episode over a normal
+            # uplink isn't cut off mid-transfer.
+            r = requests.put(url, data=data, headers=headers, timeout=(30, 1800))
+            if r.status_code == 200:
+                return f"{slug}/{filename}"
+            if r.status_code in (401, 403):
+                _die(f"podcast upload auth rejected ({r.status_code}): {r.text[:200]}")
+            if r.status_code < 500:
+                # 404 here means the show slug isn't registered on the server — fail loud.
+                _die(f"podcast upload failed ({r.status_code}) for show {slug!r}: {r.text[:200]}")
+            last_err = f"{r.status_code}: {r.text[:200]}"
+        except requests.RequestException as exc:
+            last_err = str(exc)
+        if attempt < 2:
+            time.sleep(2.0 * (attempt + 1))
+    _die(f"podcast upload failed after 3 attempts for show {slug!r}: {last_err}")
 
-    r = requests.post(
-        f"{base_url}/api/files/upload-url",
-        headers={**auth, "Content-Type": "application/json"},
-        json={"filename": filename, "folder": folder},
-        timeout=30,
+
+# Publish dates are stamped in Pacific time and sent as ISO-8601 with offset (the feed turns
+# them into RFC-822 <pubDate>). Pacific is the house timezone for these shows.
+_PACIFIC = ZoneInfo("America/Los_Angeles")
+
+
+def _now_pacific_iso() -> str:
+    """The current publish moment as ISO-8601 with the Pacific offset, e.g. 2026-06-20T14:30:00-07:00."""
+    return datetime.now(_PACIFIC).replace(microsecond=0).isoformat()
+
+
+def _epoch_to_pacific_iso(ts: float) -> str:
+    """An epoch timestamp (a file mtime) → ISO-8601 in Pacific — used to pin a recut's original
+    publish date when the episode row never carried an explicit one (it fell back to mtime)."""
+    return datetime.fromtimestamp(ts, _PACIFIC).replace(microsecond=0).isoformat()
+
+
+def _list_show_episodes(slug: str, *, base_url: str, secret: str) -> list[dict]:
+    """GET /show/{slug}/episodes (service-token) → [{name, size, mtime}]. The on-disk *.mp3
+    set the feed is built from — used to confirm a recut target exists and to verify a replace."""
+    now = int(time.time())
+    bearer = _hs256_jwt({"aud": "podcast-upload", "iat": now, "exp": now + 1800}, secret)
+    r = requests.get(
+        f"{base_url}/show/{slug}/episodes",
+        headers={"Authorization": f"Bearer {bearer}"}, timeout=30,
     )
+    if r.status_code in (401, 403):
+        _die(f"podcast episode-list auth rejected ({r.status_code}): {r.text[:200]}")
+    if r.status_code == 404:
+        _die(f"show {slug!r} not found, or the server lacks /show/<slug>/episodes "
+             f"(deploy podcast-server → main first).")
     if r.status_code != 200:
-        _die(f"upload-url failed ({r.status_code}): {r.text[:200]}")
-    put_url = r.json()["url"]
+        _die(f"podcast episode-list failed ({r.status_code}): {r.text[:200]}")
+    return r.json().get("episodes", [])
 
-    put = requests.put(put_url, data=mp3, headers={"Content-Type": "audio/mpeg"}, timeout=300)
-    if put.status_code not in (200, 201):
-        _die(f"presigned PUT failed ({put.status_code}): {put.text[:200]}")
 
-    # Activity-log the upload (best-effort; non-fatal).
-    try:
-        requests.post(
-            f"{base_url}/api/files/uploaded",
-            headers={**auth, "Content-Type": "application/json"},
-            json={"filename": filename, "folder": folder},
-            timeout=30,
+def _next_recut_name(mp3_name: str, existing: set[str]) -> str:
+    """Bump `foo.mp3` → `foo-r2.mp3` (next free `-rN`) for --force-redownload — a NEW filename,
+    hence a new feed GUID, so existing subscribers re-pull. Strips any current `-rN` so revisions
+    don't stack (`foo-r2` → `foo-r3`, not `foo-r2-r2`)."""
+    base = mp3_name[:-4] if mp3_name.lower().endswith(".mp3") else mp3_name
+    m = re.match(r"^(.*)-r(\d+)$", base)
+    root = m.group(1) if m else base
+    n = 2
+    while f"{root}-r{n}.mp3" in existing:
+        n += 1
+    return f"{root}-r{n}.mp3"
+
+
+def _publish_episode(
+    *, mp3: bytes, description_source: str, doc_name: str, filename: str, args,
+    secret: str, base_url: str, duration_seconds: float | None,
+    published_at: str | None = None,
+) -> str:
+    """Publish one finished episode to its podcast show — the single upload sink shared by
+    the one-voice (_process_doc) and two-voice (dialogue.process_dialogue) pipelines, so the
+    publish seam can't drift between them. PUTs the MP3 onto the show's volume (it then appears
+    in the show's RSS feed) and, unless --no-transcript, writes a brief Sonnet-authored episode
+    description as the `<base>.md` sidecar the feed shows as <description> (from description_source,
+    the episode's spoken script — NOT the truncated transcript)."""
+    show = args.show
+    published_at = published_at or _now_pacific_iso()
+    _log(f"⬆️  [{doc_name}] publishing to podcast show {show!r} at {base_url} ({filename})…")
+    loc = upload_to_podcast(
+        mp3, filename=filename, slug=show, base_url=base_url,
+        secret=secret, duration_seconds=duration_seconds, published_at=published_at,
+    )
+    _log(f"✅ {doc_name} → podcast/{loc}  (dur {int(round(duration_seconds or 0))}s, pub {published_at})")
+
+    # Brief blurb (`<base>.md`) → the feed's short <description>. Always published — it's the
+    # episode preview shown in app lists.
+    sname = _podcast_sidecar_name(filename)
+    _log(f"📝 [{doc_name}] writing episode description ({args.narrative_model})…")
+    desc = _episode_description(description_source, model=args.narrative_model)
+    upload_to_podcast(
+        desc.encode("utf-8"), filename=sname, slug=show,
+        base_url=base_url, secret=secret, content_type="text/markdown; charset=utf-8",
+    )
+    _log(f"📝 {doc_name} → podcast description: {show}/{sname}\n   “{desc}”")
+
+    # Full transcript (`<base>-transcript.md`) → the feed's <content:encoded> rich show notes.
+    # --no-transcript opts out of the transcript only (the blurb above still publishes).
+    if not args.no_transcript:
+        tname = _podcast_transcript_name(filename)
+        upload_to_podcast(
+            description_source.encode("utf-8"), filename=tname, slug=show,
+            base_url=base_url, secret=secret, content_type="text/markdown; charset=utf-8",
         )
-    except requests.RequestException:
-        pass
-
-    loc = f"{folder}/{filename}" if folder else filename
+        _log(f"📝 {doc_name} → podcast transcript: {show}/{tname}")
     return loc
 
 
-# ── Filename helpers (match services/files _safe_filename rules) ─────────────────
+def _podcast_sidecar_name(mp3_filename: str) -> str:
+    """`foo.mp3` → `foo.md` — the brief-blurb sidecar the feed turns into <description>.
+    The server matches it by `with_suffix('.md')` (storage.list_audio), so it must be the
+    SAME base as the MP3, or the description won't attach."""
+    base = mp3_filename[:-4] if mp3_filename.lower().endswith(".mp3") else mp3_filename
+    return f"{base}.md"
+
+
+def _podcast_transcript_name(mp3_filename: str) -> str:
+    """`foo.mp3` → `foo-transcript.md` — the full-transcript sidecar the feed renders as
+    <content:encoded> rich show notes. The server pairs it as `<stem>-transcript.md`
+    (storage.list_audio) — distinct from the `<base>.md` blurb so both can coexist."""
+    base = mp3_filename[:-4] if mp3_filename.lower().endswith(".mp3") else mp3_filename
+    return f"{base}-transcript.md"
+
 
 def _safe_mp3_name(doc_path: Path, override: str | None, audience: str = "technical") -> str:
     name = override or doc_path.stem
@@ -691,11 +1090,11 @@ def _safe_mp3_name(doc_path: Path, override: str | None, audience: str = "techni
 
 # ── Per-document pipeline (shared by single- and multi-doc runs) ─────────────────
 
-def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
+def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, str, int, int]:
     """Read a doc → speakable prose → optional LLM pass → pron overrides → chunks.
 
-    Returns (chunks, title, raw_chars, speakable_chars). No network beyond the
-    optional LLM pass; safe to call from a worker thread (one per doc).
+    Returns (chunks, title, transcript_md, raw_chars, speakable_chars). No network beyond
+    the optional LLM pass; safe to call from a worker thread (one per doc).
     """
     raw = doc.read_text(encoding="utf-8")
     # Narrative modes distill the ideas, never read code aloud — drop the code cue.
@@ -707,16 +1106,47 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
         _log(f"🎙️  [{doc.name}] {label} pass ({args.narrative_model})…")
         speakable = _llm_pass(
             speakable, system=system, model=args.narrative_model,
-            api_key=_openrouter_key(), seg_chars=EXEC_SEG_CHARS,
-            max_tokens=8000, label=label,
+            seg_chars=EXEC_SEG_CHARS, max_tokens=8000, label=label,
         )
     elif args.scrub:
         _log(f"🧽 [{doc.name}] LLM scrub pass ({args.scrub_model})…")
         speakable = _llm_pass(
             speakable, system=_SCRUB_SYSTEM, model=args.scrub_model,
-            api_key=_openrouter_key(), seg_chars=SCRUB_SEG_CHARS,
-            max_tokens=8000, label="scrub",
+            seg_chars=SCRUB_SEG_CHARS, max_tokens=8000, label="scrub",
         )
+    elif getattr(args, "emphasize", False):
+        # Authored text in → emphasis markers added, words preserved verbatim (verified).
+        _log(f"✍️  [{doc.name}] emphasis-only pass ({args.narrative_model}) — no rewriting…")
+        speakable = _emphasis_pass(speakable, model=args.narrative_model)
+
+    # The LLM can emit markdown emphasis (*word*, **bold**), inline code, or link
+    # syntax despite the "no markers" instruction — and normalize_markdown only ran
+    # on the SOURCE, before the LLM rewrote it. Re-strip inline markup from the LLM
+    # output so Kokoro never voices a literal asterisk. Same _strip_inline the source
+    # path already applies — one happy path, no second stripper to drift.
+    if args.narrative or args.scrub:
+        speakable = strip_llm_markup(speakable)
+
+    # Title (used for the MP3 metadata AND the transcript heading).
+    if args.title:
+        title = args.title
+    else:
+        title = h1 or doc.stem
+        if args.narrative:
+            title = f"{title} — {args.narrative} narrative"
+
+    # The full spoken script (`transcript_md`) — `_publish_episode` feeds it to the Sonnet
+    # episode-description pass. Captured BEFORE pron respelling so it reads cleanly ('content',
+    # not 'con-tent'). Read/emphasize mode → the source markdown (section headers intact,
+    # frontmatter dropped); narrative mode → the distilled script under a title heading.
+    if args.narrative:
+        transcript_md = f"# {title}\n\n{speakable.strip()}\n"
+    else:
+        transcript_md = _FRONTMATTER_RE.sub("", raw).strip() + "\n"
+    # The «…» marks steer synth; they are not punctuation a reader should see. Drop them
+    # from the human-readable transcript (keep the words).
+    transcript_md = transcript_md.replace("«", "").replace("»", "")
+
     # Pronunciation: deterministic whole-word/phrase respellings from pron_overrides.json
     # (Kokoro/espeak pronounces most long words correctly on its own; the overrides file
     # carries the exceptions — acronyms said as letters, numbers, and the rare botched
@@ -724,11 +1154,12 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
     # the kokoro-onnx phoneme path. (A prior LLM "normalize/respell" pass was removed: it
     # mangled long-but-ordinary words espeak already says right — e.g. "reconciliation"
     # → "reck-un-sil-ee-AY-shun" — making things worse, not better.)
-    if not args.no_pron:
-        overrides = load_pron_overrides()
-        if overrides:
-            speakable = apply_pron_overrides(speakable, overrides)
-            _log(f"🗣️  [{doc.name}] applied {len(overrides)} pronunciation override(s)")
+    overrides = resolve_pron_overrides(
+        no_pron=args.no_pron, pron_files=args.pron_file, ad_hoc=args.pron
+    )
+    if overrides:
+        speakable = apply_pron_overrides(speakable, overrides)
+        _log(f"🗣️  [{doc.name}] applied {len(overrides)} pronunciation override(s)")
     if args.save_script:
         # Write the full distilled/cleaned spoken text — the transcript of what gets voiced.
         # Single doc → exact path; multiple docs → infix the doc stem so they don't clobber.
@@ -736,7 +1167,14 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
         out_path = sp if len(args.docs) == 1 else sp.with_name(f"{sp.stem}.{doc.stem}{sp.suffix or '.txt'}")
         out_path.write_text(speakable, encoding="utf-8")
         _log(f"📝 [{doc.name}] saved spoken script → {out_path}")
-    chunks = chunk_text(speakable, args.max_chars)
+    chunks = split_emphasis_chunks(speakable, args.max_chars)
+    emph_chars = sum(len(c) for c in chunks if isinstance(c, Emph))
+    spoken_chars = sum(len(c) for c in chunks if c != _SECTION_SENTINEL)
+    if emph_chars and spoken_chars:
+        pct = 100 * emph_chars / spoken_chars
+        _log(f"✨ [{doc.name}] emphasis: {emph_chars}/{spoken_chars} chars ({pct:.0f}%) marked slow")
+        if pct > 5:
+            _log(f"⚠️  [{doc.name}] emphasis is {pct:.0f}% of spoken text (>5%) — it lands best kept rare.")
     if args.max_pause_gap > 0:
         before = sum(1 for c in chunks if c == _SECTION_SENTINEL)
         chunks = enforce_pause_cap(chunks, int(args.max_pause_gap * CHARS_PER_SECOND))
@@ -746,13 +1184,7 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
     if not chunks:
         _die(f"Nothing speakable in {doc.name} (empty or all code/markup).")
 
-    if args.title:
-        title = args.title
-    else:
-        title = h1 or doc.stem
-        if args.narrative:
-            title = f"{title} — {args.narrative} narrative"
-    return chunks, title, len(raw), sum(len(c) for c in chunks)
+    return chunks, title, transcript_md, len(raw), sum(len(c) for c in chunks)
 
 
 def _resolve_tts_endpoint(args) -> tuple[str, str | None]:
@@ -804,45 +1236,40 @@ def _wait_for_tts_ready(tts_url: str, *, timeout: float = 300.0) -> None:
         time.sleep(3.0)
 
 
-def _resolve_files_target(args) -> tuple[str, str]:
-    """Resolve the oxp.files session secret + base URL. Once per run."""
-    _log("🔑 pulling oxp-files JWT_SECRET + PUBLIC_BASE_URL from Railway…")
-    files_vars = _railway_vars(
-        project=OXP_KB["project"], env=OXP_KB["env"], service=OXP_KB["files_service"]
+def _resolve_podcast_target(args) -> tuple[str, str]:
+    """Resolve the podcast server's upload secret + base URL. Once per run. The synth
+    target when --show is set; same trust boundary as the migrate client (PODCAST_UPLOAD_SECRET).
+    The secret always comes from Railway; --podcast-url overrides only the base URL (point at a
+    local server for testing — the token still validates if the local server shares the secret)."""
+    _log("🔑 pulling podcast PODCAST_UPLOAD_SECRET from Railway…")
+    pod_vars = _railway_vars(
+        project=PODCAST["project"], env=PODCAST["env"], service=PODCAST["service"]
     )
-    secret = files_vars.get("JWT_SECRET")
+    secret = pod_vars.get("PODCAST_UPLOAD_SECRET")
     if not secret:
-        _die("JWT_SECRET not found on the oxp-files service.")
-    base_url = (files_vars.get("PUBLIC_BASE_URL") or OXP_FILES_FALLBACK_URL).rstrip("/")
+        _die("PODCAST_UPLOAD_SECRET not found on the podcast service.")
+    override = getattr(args, "podcast_url", None)
+    base_url = (override or pod_vars.get("PODCAST_PUBLIC_BASE") or PODCAST_FALLBACK_URL).rstrip("/")
     return secret, base_url
 
 
 def _process_doc(
     doc: Path, args, *, tts_url: str, tts_token: str | None,
-    files_secret: str | None, base_url: str | None, chunk_concurrency: int,
+    secret: str | None, base_url: str | None, chunk_concurrency: int,
+    published_at: str | None = None,
 ) -> str | None:
-    """Full pipeline for one document: normalize → synth → MP3 → (upload). Returns the
-    oxp.files location, or None when --no-upload. Endpoint/secrets are resolved once by
+    """Full pipeline for one document: normalize → synth → MP3 → publish. Returns the
+    podcast location, or None when --no-upload. Endpoint/secrets are resolved once by
     the caller and passed in, so this is safe to run concurrently (one call per doc)."""
-    chunks, title, raw_len, total_chars = _normalize_and_chunk(doc, args)
+    chunks, title, transcript_md, raw_len, total_chars = _normalize_and_chunk(doc, args)
     _log(f"📄 {doc.name}: {raw_len} raw → {total_chars} speakable → {len(chunks)} chunks")
 
     # Build the ordered parts list (silence bytes + _Synth markers). Normal gap after
     # each spoken chunk, unless the next is a section break (own longer silence) or last.
-    gap = b"\x00" * (int(args.gap * KOKORO_SAMPLE_RATE) * 2)
-    section_gap = b"\x00" * (int(args.section_gap * KOKORO_SAMPLE_RATE) * 2)
-    n_synth = sum(1 for c in chunks if c != _SECTION_SENTINEL)
-    parts: list = []
-    done = 0
-    for i, chunk in enumerate(chunks):
-        if chunk == _SECTION_SENTINEL:
-            parts.append(section_gap)
-            continue
-        done += 1
-        parts.append(_Synth(chunk, args.voice))
-        nxt = chunks[i + 1] if i + 1 < len(chunks) else None
-        if done < n_synth and nxt != _SECTION_SENTINEL:
-            parts.append(gap)
+    parts = chunks_to_parts(
+        chunks, args.voice, gap=args.gap, section_gap=args.section_gap,
+        emphasis_gap=args.emphasis_gap, emphasis_speed=args.emphasis_speed,
+    )
     pcm = synthesize_ordered(
         parts, tts_url=tts_url, speed=args.speed, language=args.language,
         token=tts_token, concurrency=chunk_concurrency, label=doc.stem,
@@ -863,153 +1290,12 @@ def _process_doc(
         return None
 
     filename = _safe_mp3_name(doc, args.name, args.narrative)
-    _log(f"⬆️  [{doc.name}] uploading to {base_url} ({args.folder}/{filename})…")
-    loc = upload_to_oxp(
-        mp3, filename=filename, folder=args.folder, base_url=base_url,
-        secret=files_secret, email=args.email,
+    return _publish_episode(
+        mp3=mp3, description_source=transcript_md, doc_name=doc.name, filename=filename,
+        args=args, secret=secret, base_url=base_url, duration_seconds=seconds,
+        published_at=published_at,
     )
-    _log(f"✅ {doc.name} → oxp.files: {loc}")
-    return loc
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────────
-
-def main() -> None:
-    p = argparse.ArgumentParser(
-        prog="doc_to_speech",
-        description="Convert a markdown/text document to an MP3 and land it in oxp.files.",
-    )
-    p.add_argument("docs", nargs="+", type=Path,
-                   help="One or more source documents (markdown or text). Each becomes its own "
-                        "MP3; multiple docs are synthesized concurrently (see --concurrency).")
-    p.add_argument("--folder", default="briefings",
-                   help="oxp.files folder (default: briefings — the private podcast folder).")
-    p.add_argument("--voice", default="af_nova", help="Kokoro voice (must be in TTS allowlist).")
-    p.add_argument("--no-pron", action="store_true",
-                   help="Disable the Lever-2 pronunciation overrides (scripts/pron_overrides.json).")
-    p.add_argument("--speed", type=float, default=1.0, help="0.5–2.0 (default 1.0).")
-    p.add_argument("--language", default="en-us")
-    p.add_argument("--max-chars", type=int, default=700, help="Per-chunk cap, < TTS's 800.")
-    p.add_argument("--gap", type=float, default=0.35, help="Silence between chunks, seconds.")
-    p.add_argument("--section-gap", type=float, default=1.4,
-                   help="Silence at major topic (heading) boundaries — the 'take a breath' pause, seconds.")
-    p.add_argument("--max-pause-gap", type=float, default=150.0,
-                   help="Hard cap: max seconds of speech between pauses. A breath is auto-inserted "
-                        "at a sentence boundary to enforce it (0 disables). Default 150 = 2.5 min.")
-    p.add_argument("--loudness", type=float, default=-16.0,
-                   help="Target integrated loudness in LUFS via ffmpeg loudnorm (EBU R128), "
-                        "applied at transcode. Raw Kokoro PCM lands ~-28 LUFS — far too quiet "
-                        "for phone speakers; -16 is the podcast/streaming norm. loudnorm both "
-                        "boosts AND compresses+limits, so it can reach the target without "
-                        "clipping (linear gain can't). 0 disables. Default -16.")
-    p.add_argument("--volume", type=float, default=1.0,
-                   help="Extra linear gain applied AFTER loudness normalization (1.25 = +25%%). "
-                        "A soft limiter follows so it can't clip. Default 1.0 (no extra trim); "
-                        "normally leave this alone and tune --loudness instead.")
-    p.add_argument("--bitrate", default="64k", help="MP3 bitrate (default 64k, good for speech).")
-    p.add_argument("--concurrency", type=int, default=TTS_CONCURRENCY_DEFAULT,
-                   help=f"Max concurrent synth requests in flight (default {TTS_CONCURRENCY_DEFAULT}, "
-                        "matching the TTS service's TTS_MAX_CONCURRENCY). With ONE doc this is "
-                        "chunk-level parallelism; with MANY docs it's how many synth in parallel "
-                        "(each doc's chunks then go sequentially). 1 = fully sequential.")
-    p.add_argument("--name", help="Output filename override (single doc only; without needing .mp3).")
-    p.add_argument("--title", help="ID3 title (single doc only; default: doc's first H1, else filename).")
-    p.add_argument("--narrative", choices=["exec", "pm"], default=None,
-                   help="Distill the source(s) into a NARRATIVE script (LLM) instead of reading "
-                        "them. 'exec': tight recap for an impatient, non-technical business "
-                        "audience (model/pricing/positioning, no jargon). 'pm': a product-"
-                        "doctrine briefing for the product manager — synthesizes across the "
-                        "docs, surfaces design decisions, tradeoffs, and open questions. "
-                        "Multi-doc capable; auto-suffixes the filename '-exec'/'-pm'. Mutually "
-                        "exclusive with --scrub (narrative is authored fresh — nothing to scrub).")
-    p.add_argument("--scrub", action="store_true",
-                   help="(reading mode only) LLM cleanup pass: strip file paths/names, "
-                        "code/CLI fragments, URLs, and cross-ref scaffolding so you hear only "
-                        "the substance, WITHOUT summarizing. (Frontmatter + markdown are already "
-                        "stripped deterministically; this is the polish pass. NOT PHI scrubbing — "
-                        "that's `kb scrub`. Invalid with --narrative — there is nothing to scrub.)")
-    p.add_argument("--scrub-model", default=DEFAULT_SCRUB_MODEL,
-                   help=f"OpenRouter model for the --scrub + pronunciation-normalize passes (default: {DEFAULT_SCRUB_MODEL}).")
-    p.add_argument("--narrative-model", default=DEFAULT_EXEC_MODEL,
-                   help=f"OpenRouter model for the --narrative exec/pm distillation (default: {DEFAULT_EXEC_MODEL}).")
-    p.add_argument("--local-tts", action="store_true", help="Use localhost:8102 (no token).")
-    p.add_argument("--tts-url", help="Override the TTS base URL entirely.")
-    p.add_argument("--warmup-timeout", type=float, default=300.0,
-                   help="Seconds to wait for the TTS service to wake from serverless sleep before "
-                        "synth (polls /health; cold start ~30–40s). 0 = skip the warmup poll.")
-    p.add_argument("--email", default=os.environ.get("OXP_FILES_EMAIL", "doc-to-speech@oxp.files"),
-                   help="sub claim for the oxp.files bearer (shown in its activity log).")
-    p.add_argument("--save-script", type=Path,
-                   help="Write the full distilled/cleaned spoken text (the transcript of what "
-                        "gets voiced) to this path. Multi-doc infixes the stem. Pairs with "
-                        "--dry-run to get the script without synth.")
-    p.add_argument("--out", type=Path, help="Also write the MP3 to this local path (single doc only).")
-    p.add_argument("--no-upload", action="store_true", help="Skip the oxp.files upload.")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Normalize + chunk only; print a preview and exit. No network.")
-    args = p.parse_args()
-
-    for doc in args.docs:
-        if not doc.exists():
-            _die(f"Document not found: {doc}")
-    if not (0.5 <= args.speed <= 2.0):
-        _die("--speed must be between 0.5 and 2.0")
-    if args.narrative and args.scrub:
-        _die("--scrub is invalid with --narrative — narrative content is authored fresh, "
-             "there is nothing to scrub.")
-    multi = len(args.docs) > 1
-    if multi and (args.out or args.name or args.title):
-        _die("--out/--name/--title apply to a single document; omit them with multiple docs "
-             "(each is auto-named from its filename / first H1).")
-    if multi and args.no_upload:
-        _die("--no-upload needs a local --out path, which is single-doc only; "
-             "multiple docs must upload to oxp.files.")
-
-    if args.dry_run:
-        for doc in args.docs:
-            chunks, title, raw_len, total_chars = _normalize_and_chunk(doc, args)
-            _log(f"📄 {doc.name}: {raw_len} raw → {total_chars} speakable → {len(chunks)} chunks")
-            _log(f"   title: {title!r}")
-            preview = "\n\n".join(f"[{i+1}/{len(chunks)}] {c}" for i, c in enumerate(chunks[:3]))
-            print(preview)
-            if len(chunks) > 3:
-                print(f"\n… (+{len(chunks) - 3} more chunks)")
-        return
-
-    # Resolve the shared endpoint + secrets ONCE (token reused across all docs).
-    tts_url, tts_token = _resolve_tts_endpoint(args)
-    # Wake the service from serverless sleep (and gate synth on readiness) before any
-    # synth request fires — once per run, shared across all docs.
-    _wait_for_tts_ready(tts_url, timeout=args.warmup_timeout)
-    files_secret, base_url = (None, None)
-    if not args.no_upload:
-        files_secret, base_url = _resolve_files_target(args)
-
-    if multi:
-        # Doc-level parallelism: run up to --concurrency docs at once, chunks sequential
-        # within each, so total synth requests in flight ≈ --concurrency (the server's cap).
-        workers = max(1, min(args.concurrency, len(args.docs)))
-        _log(f"🎛️  {len(args.docs)} docs, {workers} synthesizing in parallel…")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = [
-                ex.submit(
-                    _process_doc, doc, args, tts_url=tts_url, tts_token=tts_token,
-                    files_secret=files_secret, base_url=base_url, chunk_concurrency=1,
-                )
-                for doc in args.docs
-            ]
-            for fut in concurrent.futures.as_completed(futs):
-                fut.result()  # _die() in a worker propagates here and exits
-    else:
-        # Single doc: --concurrency is chunk-level parallelism.
-        _process_doc(
-            args.docs[0], args, tts_url=tts_url, tts_token=tts_token,
-            files_secret=files_secret, base_url=base_url, chunk_concurrency=args.concurrency,
-        )
-
-    if base_url:
-        _log(f"   browse: {base_url}/?folder={args.folder}")
-
-
-if __name__ == "__main__":
-    main()
+# The CLI lives in doc_to_audio.py. This module is the shared TTS engine +
+# monologue (one-voice) render pipeline, imported by doc_to_audio and dialogue.

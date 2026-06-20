@@ -101,13 +101,40 @@ def artwork_path(folder: str) -> Path | None:
 
 
 def write_upload(folder: str, name: str, data: bytes) -> Path:
-    """Persist an uploaded MP3 (or sidecar) into the show folder."""
+    """Persist an uploaded MP3 (or sidecar) into the show folder (whole-bytes; used by /import)."""
     name = _safe_name(name)
     d = folder_dir(folder)
     d.mkdir(parents=True, exist_ok=True)
     p = d / name
     p.write_bytes(data)
     return p
+
+
+async def write_upload_stream(folder: str, name: str, stream) -> tuple[Path, int]:
+    """Stream an upload to disk in chunks — constant memory regardless of file size, so the
+    server handles large episodes without buffering the whole body in RAM (the old failure
+    mode). Writes to a `.part` temp and atomically renames on success, so a partial/aborted
+    upload never leaves a corrupt file the feed would serve. Returns (final_path, bytes)."""
+    name = _safe_name(name)
+    d = folder_dir(folder)
+    d.mkdir(parents=True, exist_ok=True)
+    final = d / name
+    tmp = final.with_name(final.name + ".part")
+    total = 0
+    try:
+        with open(tmp, "wb") as f:
+            async for chunk in stream:
+                if chunk:
+                    f.write(chunk)
+                    total += len(chunk)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    if total == 0:
+        tmp.unlink(missing_ok=True)
+        raise ValueError("empty body")
+    tmp.replace(final)
+    return final, total
 
 
 def delete_file(folder: str, name: str) -> bool:

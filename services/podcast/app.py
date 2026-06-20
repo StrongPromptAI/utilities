@@ -22,6 +22,7 @@ from __future__ import annotations
 import hmac
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import httpx
 import jwt
@@ -32,7 +33,7 @@ from pydantic import BaseModel
 from db import SessionLocal, init_db
 from feed import build_feed
 from models import Episode, Podcast
-from storage import artwork_path, audio_path, delete_file, write_upload
+from storage import artwork_path, audio_path, delete_file, list_audio, write_upload, write_upload_stream
 
 UPLOAD_SECRET = os.environ.get("PODCAST_UPLOAD_SECRET", "")
 
@@ -119,39 +120,86 @@ def _verify_upload(request: Request) -> None:
 
 @app.put("/upload/{slug}/{name}")
 async def upload(slug: str, name: str, request: Request, _: None = Depends(_verify_upload)):
+    # Resolve + validate the show, then release the DB session BEFORE the (possibly long,
+    # large) transfer — don't hold a connection open while bytes stream in.
     with SessionLocal() as session:
-        show = _load_show(session, slug)
-        body = await request.body()
-        if not body:
-            raise HTTPException(400, "empty body")
-        try:
-            write_upload(show.folder, name, body)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-
-        # An MP3 upload may carry its duration (the producer computes it) — upsert
-        # the episode row so the feed gets <itunes:duration> without an ffprobe pass.
-        if name.lower().endswith(".mp3"):
-            _set_duration(session, slug, name, request.headers.get("X-Duration-Seconds"))
-    return {"written": name, "bytes": len(body)}
-
-
-def _set_duration(session, slug: str, name: str, seconds) -> None:
+        folder = _load_show(session, slug).folder
+    # Stream the body straight to disk (constant memory) so large episodes don't OOM or
+    # stall the app by buffering the whole file in RAM.
     try:
-        secs = int(float(seconds))
+        _, nbytes = await write_upload_stream(folder, name, request.stream())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    # An MP3 upload may carry its duration + publish date (the producer computes/stamps them)
+    # — upsert the episode row so the feed gets <itunes:duration> + <pubDate> without an
+    # ffprobe pass or a mtime fallback.
+    if name.lower().endswith(".mp3"):
+        with SessionLocal() as session:
+            _set_episode_meta(
+                session, slug, name,
+                request.headers.get("X-Duration-Seconds"),
+                request.headers.get("X-Published-At"),
+            )
+    return {"written": name, "bytes": nbytes}
+
+
+def _coerce_int(v) -> int | None:
+    try:
+        return int(float(v))
     except (TypeError, ValueError):
+        return None
+
+
+def _coerce_dt(v) -> "datetime | None":
+    """Parse an ISO-8601 publish date (offset-aware, e.g. 2026-06-20T14:30:00-07:00) and
+    normalize to UTC. SQLite doesn't preserve tzinfo on round-trip, so storing a fixed,
+    known zone (UTC) keeps the instant stable — the feed renders it back (naive→UTC) as the
+    correct moment, and a naive value (no offset) is read as already-UTC, not local."""
+    if not v:
+        return None
+    try:
+        dt = datetime.fromisoformat(v)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _iso_utc(dt) -> "str | None":
+    """A stored datetime → explicit-UTC ISO string (so the episode list round-trips a recut's
+    preserved publish date unambiguously, despite SQLite dropping tzinfo)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _set_episode_meta(session, slug: str, name: str, duration_seconds, published_at) -> None:
+    """Upsert one episode row's duration + publish date from upload/import metadata. Each is
+    set only when supplied, so a producer can send one without clobbering the other; a single
+    row write covers both."""
+    secs = _coerce_int(duration_seconds)
+    dt = _coerce_dt(published_at)
+    if secs is None and dt is None:
         return
     ep = session.query(Episode).filter_by(podcast_slug=slug, filename=name).one_or_none()
     if ep is None:
         ep = Episode(podcast_slug=slug, filename=name)
         session.add(ep)
-    ep.duration_seconds = secs
+    if secs is not None:
+        ep.duration_seconds = secs
+    if dt is not None:
+        ep.published_at = dt
     session.commit()
 
 
 class ImportRequest(BaseModel):
     source_url: str
     duration_seconds: int | None = None
+    published_at: str | None = None
 
 
 @app.post("/import/{slug}/{name}")
@@ -174,8 +222,8 @@ async def import_from_url(
             write_upload(show.folder, name, r.content)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        if name.lower().endswith(".mp3") and req.duration_seconds:
-            _set_duration(session, slug, name, req.duration_seconds)
+        if name.lower().endswith(".mp3") and (req.duration_seconds or req.published_at):
+            _set_episode_meta(session, slug, name, req.duration_seconds, req.published_at)
     return {"written": name, "bytes": len(r.content)}
 
 
@@ -189,6 +237,32 @@ async def delete_upload(slug: str, name: str, _: None = Depends(_verify_upload))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"deleted": name, "removed": removed}
+
+
+@app.get("/show/{slug}/episodes")
+async def show_episodes(slug: str, _: None = Depends(_verify_upload)):
+    """Service-token listing of a show's episodes (the same on-disk `*.mp3` set the feed is
+    built from), with size + mtime. Lets a headless producer check an episode exists before a
+    recut (fail loud on a typo'd name) and verify a replace afterwards (count unchanged, size
+    changed) without needing the private feed code."""
+    with SessionLocal() as session:
+        show = _load_show(session, slug)
+        rows = {
+            e.filename: e
+            for e in session.query(Episode).filter_by(podcast_slug=slug).all()
+        }
+        files = list_audio(show.folder)
+        episodes = [
+            {
+                "name": f.name, "size": f.size, "mtime": f.mtime,
+                "published_at": (
+                    _iso_utc(rows[f.name].published_at) if rows.get(f.name) else None
+                ),
+                "duration_seconds": rows[f.name].duration_seconds if rows.get(f.name) else None,
+            }
+            for f in files
+        ]
+    return {"episodes": episodes}
 
 
 # ── artwork ─────────────────────────────────────────────────────────────────

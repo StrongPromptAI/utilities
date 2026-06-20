@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import os
 import secrets
+from datetime import datetime, timezone
 
 from db import SessionLocal, init_db
 from models import Episode, Podcast
+from storage import list_audio
 
 PUBLIC_BASE = os.environ.get("PODCAST_PUBLIC_BASE", "http://localhost:8103")
 
@@ -111,6 +113,24 @@ def seed() -> None:
                     title=title, description=desc, sort_order=order,
                 ))
 
+        s.commit()
+
+        # Backfill an Episode row for every MP3 on the volume that lacks one, so the
+        # admin always mirrors what's actually in each feed (feed = disk ⟕ rows). The
+        # migrated episodes arrived without rows — without this they play in the feed
+        # but are invisible/undeletable in the admin. Insert-only: never touches an
+        # existing row, so it's safe on every boot and a delete stays deleted.
+        for show in s.query(Podcast).all():
+            have = {
+                e.filename
+                for e in s.query(Episode).filter_by(podcast_slug=show.slug).all()
+            }
+            for af in list_audio(show.folder):
+                if af.name not in have:
+                    s.add(Episode(
+                        podcast_slug=show.slug, filename=af.name,
+                        published_at=datetime.fromtimestamp(af.mtime, tz=timezone.utc),
+                    ))
         s.commit()
 
         print("\nSeeded shows:")

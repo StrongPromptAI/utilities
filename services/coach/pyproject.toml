@@ -1,0 +1,18 @@
+[project]
+name = "coach-service"
+version = "0.1.0"
+description = "Dedicated sales-coach service — Phase 0 graphics slice (serves book figures off a Railway volume in the kb project)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "PyJWT>=2.8.0",
+    "python-multipart>=0.0.9",
+]
+
+[tool.setuptools]
+py-modules = ["app", "storage"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

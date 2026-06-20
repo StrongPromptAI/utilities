@@ -2,15 +2,22 @@
 """
 doc_to_audio — turn document(s) into narrated MP3(s) and land them in oxp.files.
 
-ONE CLI over a shared TTS engine. Two render formats, selected by --format:
+ONE CLI over a shared TTS engine. --format picks what happens to your text — and the
+formats split into two camps:
 
-  • ONE-VOICE (read | scrub | pm | exec) — a single narrator.
-      read   : speak the doc as written (markdown stripped to prose).
-      scrub  : + an LLM cleanup pass (drop paths/code/cross-refs), no summarizing.
-      pm     : distill the source(s) into a product-doctrine briefing for the PM.
-      exec   : distill into a tight, jargon-free executive recap.
-  • TWO-VOICE (dialogue) — an LLM writes a two-host script; each host is pinned to
-      one Kokoro voice (--female-voice / --male-voice), with --minutes / --brief.
+  POST-PROCESS (your authored text is spoken; the CLI never rewrites it):
+      emphasize : (default) add «…» emphasis to the authored text, words preserved
+                  VERBATIM — a constrained LLM pass that is verified annotation-only,
+                  so it can add emphasis but can never reword. The right mode when the
+                  writing is already done (e.g. authored on a SOTA model outside).
+      read      : speak the doc exactly as written; emphasis only from «…» you typed.
+  REWRITE (an LLM authors new text — your files are NOT spoken verbatim; these prompt
+  for confirmation, see --yes):
+      pm    : distill the source(s) into a one-voice product-doctrine briefing.
+      exec  : distill into a tight, jargon-free one-voice executive recap.
+      scrub : one-voice LLM cleanup (drop paths/code/cross-refs), no summarizing.
+      dialogue : TWO voices — an LLM writes a two-host script; each host pinned to one
+                 Kokoro voice (--female-voice / --male-voice), with --minutes / --brief.
 
 CARDINALITY — the same rule for every format:
   • default  : each input doc is its own episode  → N docs in,  N MP3s out.
@@ -53,6 +60,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -80,7 +88,8 @@ from dialogue import (
     process_dialogue,
 )
 
-ONE_VOICE_FORMATS = ("read", "scrub", "pm", "exec")
+ONE_VOICE_FORMATS = ("read", "emphasize", "scrub", "pm", "exec")
+WRITING_FORMATS = ("pm", "exec", "dialogue")  # these REWRITE the source with an LLM
 
 
 def _episode_doc(ep_docs: list[Path]) -> Path:
@@ -102,9 +111,13 @@ def main() -> None:
         description="Turn document(s) into narrated MP3(s) (one- or two-voice) and land them in oxp.files.",
     )
     p.add_argument("docs", nargs="+", type=Path, help="Source document(s): markdown or text.")
-    p.add_argument("--format", choices=["read", "scrub", "pm", "exec", "dialogue"], default="read",
-                   help="read/scrub/pm/exec = ONE voice; dialogue = TWO voices (host script). "
-                        "pm/exec distill via LLM; scrub = LLM cleanup; read = speak as written.")
+    p.add_argument("--format", choices=["emphasize", "read", "scrub", "pm", "exec", "dialogue"],
+                   default="emphasize",
+                   help="POST-PROCESS (don't rewrite): emphasize (default) = add «…» emphasis to "
+                        "your authored text, words preserved verbatim; read = speak exactly as "
+                        "written. REWRITE (LLM authors): pm/exec distill a one-voice briefing; "
+                        "dialogue writes a two-host script; scrub = LLM cleanup. The rewriting "
+                        "formats (pm/exec/dialogue) prompt for confirmation — see --yes.")
     p.add_argument("--combine", action="store_true",
                    help="Merge ALL input docs into ONE episode (N→1). Default: each doc is its "
                         "own episode (N→N). Same rule for every format.")
@@ -178,12 +191,34 @@ def main() -> None:
                    help="Skip the renderable .md transcript uploaded beside each MP3.")
     p.add_argument("--dry-run", action="store_true",
                    help="No synth/upload. One-voice: chunk preview. Dialogue: generate + print the script.")
+    p.add_argument("-y", "--yes", action="store_true",
+                   help="Skip the confirmation prompt that the rewriting formats (pm/exec/dialogue) "
+                        "show before an LLM re-authors your text. Required for non-interactive runs.")
     args = p.parse_args()
 
     is_dialogue = args.format == "dialogue"
-    # Map the format onto the one-voice pipeline's flags (it reads args.narrative/args.scrub).
+    # Map the format onto the one-voice pipeline's flags (it reads args.narrative/args.scrub/emphasize).
     args.narrative = args.format if args.format in ("pm", "exec") else None
     args.scrub = args.format == "scrub"
+    args.emphasize = args.format == "emphasize"
+
+    # Guard: the rewriting formats REWRITE the source with an LLM (even a dry-run invokes it
+    # to preview), so authored files would not be spoken verbatim. Confirm before doing that
+    # (fail-closed when non-interactive).
+    if args.format in WRITING_FORMATS and not args.yes:
+        kind = "two-host dialogue script" if is_dialogue else f"{args.format} briefing"
+        msg = (f"⚠️  --format {args.format} REWRITES your text — an LLM authors a {kind}, so your "
+               f"files will NOT be spoken verbatim.\n"
+               f"    For authored files, use --format emphasize (adds emphasis + TTS, no rewriting).\n"
+               f"    Proceed with rewriting? [y/N] ")
+        try:
+            if not sys.stdin.isatty():
+                _die(f"--format {args.format} rewrites the source; pass --yes to confirm in a "
+                     f"non-interactive run, or use --format emphasize / read for authored files.")
+            if input(msg).strip().lower() not in ("y", "yes"):
+                _die("Aborted. Use --format emphasize (or read) to keep your authored text verbatim.")
+        except (EOFError, KeyboardInterrupt):
+            _die("Aborted.")
 
     for doc in args.docs:
         if not doc.exists():

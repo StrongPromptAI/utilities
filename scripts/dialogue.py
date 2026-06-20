@@ -67,7 +67,7 @@ from doc_to_speech import (
     upload_to_oxp,
 )
 
-DEFAULT_SCRIPT_MODEL = "claude-opus-4-8"  # native Anthropic (uses Anthropic credits); one short call
+DEFAULT_SCRIPT_MODEL = "claude-sonnet-4-6"  # native Anthropic (Anthropic credits); a writing format (opt-in)
 WORDS_PER_MINUTE = 145  # conversational Kokoro pace, leaving headroom for turn gaps
 MAX_SOURCE_CHARS = 40000  # cap the LLM input; the brief steers focus, not the dump
 

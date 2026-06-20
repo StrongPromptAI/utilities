@@ -102,9 +102,10 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_SCRUB_MODEL = "google/gemini-3.5-flash"  # cheap mechanical cleanup — OpenRouter (no native Gemini)
-DEFAULT_EXEC_MODEL = "claude-opus-4-8"  # native Anthropic (uses Anthropic credits) — matches dialogue's script model
+DEFAULT_EXEC_MODEL = "claude-sonnet-4-6"  # native Anthropic (Anthropic credits); post-processing, not SOTA authoring
 SCRUB_SEG_CHARS = 6000   # scrub output ≈ input size → cap input to bound output tokens
 EXEC_SEG_CHARS = 24000   # exec recap output ≪ input → input can be larger (most docs → one pass)
+EMPHASIS_SEG_CHARS = 4000  # emphasis must reproduce its input verbatim → small segments reproduce reliably
 
 KOKORO_SAMPLE_RATE = 24000  # Kokoro's native PCM rate (see services/tts/app.py)
 CHARS_PER_SECOND = 20  # ~Kokoro speech rate; converts the max-pause-gap (seconds) to a char budget
@@ -326,6 +327,66 @@ _PM_SYSTEM = (
     "- Add headings, bullets, labels, or meta-commentary. Output ONLY the narrative as "
     "flowing prose meant to be heard."
 )
+
+# Emphasis-ONLY post-processing: the text is already authored (e.g. on a SOTA model
+# outside the CLI). The model must NOT write — it may only wrap a few load-bearing clauses
+# in «…». A verification step (below) guarantees this: if the returned text differs from
+# the input by anything other than inserted guillemets, the markers are discarded and the
+# input is kept verbatim. So this pass can add emphasis but can never reword.
+_EMPHASIZE_SYSTEM = (
+    "You are a post-processor that marks emphasis for a text-to-speech reading. You are "
+    "given a FINISHED, authored passage of spoken prose. Your ONLY job is to wrap a SMALL "
+    "number of the single most load-bearing lines in guillemets «like this», so the narrator "
+    "reads them a touch slower for weight.\n\n"
+    "ABSOLUTE RULES:\n"
+    "- Reproduce the passage VERBATIM — every word, number, punctuation mark, and line break "
+    "EXACTLY as given. Do NOT rewrite, reword, summarize, shorten, expand, correct, translate, "
+    "or reorder anything. The text is final and authored by someone else.\n"
+    "- The ONLY characters you may ADD anywhere are the guillemets « and ». Add nothing else — "
+    "no other punctuation, no markdown, no commentary, no headings, no labels.\n"
+    "- Wrap a WHOLE clause or sentence, never a single word, never a whole paragraph. Mark at "
+    "most a handful in the entire passage — well under one line in twenty; include the trailing "
+    "punctuation inside the marks. When in doubt, leave it unmarked.\n"
+    "- Output ONLY the passage, verbatim, with the guillemets inserted."
+)
+
+
+def _emphasis_text_preserved(original: str, annotated: str) -> bool:
+    """True iff `annotated` is `original` with only «…» guillemets inserted — i.e. the model
+    added emphasis and changed nothing else (whitespace-normalized). The guarantee that the
+    emphasize pass is annotation-only, never a rewrite."""
+    strip = lambda s: re.sub(r"\s+", " ", s.replace("«", "").replace("»", "")).strip()
+    return strip(original) == strip(annotated)
+
+
+def _emphasis_pass(text: str, *, model: str, label: str = "emphasis") -> str:
+    """Mark «…» emphasis on already-authored prose WITHOUT rewriting it. Segmented small so
+    each call reproduces its input reliably; every segment is verified annotation-only and, if
+    the model altered the words, its markers are dropped and the segment kept verbatim (one
+    retry first). The text can gain emphasis but can never be reworded by this pass."""
+    out_parts: list[str] = []
+    marked = altered = 0
+    for seg in _segment(text, EMPHASIS_SEG_CHARS):
+        annotated = None
+        for _ in range(2):
+            cand = llm_chat(
+                system=_EMPHASIZE_SYSTEM, user=seg, model=model,
+                max_tokens=max(1024, len(seg) // 3 + 512), temperature=0.0, label=label,
+            )
+            if _emphasis_text_preserved(seg, cand):
+                annotated = cand
+                break
+        if annotated is None:
+            altered += 1
+            annotated = seg  # model reworded — keep authored text verbatim, no emphasis here
+        elif "«" in annotated:
+            marked += 1
+        out_parts.append(annotated)
+    if altered:
+        _log(f"⚠️  emphasis: {altered} segment(s) came back reworded — kept verbatim (no emphasis) to protect your text")
+    _log(f"✍️  emphasis: annotated {marked} segment(s); text preserved verbatim")
+    return "\n\n".join(out_parts)
+
 
 def _segment(text: str, seg_chars: int) -> list[str]:
     """Split on paragraph breaks, packing into ≤ seg_chars segments so each LLM call's
@@ -916,6 +977,10 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, str, int, int
             speakable, system=_SCRUB_SYSTEM, model=args.scrub_model,
             seg_chars=SCRUB_SEG_CHARS, max_tokens=8000, label="scrub",
         )
+    elif getattr(args, "emphasize", False):
+        # Authored text in → emphasis markers added, words preserved verbatim (verified).
+        _log(f"✍️  [{doc.name}] emphasis-only pass ({args.narrative_model}) — no rewriting…")
+        speakable = _emphasis_pass(speakable, model=args.narrative_model)
 
     # The LLM can emit markdown emphasis (*word*, **bold**), inline code, or link
     # syntax despite the "no markers" instruction — and normalize_markdown only ran

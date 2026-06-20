@@ -10,6 +10,8 @@ Routes:
   GET  /{slug}/feed.xml             public feed (no code)
   GET  /{slug}/{code}/ep/{name}     private episode audio (Range-enabled)
   GET  /{slug}/ep/{name}            public episode audio
+  GET  /{slug}/{code}/ep/{name}/transcript   private episode transcript (raw markdown)
+  GET  /{slug}/ep/{name}/transcript          public episode transcript
   GET  /artwork/{slug}             channel cover art
   PUT  /upload/{slug}/{name}        service-token upload (headless producers)
 
@@ -33,7 +35,15 @@ from pydantic import BaseModel
 from db import SessionLocal, init_db
 from feed import build_feed
 from models import Episode, Podcast
-from storage import artwork_path, audio_path, delete_file, list_audio, write_upload, write_upload_stream
+from storage import (
+    artwork_path,
+    audio_path,
+    delete_file,
+    list_audio,
+    transcript_path,
+    write_upload,
+    write_upload_stream,
+)
 
 UPLOAD_SECRET = os.environ.get("PODCAST_UPLOAD_SECRET", "")
 
@@ -83,6 +93,16 @@ def _serve_audio(show: Podcast, name: str) -> FileResponse:
         raise HTTPException(404, "not found")
     # FileResponse sets Accept-Ranges + emits 206 on Range: requests on its own.
     return FileResponse(p, media_type="audio/mpeg", filename=name)
+
+
+def _serve_transcript(show: Podcast, name: str) -> FileResponse:
+    """Serve an episode's `<base>-transcript.md` sidecar as raw markdown. Same code/visibility
+    gate as the audio route, so a private show's transcript is only reachable with the code —
+    and as plain markdown it's a clean fetch target for an LLM session (no XML/HTML to parse)."""
+    p = transcript_path(show.folder, name)
+    if p is None:
+        raise HTTPException(404, "no transcript")
+    return FileResponse(p, media_type="text/markdown; charset=utf-8", filename=p.name)
 
 
 def _feed_response(slug: str, code: str | None, request: Request) -> Response:
@@ -259,6 +279,7 @@ async def show_episodes(slug: str, _: None = Depends(_verify_upload)):
                     _iso_utc(rows[f.name].published_at) if rows.get(f.name) else None
                 ),
                 "duration_seconds": rows[f.name].duration_seconds if rows.get(f.name) else None,
+                "has_transcript": f.transcript is not None,
             }
             for f in files
         ]
@@ -294,6 +315,15 @@ async def private_audio(slug: str, code: str, name: str):
     return _serve_audio(folder_show, name)
 
 
+@app.api_route("/{slug}/{code}/ep/{name}/transcript", methods=["GET", "HEAD"])
+async def private_transcript(slug: str, code: str, name: str):
+    with SessionLocal() as session:
+        show = _load_show(session, slug)
+        _gate_private(show, code)
+        folder_show = show
+    return _serve_transcript(folder_show, name)
+
+
 @app.get("/{slug}/feed.xml")
 async def public_feed(slug: str, request: Request):
     return _feed_response(slug, None, request)
@@ -306,6 +336,15 @@ async def public_audio(slug: str, name: str):
         _require_public(show)
         folder_show = show
     return _serve_audio(folder_show, name)
+
+
+@app.api_route("/{slug}/ep/{name}/transcript", methods=["GET", "HEAD"])
+async def public_transcript(slug: str, name: str):
+    with SessionLocal() as session:
+        show = _load_show(session, slug)
+        _require_public(show)
+        folder_show = show
+    return _serve_transcript(folder_show, name)
 
 
 # ── admin (Starlette-Admin + OIDC) — mounted at /admin, session middleware ──

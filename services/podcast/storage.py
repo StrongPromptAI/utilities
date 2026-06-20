@@ -90,6 +90,22 @@ def audio_path(folder: str, name: str) -> Path | None:
     return p if p.is_file() else None
 
 
+def transcript_path(folder: str, name: str) -> Path | None:
+    """Resolved path to one episode's `<base>-transcript.md` sidecar, or None if absent.
+
+    `name` is the MP3 filename; the transcript rides beside it as `<stem>-transcript.md`.
+    Refuses traversal the same way `audio_path` does."""
+    name = _safe_name(name)
+    if not name.lower().endswith(".mp3"):
+        return None
+    p = folder_dir(folder) / f"{name[:-4]}-transcript.md"
+    try:
+        p.resolve().relative_to(folder_dir(folder).resolve())
+    except ValueError:
+        return None
+    return p if p.is_file() else None
+
+
 def artwork_path(folder: str) -> Path | None:
     """First `_art.<ext>` in the folder, or None."""
     d = folder_dir(folder)

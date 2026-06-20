@@ -228,7 +228,7 @@ def build_or_load_script(docs: list[Path], args) -> dict:
 
 def process_dialogue(
     docs: list[Path], args, *, tts_url: str, tts_token: str | None,
-    secret: str | None, base_url: str | None,
+    secret: str | None, base_url: str | None, published_at: str | None = None,
 ) -> str | None:
     """Full two-voice pipeline for ONE episode: script → per-turn synth (one Kokoro voice
     per speaker, «…» emphasis, pron overrides) → MP3 → publish to the podcast show. Endpoint
@@ -288,6 +288,6 @@ def process_dialogue(
     return _publish_episode(
         mp3=mp3, description_source=_dialogue_markdown(script, title), doc_name=filename,
         filename=filename, args=args, secret=secret, base_url=base_url,
-        duration_seconds=seconds,
+        duration_seconds=seconds, published_at=published_at,
     )
 

@@ -75,7 +75,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -927,18 +929,22 @@ def _which(name: str) -> bool:
 
 def upload_to_podcast(
     data: bytes, *, filename: str, slug: str, base_url: str, secret: str,
-    duration_seconds: float | None = None, content_type: str = "audio/mpeg",
+    duration_seconds: float | None = None, published_at: str | None = None,
+    content_type: str = "audio/mpeg",
 ) -> str:
     """PUT one file (MP3 or transcript sidecar) onto a podcast show's volume folder.
     Service-token auth: an HS256 bearer with aud="podcast-upload" signed by the show
     server's PODCAST_UPLOAD_SECRET. The producer already holds the bytes + duration, so
     this is a single direct PUT (the server's /import pull-path is migration-only). For an
-    MP3, X-Duration-Seconds rides along so the feed gets <itunes:duration> without ffprobe."""
+    MP3, X-Duration-Seconds (integer seconds) and X-Published-At (ISO-8601 with offset) ride
+    along so the feed gets <itunes:duration> + <pubDate> without ffprobe or a mtime fallback."""
     now = int(time.time())
     bearer = _hs256_jwt({"aud": "podcast-upload", "iat": now, "exp": now + 1800}, secret)
     headers = {"Authorization": f"Bearer {bearer}", "Content-Type": content_type}
     if duration_seconds is not None:
         headers["X-Duration-Seconds"] = str(int(round(duration_seconds)))
+    if published_at is not None:
+        headers["X-Published-At"] = published_at
     url = f"{base_url}/upload/{slug}/{filename}"
     # Retry transient network/5xx failures (a large MP3 over a slow uplink can time out
     # mid-write); auth and 4xx fail closed immediately. Mirrors synthesize()'s retry shape.
@@ -963,9 +969,58 @@ def upload_to_podcast(
     _die(f"podcast upload failed after 3 attempts for show {slug!r}: {last_err}")
 
 
+# Publish dates are stamped in Pacific time and sent as ISO-8601 with offset (the feed turns
+# them into RFC-822 <pubDate>). Pacific is the house timezone for these shows.
+_PACIFIC = ZoneInfo("America/Los_Angeles")
+
+
+def _now_pacific_iso() -> str:
+    """The current publish moment as ISO-8601 with the Pacific offset, e.g. 2026-06-20T14:30:00-07:00."""
+    return datetime.now(_PACIFIC).replace(microsecond=0).isoformat()
+
+
+def _epoch_to_pacific_iso(ts: float) -> str:
+    """An epoch timestamp (a file mtime) → ISO-8601 in Pacific — used to pin a recut's original
+    publish date when the episode row never carried an explicit one (it fell back to mtime)."""
+    return datetime.fromtimestamp(ts, _PACIFIC).replace(microsecond=0).isoformat()
+
+
+def _list_show_episodes(slug: str, *, base_url: str, secret: str) -> list[dict]:
+    """GET /show/{slug}/episodes (service-token) → [{name, size, mtime}]. The on-disk *.mp3
+    set the feed is built from — used to confirm a recut target exists and to verify a replace."""
+    now = int(time.time())
+    bearer = _hs256_jwt({"aud": "podcast-upload", "iat": now, "exp": now + 1800}, secret)
+    r = requests.get(
+        f"{base_url}/show/{slug}/episodes",
+        headers={"Authorization": f"Bearer {bearer}"}, timeout=30,
+    )
+    if r.status_code in (401, 403):
+        _die(f"podcast episode-list auth rejected ({r.status_code}): {r.text[:200]}")
+    if r.status_code == 404:
+        _die(f"show {slug!r} not found, or the server lacks /show/<slug>/episodes "
+             f"(deploy podcast-server → main first).")
+    if r.status_code != 200:
+        _die(f"podcast episode-list failed ({r.status_code}): {r.text[:200]}")
+    return r.json().get("episodes", [])
+
+
+def _next_recut_name(mp3_name: str, existing: set[str]) -> str:
+    """Bump `foo.mp3` → `foo-r2.mp3` (next free `-rN`) for --force-redownload — a NEW filename,
+    hence a new feed GUID, so existing subscribers re-pull. Strips any current `-rN` so revisions
+    don't stack (`foo-r2` → `foo-r3`, not `foo-r2-r2`)."""
+    base = mp3_name[:-4] if mp3_name.lower().endswith(".mp3") else mp3_name
+    m = re.match(r"^(.*)-r(\d+)$", base)
+    root = m.group(1) if m else base
+    n = 2
+    while f"{root}-r{n}.mp3" in existing:
+        n += 1
+    return f"{root}-r{n}.mp3"
+
+
 def _publish_episode(
     *, mp3: bytes, description_source: str, doc_name: str, filename: str, args,
     secret: str, base_url: str, duration_seconds: float | None,
+    published_at: str | None = None,
 ) -> str:
     """Publish one finished episode to its podcast show — the single upload sink shared by
     the one-voice (_process_doc) and two-voice (dialogue.process_dialogue) pipelines, so the
@@ -974,12 +1029,13 @@ def _publish_episode(
     description as the `<base>.md` sidecar the feed shows as <description> (from description_source,
     the episode's spoken script — NOT the truncated transcript)."""
     show = args.show
+    published_at = published_at or _now_pacific_iso()
     _log(f"⬆️  [{doc_name}] publishing to podcast show {show!r} at {base_url} ({filename})…")
     loc = upload_to_podcast(
         mp3, filename=filename, slug=show, base_url=base_url,
-        secret=secret, duration_seconds=duration_seconds,
+        secret=secret, duration_seconds=duration_seconds, published_at=published_at,
     )
-    _log(f"✅ {doc_name} → podcast/{loc}")
+    _log(f"✅ {doc_name} → podcast/{loc}  (dur {int(round(duration_seconds or 0))}s, pub {published_at})")
 
     # Brief blurb (`<base>.md`) → the feed's short <description>. Always published — it's the
     # episode preview shown in app lists.
@@ -1182,7 +1238,9 @@ def _wait_for_tts_ready(tts_url: str, *, timeout: float = 300.0) -> None:
 
 def _resolve_podcast_target(args) -> tuple[str, str]:
     """Resolve the podcast server's upload secret + base URL. Once per run. The synth
-    target when --show is set; same trust boundary as the migrate client (PODCAST_UPLOAD_SECRET)."""
+    target when --show is set; same trust boundary as the migrate client (PODCAST_UPLOAD_SECRET).
+    The secret always comes from Railway; --podcast-url overrides only the base URL (point at a
+    local server for testing — the token still validates if the local server shares the secret)."""
     _log("🔑 pulling podcast PODCAST_UPLOAD_SECRET from Railway…")
     pod_vars = _railway_vars(
         project=PODCAST["project"], env=PODCAST["env"], service=PODCAST["service"]
@@ -1190,13 +1248,15 @@ def _resolve_podcast_target(args) -> tuple[str, str]:
     secret = pod_vars.get("PODCAST_UPLOAD_SECRET")
     if not secret:
         _die("PODCAST_UPLOAD_SECRET not found on the podcast service.")
-    base_url = (pod_vars.get("PODCAST_PUBLIC_BASE") or PODCAST_FALLBACK_URL).rstrip("/")
+    override = getattr(args, "podcast_url", None)
+    base_url = (override or pod_vars.get("PODCAST_PUBLIC_BASE") or PODCAST_FALLBACK_URL).rstrip("/")
     return secret, base_url
 
 
 def _process_doc(
     doc: Path, args, *, tts_url: str, tts_token: str | None,
     secret: str | None, base_url: str | None, chunk_concurrency: int,
+    published_at: str | None = None,
 ) -> str | None:
     """Full pipeline for one document: normalize → synth → MP3 → publish. Returns the
     podcast location, or None when --no-upload. Endpoint/secrets are resolved once by
@@ -1233,6 +1293,7 @@ def _process_doc(
     return _publish_episode(
         mp3=mp3, description_source=transcript_md, doc_name=doc.name, filename=filename,
         args=args, secret=secret, base_url=base_url, duration_seconds=seconds,
+        published_at=published_at,
     )
 
 

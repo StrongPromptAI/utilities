@@ -83,10 +83,15 @@ from doc_to_speech import (
     Emph,
     _die,
     _log,
+    _epoch_to_pacific_iso,
+    _list_show_episodes,
+    _next_recut_name,
     _normalize_and_chunk,
+    _now_pacific_iso,
     _process_doc,
     _resolve_podcast_target,
     _resolve_tts_endpoint,
+    _safe_mp3_name,
     _wait_for_tts_ready,
 )
 from dialogue import (
@@ -136,6 +141,19 @@ def main() -> None:
                         "appears in that show's RSS feed; a brief Sonnet-written episode description "
                         "rides along as the `<base>.md` sidecar the feed shows as <description>. "
                         "Other shows: clinical, sales, general. (oxp.files was retired at cutover.)")
+    p.add_argument("--recut", action="store_true",
+                   help="Recut an EXISTING episode in place: require --name to already exist in the "
+                        "show and OVERWRITE its three artifacts (mp3 + .md + -transcript.md) under the "
+                        "exact same base — never a duplicate. Fails loud if the name isn't already in "
+                        "the show (catches typos that would strand a stray episode). Same filename = "
+                        "same feed GUID, so the fix reaches NEW subscribers silently; prior downloaders "
+                        "keep their copy (see --force-redownload). Preserves the original publish date.")
+    p.add_argument("--force-redownload", action="store_true",
+                   help="With --recut: publish the corrected episode under a bumped name (e.g. "
+                        "<base>-r2.mp3) — a NEW feed GUID, so it appears as a fresh episode and EXISTING "
+                        "subscribers re-download it. The original is left in place (hide/delete it via "
+                        "the admin if desired). Use when the correction must reach people who already "
+                        "downloaded; a fresh publish date is stamped.")
 
     # ── One-voice options (read/scrub/pm/exec) ──
     one = p.add_argument_group("one-voice (read/scrub/pm/exec)")
@@ -196,6 +214,10 @@ def main() -> None:
     # ── TTS endpoint + output ──
     p.add_argument("--local-tts", action="store_true", help="Use localhost:8102 (no token).")
     p.add_argument("--tts-url", help="Override the TTS base URL entirely.")
+    p.add_argument("--podcast-url",
+                   help="Override the podcast server base URL (default: pulled from Railway). Point at "
+                        "a local server for testing; the upload token still comes from Railway, so the "
+                        "local server must share PODCAST_UPLOAD_SECRET.")
     p.add_argument("--warmup-timeout", type=float, default=300.0,
                    help="Seconds to wait for the TTS service to wake from serverless sleep (0 = skip).")
     p.add_argument("--out", type=Path, help="Also write the MP3 to this local path (single episode only).")
@@ -269,6 +291,17 @@ def main() -> None:
     if not args.no_upload and not (args.show and args.show.strip()):
         _die("--show needs a podcast show slug (e.g. tech, clinical, sales, general).")
 
+    # Recut targets one existing episode by exact name — single-episode, must publish.
+    if args.force_redownload and not args.recut:
+        _die("--force-redownload only applies with --recut.")
+    if args.recut:
+        if not args.name:
+            _die("--recut needs --name = the exact existing base (e.g. tkr-generic-ep1.mp3).")
+        if args.no_upload:
+            _die("--recut replaces a published episode; it can't combine with --no-upload.")
+        if args.combine or len(args.docs) != 1:
+            _die("--recut is single-episode: pass exactly one source doc.")
+
     # Cardinality: one episode per doc, or all docs combined into one.
     episodes = [list(args.docs)] if args.combine else [[d] for d in args.docs]
     if len(episodes) > 1 and (args.name or args.title or args.out):
@@ -302,12 +335,33 @@ def main() -> None:
     if not args.no_upload:
         secret, base_url = _resolve_podcast_target(args)
 
+    # Every publish stamps a Pacific-time <pubDate>. A recut is the one case that overrides it
+    # (preserve the original date) — and the one case that pre-flights the target's existence.
+    published_at = _now_pacific_iso()
+    recut_before = None
+    if args.recut:
+        target = _safe_mp3_name(Path("recut"), args.name)
+        recut_before = {e["name"]: e for e in _list_show_episodes(args.show, base_url=base_url, secret=secret)}
+        if target not in recut_before:
+            _die(f"--recut: no episode named {target!r} in show {args.show!r} — refusing to create a "
+                 f"stray. Existing: {sorted(recut_before) or '(none)'}")
+        if args.force_redownload:
+            args.name = _next_recut_name(target, set(recut_before))
+            _log(f"♻️  --force-redownload: publishing as {args.name!r} — new GUID, so existing "
+                 f"subscribers re-download. Original {target!r} left in place (hide/delete via admin).")
+            # fresh episode → fresh publish date (already 'now')
+        else:
+            prior = recut_before[target]
+            published_at = prior.get("published_at") or _epoch_to_pacific_iso(prior["mtime"])
+            _log(f"♻️  recut: overwriting {target!r} in place — same GUID (new subscribers get the fix; "
+                 f"prior downloaders keep the old copy). Preserving publish date {published_at}.")
+
     if is_dialogue:
         # Sequential episodes: each is its own LLM call + multi-turn synth.
         for ep_docs in episodes:
             process_dialogue(
                 ep_docs, args, tts_url=tts_url, tts_token=tts_token,
-                secret=secret, base_url=base_url,
+                secret=secret, base_url=base_url, published_at=published_at,
             )
     else:
         ep_inputs = [_episode_doc(ep) for ep in episodes]
@@ -321,6 +375,7 @@ def main() -> None:
                     ex.submit(
                         _process_doc, doc, args, tts_url=tts_url, tts_token=tts_token,
                         secret=secret, base_url=base_url, chunk_concurrency=1,
+                        published_at=published_at,
                     )
                     for doc in ep_inputs
                 ]
@@ -330,7 +385,27 @@ def main() -> None:
             _process_doc(
                 ep_inputs[0], args, tts_url=tts_url, tts_token=tts_token,
                 secret=secret, base_url=base_url, chunk_concurrency=args.concurrency,
+                published_at=published_at,
             )
+
+    # Recut verification: confirm a REPLACE (item count unchanged, target's size changed) or,
+    # for --force-redownload, an ADD (one new item). Fails loud if the shape is unexpected.
+    if args.recut and recut_before is not None:
+        after = {e["name"]: e for e in _list_show_episodes(args.show, base_url=base_url, secret=secret)}
+        if args.force_redownload:
+            if args.name not in after or len(after) != len(recut_before) + 1:
+                _die(f"recut verify: expected one new episode {args.name!r}; "
+                     f"before={len(recut_before)} after={len(after)}.")
+            _log(f"✅ recut verified: added {args.name!r} ({after[args.name]['size']} bytes); "
+                 f"{len(after)} episodes total.")
+        else:
+            tgt = _safe_mp3_name(Path("recut"), args.name)
+            if len(after) != len(recut_before):
+                _die(f"recut verify: item count changed ({len(recut_before)}→{len(after)}) — "
+                     f"expected an in-place replace, not an add.")
+            old_sz, new_sz = recut_before[tgt]["size"], after[tgt]["size"]
+            _log(f"✅ recut verified: replaced {tgt!r} in place — {len(after)} episodes (unchanged), "
+                 f"enclosure {old_sz}→{new_sz} bytes.")
 
     if base_url:
         _log(f"   show {args.show!r} → {base_url}/{args.show}/<code>/feed.xml — episode is now in the feed")

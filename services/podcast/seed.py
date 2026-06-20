@@ -1,7 +1,9 @@
 """Seed the four shows + the Sales Edition EP1-4 episode rows.
 
-Idempotent: re-running upserts metadata but PRESERVES existing private codes
-(rotating a code breaks every subscriber, so seed never silently changes one).
+INSERT-ONLY: creates any missing show/episode row, never overwrites an existing
+one — so it is safe to run on every container boot (the Docker CMD does) without
+clobbering admin edits or rotating codes. To re-seed from scratch locally, delete
+the DB first.
 Run: `PODCAST_DB_PATH=./data/podcast.db uv run python seed.py`
 Prints each show's feed URL (with code) at the end so you can subscribe.
 """
@@ -88,35 +90,26 @@ SALES_EPISODES = [
 def seed() -> None:
     init_db()
     with SessionLocal() as s:
+        # Shows — create if missing; leave existing ones untouched (admin owns them).
         for slug, folder, title, access in SHOWS:
-            show = s.get(Podcast, slug)
-            if show is None:
-                show = Podcast(slug=slug, folder=folder)
-                s.add(show)
-            show.folder = folder
-            show.title = title
-            show.access = access
-            show.description = DESCRIPTIONS[slug]
-            show.author = "StrongPrompt"
-            # Generate a long code for private shows once; never rotate silently.
-            if access == "private" and not show.code:
-                show.code = secrets.token_urlsafe(32)
-            if access == "public":
-                show.code = None
+            if s.get(Podcast, slug) is not None:
+                continue
+            s.add(Podcast(
+                slug=slug, folder=folder, title=title, access=access,
+                description=DESCRIPTIONS[slug], author="StrongPrompt",
+                code=(secrets.token_urlsafe(32) if access == "private" else None),
+            ))
 
-        # Sales Edition episode overrides.
+        # Sales Edition episodes — create if missing; never overwrite admin edits.
         for filename, order, title, desc in SALES_EPISODES:
-            ep = (
-                s.query(Episode)
-                .filter_by(podcast_slug="sales", filename=filename)
-                .one_or_none()
+            exists = (
+                s.query(Episode).filter_by(podcast_slug="sales", filename=filename).first()
             )
-            if ep is None:
-                ep = Episode(podcast_slug="sales", filename=filename)
-                s.add(ep)
-            ep.title = title
-            ep.description = desc
-            ep.sort_order = order
+            if exists is None:
+                s.add(Episode(
+                    podcast_slug="sales", filename=filename,
+                    title=title, description=desc, sort_order=order,
+                ))
 
         s.commit()
 

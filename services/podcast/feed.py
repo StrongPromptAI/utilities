@@ -7,6 +7,7 @@ derived defaults. Enclosure URLs point back at this server's own `ep/` route
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from urllib.parse import quote
@@ -21,6 +22,21 @@ from storage import AudioFile, list_audio
 def _derive_title(filename: str) -> str:
     stem = filename[:-4] if filename.lower().endswith(".mp3") else filename
     return stem.replace("_", " ").strip()
+
+
+def _transcript_html(md: str) -> str:
+    """Render a transcript markdown body to the minimal HTML <content:encoded> carries:
+    a leading `# Title` → <h2>, every other blank-line-separated block → a <p> with its
+    wrapped lines joined. Text is entity-escaped (it sits inside CDATA but must still be
+    valid HTML), and any literal `]]>` is defanged so it can't close the CDATA early."""
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", md.strip()) if b.strip()]
+    parts: list[str] = []
+    for b in blocks:
+        if b.startswith("# "):
+            parts.append(f"<h2>{escape(b[2:].strip())}</h2>")
+        else:
+            parts.append(f"<p>{escape(' '.join(b.split()))}</p>")
+    return "".join(parts).replace("]]>", "]]&gt;")
 
 
 def _rfc822(dt: datetime) -> str:
@@ -78,6 +94,11 @@ def build_feed(session: Session, podcast: Podcast, base_url: str) -> str:
         if desc:
             parts.append(f"<description>{escape(desc)}</description>")
             parts.append(f"<itunes:summary>{escape(desc)}</itunes:summary>")
+        # Full transcript → rich show notes. A DB description override is authoritative for the
+        # short blurb but does NOT replace the transcript; the `<base>-transcript.md` sidecar is
+        # the only transcript source, so apps that render <content:encoded> show the full text.
+        if f.transcript:
+            parts.append(f"<content:encoded><![CDATA[{_transcript_html(f.transcript)}]]></content:encoded>")
         if row and row.duration_seconds:
             parts.append(f"<itunes:duration>{_duration_hms(row.duration_seconds)}</itunes:duration>")
         if row and row.sort_order is not None:
@@ -103,6 +124,7 @@ def build_feed(session: Session, podcast: Podcast, base_url: str) -> str:
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<rss version="2.0" '
         'xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" '
+        'xmlns:content="http://purl.org/rss/1.0/modules/content/" '
         'xmlns:atom="http://www.w3.org/2005/Atom">'
         "<channel>"
         f"<title>{title}</title>"

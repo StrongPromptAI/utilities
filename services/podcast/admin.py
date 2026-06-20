@@ -35,7 +35,7 @@ from starlette_admin.contrib.sqla import Admin, ModelView
 
 from db import DB_PATH, SessionLocal, engine
 from models import Episode, Podcast
-from storage import list_audio
+from storage import delete_file, list_audio
 
 # ── config ──────────────────────────────────────────────────────────────────
 
@@ -198,6 +198,18 @@ class PodcastView(ModelView):
 class EpisodeView(ModelView):
     fields = ["id", "podcast_slug", "filename", "title", "sort_order",
               "published_at", "duration_seconds", "hidden", "description"]
+
+    async def before_delete(self, request: Request, obj) -> None:
+        # Deleting an episode row also removes its MP3 from the volume — otherwise
+        # the file would reappear in the feed (feed = on-disk listing ⟕ rows). To
+        # only hide an episode without deleting the audio, set `hidden` instead.
+        with SessionLocal() as s:
+            show = s.get(Podcast, obj.podcast_slug)
+        if show:
+            try:
+                delete_file(show.folder, obj.filename)
+            except Exception:
+                pass
 
 
 # ── /admin/volume — read-only window into the Railway volume ────────────────

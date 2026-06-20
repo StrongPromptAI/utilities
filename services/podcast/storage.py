@@ -18,7 +18,8 @@ from pathlib import Path
 AUDIO_ROOT = Path(os.environ.get("PODCAST_AUDIO_ROOT", "/data/audio")).expanduser()
 
 _ART_EXTS = (".png", ".jpg", ".jpeg", ".webp")
-_DESCRIPTION_CAP = 2000  # transcript sidecars can be long; cap the default
+_DESCRIPTION_CAP = 2000      # the `<base>.md` blurb feeds <description>; keep it short
+_TRANSCRIPT_CAP = 200_000    # the `<base>-transcript.md` full transcript feeds <content:encoded>
 
 
 @dataclass
@@ -26,7 +27,8 @@ class AudioFile:
     name: str          # basename, e.g. HealingJourneyPodcast_EP1.mp3
     size: int          # bytes — feeds the <enclosure length=...>
     mtime: float       # epoch seconds — default <pubDate>
-    sidecar: str | None  # transcript text (capped) if a .md sits beside it
+    sidecar: str | None     # brief blurb from `<base>.md` → <description> (capped)
+    transcript: str | None  # full transcript from `<base>-transcript.md` → <content:encoded>
 
 
 def _safe_folder(folder: str) -> str:
@@ -55,14 +57,23 @@ def list_audio(folder: str) -> list[AudioFile]:
         if p.suffix.lower() != ".mp3" or not p.is_file() or p.name.startswith("."):
             continue
         st = p.stat()
-        sidecar_path = p.with_suffix(".md")
-        sidecar = None
-        if sidecar_path.is_file():
-            sidecar = sidecar_path.read_text(encoding="utf-8", errors="replace").strip()
-            if len(sidecar) > _DESCRIPTION_CAP:
-                sidecar = sidecar[:_DESCRIPTION_CAP].rstrip() + "…"
-        out.append(AudioFile(name=p.name, size=st.st_size, mtime=st.st_mtime, sidecar=sidecar))
+        # Two sidecars ride beside an MP3, both optional: `<base>.md` is the short blurb
+        # (→ <description>), `<base>-transcript.md` the full transcript (→ <content:encoded>).
+        sidecar = _read_capped(p.with_suffix(".md"), _DESCRIPTION_CAP)
+        transcript = _read_capped(p.with_name(f"{p.stem}-transcript.md"), _TRANSCRIPT_CAP)
+        out.append(AudioFile(name=p.name, size=st.st_size, mtime=st.st_mtime,
+                             sidecar=sidecar, transcript=transcript))
     return out
+
+
+def _read_capped(path: Path, cap: int) -> str | None:
+    """Read a sidecar file's text, truncated to `cap` chars (… marker if cut). Missing → None."""
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8", errors="replace").strip()
+    if len(text) > cap:
+        text = text[:cap].rstrip() + "…"
+    return text or None
 
 
 def audio_path(folder: str, name: str) -> Path | None:

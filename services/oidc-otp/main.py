@@ -38,9 +38,10 @@ def _load_clients() -> dict:
     Names:
       OPENWEBUI — oxp.chat
       FILES     — FastAPI oxp.files app
+      PODCAST   — StrongPrompt podcast server admin (podcast.strongprompt.ai)
     """
     clients = {}
-    for name in ("OPENWEBUI", "FILES"):
+    for name in ("OPENWEBUI", "FILES", "PODCAST"):
         cid = os.environ.get(f"OIDC_CLIENT_{name}_ID")
         secret = os.environ.get(f"OIDC_CLIENT_{name}_SECRET")
         redirect = os.environ.get(f"OIDC_CLIENT_{name}_REDIRECT")
@@ -189,6 +190,7 @@ _CLIENT_TITLES = {
     "sftpgo": "OXP File Drop",
     "files": "OXP File Drop",
     "openwebui": "OXP Chat",
+    "podcast": "Podcast Admin",
 }
 
 

@@ -97,3 +97,17 @@ def write_upload(folder: str, name: str, data: bytes) -> Path:
     p = d / name
     p.write_bytes(data)
     return p
+
+
+def delete_file(folder: str, name: str) -> bool:
+    """Remove a file from a show folder (traversal-safe). Returns True if removed."""
+    name = _safe_name(name)
+    p = folder_dir(folder) / name
+    try:
+        p.resolve().relative_to(folder_dir(folder).resolve())
+    except ValueError:
+        return False
+    if p.is_file():
+        p.unlink()
+        return True
+    return False

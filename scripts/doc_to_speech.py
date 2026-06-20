@@ -190,7 +190,11 @@ _EXEC_SYSTEM = (
     "- Translate any technical, clinical, or product-internal jargon into plain language "
     "an executive would actually use; drop terms that don't carry business meaning.\n"
     "- Be substantially shorter than the source — keep only what a busy executive needs "
-    "to grasp the thesis, the bet, and the open decisions.\n\n"
+    "to grasp the thesis, the bet, and the open decisions.\n"
+    "- Mark emphasis SPARINGLY for the ear: wrap a small number of the single most "
+    "load-bearing lines in guillemets, «like this» (a whole clause or sentence, never a "
+    "single word, never a whole paragraph; only a handful in the whole recap), so they are "
+    "read a touch slower for weight. Used rarely they land; used often they deaden.\n\n"
     "Do NOT:\n"
     "- Mention or read aloud ANY file path, file name, document name, section pointer, "
     "URL, code, or cross-reference scaffolding (e.g. 'see X dot M D', 'per the registry'). "
@@ -219,12 +223,20 @@ _PM_SYSTEM = (
     "terms.\n"
     "- Keep a product vocabulary: product concepts, user/patient experience, design "
     "reasoning. Translate engineering and clinical jargon into plain language; keep a term "
-    "only if it carries product meaning.\n\n"
+    "only if it carries product meaning.\n"
+    "- Mark emphasis SPARINGLY for the ear. Wrap a SMALL number of the single most "
+    "load-bearing lines in guillemets, «like this», so they are read a touch slower for "
+    "weight. Rules: wrap a WHOLE clause or sentence, never a single word; at most one per "
+    "few paragraphs and only a handful in the whole briefing (well under one line in "
+    "twenty); include the trailing punctuation inside the marks. Used rarely they land; "
+    "used often they deaden — when in doubt, leave it unmarked.\n\n"
     "Do NOT:\n"
     "- Read document structure aloud, or mention file names, section pointers, headings, "
     "dates, status tags, citations, or URLs — convey the idea, never the pointer.\n"
     "- Over-summarize into a teaser — the PM wants the 'why', not just the 'what'. Be "
     "substantial; this is a briefing, not a blurb.\n"
+    "- Over-mark emphasis, wrap a bare word or a whole paragraph in «…», or use the "
+    "guillemets for anything other than the rare load-bearing line.\n"
     "- Add headings, bullets, labels, or meta-commentary. Output ONLY the narrative as "
     "flowing prose meant to be heard."
 )
@@ -322,6 +334,14 @@ def _strip_inline(text: str) -> str:
     text = re.sub(r"https?://\S+", "", text)                      # bare URLs
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text
+
+
+def strip_llm_markup(text: str) -> str:
+    """Strip inline markup an LLM may emit despite a 'no markers' instruction — *emphasis*,
+    **bold**, inline code, link/image syntax, bare URLs. Both front-ends apply this to LLM
+    output: normalize_markdown only ran on the SOURCE, before the LLM rewrote it, so without
+    this the TTS voices a literal asterisk. Shared so the fix can't drift between tools."""
+    return _strip_inline(text)
 
 
 def _ensure_sentence_end(s: str) -> str:
@@ -444,6 +464,42 @@ def chunk_text(text: str, max_chars: int) -> list[str]:
     return chunks
 
 
+# ── Emphasis (Lever 3: pace a load-bearing span slower, with a beat before it) ───
+#
+# Kokoro has no per-word prosody control — its only knobs are per-call speed and the
+# silence we splice between calls. So "emphasis" is: isolate a marked span into its own
+# synth call at a slower speed, and put a short anticipatory pause in front of it. This
+# reads as weight WITHOUT the broken-island sound you get from slowing a single word,
+# *provided the span is a whole clause or sentence* (it then has its own complete
+# intonation arc). Mark spans in the source with guillemets «…» — never emitted by
+# markdown, so they survive normalization untouched.
+
+class Emph(str):
+    """A chunk to synthesize at --emphasis-speed with an anticipatory pause before it.
+    Subclasses str so it flows through the chunk list, len(), the pause-cap, and the
+    dry-run preview unchanged — only _process_doc treats it specially."""
+    __slots__ = ()
+
+
+_EMPHASIS_MARK = re.compile(r"«(.+?)»", re.DOTALL)
+
+
+def split_emphasis_chunks(text: str, max_chars: int) -> list[str]:
+    """Chunk `text` normally, but isolate each «…»-marked span into its own Emph chunk.
+    The marker delimiters themselves are consumed (never voiced). Author spans at
+    clause/sentence boundaries with trailing punctuation *inside* the span, so the split
+    lands cleanly and the surrounding prose isn't fragmented mid-clause."""
+    out: list[str] = []
+    for i, seg in enumerate(_EMPHASIS_MARK.split(text)):
+        if not seg.strip():
+            continue
+        seg_chunks = chunk_text(seg, max_chars)
+        if i % 2 == 1:  # odd segments are the captured «…» interiors
+            seg_chunks = [c if c == _SECTION_SENTINEL else Emph(c) for c in seg_chunks]
+        out.extend(seg_chunks)
+    return out
+
+
 def enforce_pause_cap(chunks: list[str], max_chars: int) -> list[str]:
     """Guarantee no run of speech between pauses exceeds ~max_chars (a char proxy for
     seconds at Kokoro's rate). Walks the chunk list and inserts a _SECTION_SENTINEL at a
@@ -494,6 +550,38 @@ def apply_pron_overrides(text: str, overrides: dict[str, str]) -> str:
     return text
 
 
+def resolve_pron_overrides(
+    *, no_pron: bool, pron_files: list[Path], ad_hoc: list[str]
+) -> dict[str, str]:
+    """Assemble the active override map for one run — the single happy path shared by
+    doc_to_speech AND doc_to_podcast. Layers, later wins:
+
+      1. the global default file scripts/pron_overrides.json (skipped if --no-pron),
+      2. each --pron-file sidecar in order,
+      3. ad-hoc --pron WORD=SPOKEN.
+
+    The layering is the holistic homograph answer. The global file stays doctrine-pure
+    (phrase-disambiguated entries only, NO bare homograph whose sense flips with context
+    — 'content' the noun vs adjective, 'live' reside vs broadcast), because it colors
+    EVERY project's audio. A bare-homograph override whose sense is fixed *within one
+    doc-set* (clinical briefings: 'content' is always the noun, 'live(s)' always means
+    reside) belongs in a per-DOMAIN --pron-file sidecar pointed at by that doc-set's
+    runs — declared where the sense is known, never guessed globally. Position-triggered
+    homographs (espeak flips 'content' to the adjective on a sentence-final '…content.',
+    which no *phrase* key can catch) can ONLY be fixed this way."""
+    overrides: dict[str, str] = {} if no_pron else load_pron_overrides()
+    for f in pron_files:
+        if not f.exists():
+            _die(f"--pron-file not found: {f}")
+        overrides.update(load_pron_overrides(f))
+    for spec in ad_hoc:
+        if "=" not in spec:
+            _die(f"--pron expects WORD=SPOKEN, got {spec!r}")
+        w, _, s = spec.partition("=")
+        overrides[w.strip()] = s.strip()
+    return overrides
+
+
 # ── TTS synthesis ────────────────────────────────────────────────────────────────
 
 def synthesize(
@@ -542,11 +630,12 @@ class _Synth:
     resolves these concurrently; silence segments in the same list are plain bytes
     that need no network call and pass straight through."""
 
-    __slots__ = ("text", "voice")
+    __slots__ = ("text", "voice", "speed")
 
-    def __init__(self, text: str, voice: str) -> None:
+    def __init__(self, text: str, voice: str, speed: float | None = None) -> None:
         self.text = text
         self.voice = voice
+        self.speed = speed  # None → use the run-global --speed; set for emphasis spans
 
 
 def synthesize_ordered(
@@ -580,7 +669,8 @@ def synthesize_ordered(
         futs = {
             ex.submit(
                 synthesize, job.text, tts_url=tts_url, voice=job.voice,
-                speed=speed, language=language, token=token,
+                speed=job.speed if job.speed is not None else speed,
+                language=language, token=token,
             ): idx
             for idx, job in jobs
         }
@@ -592,6 +682,48 @@ def synthesize_ordered(
         results[i] if isinstance(part, _Synth) else part
         for i, part in enumerate(parts)
     )
+
+
+# ── Chunks → ordered parts list (shared by both front-ends) ──────────────────────
+
+def _silence(seconds: float) -> bytes:
+    """Raw s16le @ 24 kHz mono silence of `seconds` length (2 bytes/sample)."""
+    return b"\x00" * (int(max(0.0, seconds) * KOKORO_SAMPLE_RATE) * 2)
+
+
+def chunks_to_parts(
+    chunks: list[str], voice: str, *,
+    gap: float, section_gap: float,
+    emphasis_gap: float = 0.0, emphasis_speed: float | None = None,
+) -> list:
+    """Turn a chunk list (plain strings, `_SECTION_SENTINEL`s, and `Emph` spans) into the
+    ordered parts list `synthesize_ordered` consumes: `_Synth` markers interleaved with
+    silence bytes. Shared by doc_to_speech (one voice per doc) and doc_to_podcast (one voice
+    per turn) so emphasis + pacing behave identically in both — the drift-prone seam, made
+    structural. `gap` is the normal inter-chunk pause, `section_gap` the longer topic-break;
+    an `Emph` chunk gets an `emphasis_gap` beat before it and synthesizes at `emphasis_speed`.
+    """
+    gap_b = _silence(gap)
+    section_b = _silence(section_gap)
+    emph_b = _silence(emphasis_gap)
+    n_synth = sum(1 for c in chunks if c != _SECTION_SENTINEL)
+    parts: list = []
+    done = 0
+    for i, chunk in enumerate(chunks):
+        if chunk == _SECTION_SENTINEL:
+            parts.append(section_b)
+            continue
+        done += 1
+        if isinstance(chunk, Emph):
+            if emphasis_gap > 0:
+                parts.append(emph_b)                 # anticipatory beat before the span
+            parts.append(_Synth(chunk, voice, speed=emphasis_speed))
+        else:
+            parts.append(_Synth(chunk, voice))
+        nxt = chunks[i + 1] if i + 1 < len(chunks) else None
+        if done < n_synth and nxt != _SECTION_SENTINEL:
+            parts.append(gap_b)
+    return parts
 
 
 # ── PCM → MP3 (ffmpeg) ───────────────────────────────────────────────────────────
@@ -640,7 +772,8 @@ def _which(name: str) -> bool:
 # ── oxp.files upload (presigned PUT, see services/files/main.py) ─────────────────
 
 def upload_to_oxp(
-    mp3: bytes, *, filename: str, folder: str, base_url: str, secret: str, email: str
+    data: bytes, *, filename: str, folder: str, base_url: str, secret: str, email: str,
+    content_type: str = "audio/mpeg",
 ) -> str:
     now = int(time.time())
     bearer = _hs256_jwt({"sub": email, "iat": now, "exp": now + 600}, secret)
@@ -656,7 +789,7 @@ def upload_to_oxp(
         _die(f"upload-url failed ({r.status_code}): {r.text[:200]}")
     put_url = r.json()["url"]
 
-    put = requests.put(put_url, data=mp3, headers={"Content-Type": "audio/mpeg"}, timeout=300)
+    put = requests.put(put_url, data=data, headers={"Content-Type": content_type}, timeout=300)
     if put.status_code not in (200, 201):
         _die(f"presigned PUT failed ({put.status_code}): {put.text[:200]}")
 
@@ -677,6 +810,13 @@ def upload_to_oxp(
 
 # ── Filename helpers (match services/files _safe_filename rules) ─────────────────
 
+def _transcript_name(mp3_filename: str) -> str:
+    """`foo.mp3` → `foo-transcript.md` — the renderable transcript that rides with the
+    audio in oxp.files. Always .md so it renders with its section headers (never .txt)."""
+    base = mp3_filename[:-4] if mp3_filename.lower().endswith(".mp3") else mp3_filename
+    return f"{base}-transcript.md"
+
+
 def _safe_mp3_name(doc_path: Path, override: str | None, audience: str = "technical") -> str:
     name = override or doc_path.stem
     if not override and audience in ("exec", "pm"):
@@ -691,11 +831,11 @@ def _safe_mp3_name(doc_path: Path, override: str | None, audience: str = "techni
 
 # ── Per-document pipeline (shared by single- and multi-doc runs) ─────────────────
 
-def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
+def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, str, int, int]:
     """Read a doc → speakable prose → optional LLM pass → pron overrides → chunks.
 
-    Returns (chunks, title, raw_chars, speakable_chars). No network beyond the
-    optional LLM pass; safe to call from a worker thread (one per doc).
+    Returns (chunks, title, transcript_md, raw_chars, speakable_chars). No network beyond
+    the optional LLM pass; safe to call from a worker thread (one per doc).
     """
     raw = doc.read_text(encoding="utf-8")
     # Narrative modes distill the ideas, never read code aloud — drop the code cue.
@@ -717,6 +857,35 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
             api_key=_openrouter_key(), seg_chars=SCRUB_SEG_CHARS,
             max_tokens=8000, label="scrub",
         )
+
+    # The LLM can emit markdown emphasis (*word*, **bold**), inline code, or link
+    # syntax despite the "no markers" instruction — and normalize_markdown only ran
+    # on the SOURCE, before the LLM rewrote it. Re-strip inline markup from the LLM
+    # output so Kokoro never voices a literal asterisk. Same _strip_inline the source
+    # path already applies — one happy path, no second stripper to drift.
+    if args.narrative or args.scrub:
+        speakable = strip_llm_markup(speakable)
+
+    # Title (used for the MP3 metadata AND the transcript heading).
+    if args.title:
+        title = args.title
+    else:
+        title = h1 or doc.stem
+        if args.narrative:
+            title = f"{title} — {args.narrative} narrative"
+
+    # Renderable markdown transcript, landed in oxp.files beside the MP3. Captured BEFORE
+    # pron respelling so it reads cleanly ('content', not 'con-tent'). Read mode → the
+    # source markdown (section headers intact, frontmatter dropped); narrative mode → the
+    # distilled script under a title heading. Always .md (never .txt) so it renders.
+    if args.narrative:
+        transcript_md = f"# {title}\n\n{speakable.strip()}\n"
+    else:
+        transcript_md = _FRONTMATTER_RE.sub("", raw).strip() + "\n"
+    # The «…» marks steer synth; they are not punctuation a reader should see. Drop them
+    # from the human-readable transcript (keep the words).
+    transcript_md = transcript_md.replace("«", "").replace("»", "")
+
     # Pronunciation: deterministic whole-word/phrase respellings from pron_overrides.json
     # (Kokoro/espeak pronounces most long words correctly on its own; the overrides file
     # carries the exceptions — acronyms said as letters, numbers, and the rare botched
@@ -724,11 +893,12 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
     # the kokoro-onnx phoneme path. (A prior LLM "normalize/respell" pass was removed: it
     # mangled long-but-ordinary words espeak already says right — e.g. "reconciliation"
     # → "reck-un-sil-ee-AY-shun" — making things worse, not better.)
-    if not args.no_pron:
-        overrides = load_pron_overrides()
-        if overrides:
-            speakable = apply_pron_overrides(speakable, overrides)
-            _log(f"🗣️  [{doc.name}] applied {len(overrides)} pronunciation override(s)")
+    overrides = resolve_pron_overrides(
+        no_pron=args.no_pron, pron_files=args.pron_file, ad_hoc=args.pron
+    )
+    if overrides:
+        speakable = apply_pron_overrides(speakable, overrides)
+        _log(f"🗣️  [{doc.name}] applied {len(overrides)} pronunciation override(s)")
     if args.save_script:
         # Write the full distilled/cleaned spoken text — the transcript of what gets voiced.
         # Single doc → exact path; multiple docs → infix the doc stem so they don't clobber.
@@ -736,7 +906,14 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
         out_path = sp if len(args.docs) == 1 else sp.with_name(f"{sp.stem}.{doc.stem}{sp.suffix or '.txt'}")
         out_path.write_text(speakable, encoding="utf-8")
         _log(f"📝 [{doc.name}] saved spoken script → {out_path}")
-    chunks = chunk_text(speakable, args.max_chars)
+    chunks = split_emphasis_chunks(speakable, args.max_chars)
+    emph_chars = sum(len(c) for c in chunks if isinstance(c, Emph))
+    spoken_chars = sum(len(c) for c in chunks if c != _SECTION_SENTINEL)
+    if emph_chars and spoken_chars:
+        pct = 100 * emph_chars / spoken_chars
+        _log(f"✨ [{doc.name}] emphasis: {emph_chars}/{spoken_chars} chars ({pct:.0f}%) marked slow")
+        if pct > 5:
+            _log(f"⚠️  [{doc.name}] emphasis is {pct:.0f}% of spoken text (>5%) — it lands best kept rare.")
     if args.max_pause_gap > 0:
         before = sum(1 for c in chunks if c == _SECTION_SENTINEL)
         chunks = enforce_pause_cap(chunks, int(args.max_pause_gap * CHARS_PER_SECOND))
@@ -746,13 +923,7 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, int, int]:
     if not chunks:
         _die(f"Nothing speakable in {doc.name} (empty or all code/markup).")
 
-    if args.title:
-        title = args.title
-    else:
-        title = h1 or doc.stem
-        if args.narrative:
-            title = f"{title} — {args.narrative} narrative"
-    return chunks, title, len(raw), sum(len(c) for c in chunks)
+    return chunks, title, transcript_md, len(raw), sum(len(c) for c in chunks)
 
 
 def _resolve_tts_endpoint(args) -> tuple[str, str | None]:
@@ -824,25 +995,15 @@ def _process_doc(
     """Full pipeline for one document: normalize → synth → MP3 → (upload). Returns the
     oxp.files location, or None when --no-upload. Endpoint/secrets are resolved once by
     the caller and passed in, so this is safe to run concurrently (one call per doc)."""
-    chunks, title, raw_len, total_chars = _normalize_and_chunk(doc, args)
+    chunks, title, transcript_md, raw_len, total_chars = _normalize_and_chunk(doc, args)
     _log(f"📄 {doc.name}: {raw_len} raw → {total_chars} speakable → {len(chunks)} chunks")
 
     # Build the ordered parts list (silence bytes + _Synth markers). Normal gap after
     # each spoken chunk, unless the next is a section break (own longer silence) or last.
-    gap = b"\x00" * (int(args.gap * KOKORO_SAMPLE_RATE) * 2)
-    section_gap = b"\x00" * (int(args.section_gap * KOKORO_SAMPLE_RATE) * 2)
-    n_synth = sum(1 for c in chunks if c != _SECTION_SENTINEL)
-    parts: list = []
-    done = 0
-    for i, chunk in enumerate(chunks):
-        if chunk == _SECTION_SENTINEL:
-            parts.append(section_gap)
-            continue
-        done += 1
-        parts.append(_Synth(chunk, args.voice))
-        nxt = chunks[i + 1] if i + 1 < len(chunks) else None
-        if done < n_synth and nxt != _SECTION_SENTINEL:
-            parts.append(gap)
+    parts = chunks_to_parts(
+        chunks, args.voice, gap=args.gap, section_gap=args.section_gap,
+        emphasis_gap=args.emphasis_gap, emphasis_speed=args.emphasis_speed,
+    )
     pcm = synthesize_ordered(
         parts, tts_url=tts_url, speed=args.speed, language=args.language,
         token=tts_token, concurrency=chunk_concurrency, label=doc.stem,
@@ -869,6 +1030,17 @@ def _process_doc(
         secret=files_secret, email=args.email,
     )
     _log(f"✅ {doc.name} → oxp.files: {loc}")
+
+    # Always land a renderable .md transcript beside the audio (poka-yoke: built in, not
+    # an operator step). --no-transcript opts out.
+    if not args.no_transcript:
+        tname = _transcript_name(filename)
+        upload_to_oxp(
+            transcript_md.encode("utf-8"), filename=tname, folder=args.folder,
+            base_url=base_url, secret=files_secret, email=args.email,
+            content_type="text/markdown; charset=utf-8",
+        )
+        _log(f"📝 {doc.name} → transcript: {args.folder}/{tname}")
     return loc
 
 
@@ -886,13 +1058,31 @@ def main() -> None:
                    help="oxp.files folder (default: briefings — the private podcast folder).")
     p.add_argument("--voice", default="af_nova", help="Kokoro voice (must be in TTS allowlist).")
     p.add_argument("--no-pron", action="store_true",
-                   help="Disable the Lever-2 pronunciation overrides (scripts/pron_overrides.json).")
+                   help="Disable the Lever-2 default-file overrides (scripts/pron_overrides.json). "
+                        "--pron / --pron-file still apply on top.")
+    p.add_argument("--pron", action="append", default=[], metavar="WORD=SPOKEN",
+                   help="Ad-hoc pronunciation override, repeatable (e.g. --pron live=liv). Applied "
+                        "on top of the file overrides; the per-run channel for declaring a homograph "
+                        "whose sense is fixed in this doc but ambiguous globally.")
+    p.add_argument("--pron-file", action="append", default=[], type=Path, metavar="PATH",
+                   help="Additional pron-overrides JSON (same shape as scripts/pron_overrides.json), "
+                        "merged on top of the default file. Use a per-DOMAIN sidecar (e.g. "
+                        "scripts/pron_overrides.clinical.json) for words whose sense is fixed in that "
+                        "doc-set — keeps the shared default file free of bare-homograph overrides.")
     p.add_argument("--speed", type=float, default=1.0, help="0.5–2.0 (default 1.0).")
     p.add_argument("--language", default="en-us")
     p.add_argument("--max-chars", type=int, default=700, help="Per-chunk cap, < TTS's 800.")
     p.add_argument("--gap", type=float, default=0.35, help="Silence between chunks, seconds.")
     p.add_argument("--section-gap", type=float, default=1.4,
                    help="Silence at major topic (heading) boundaries — the 'take a breath' pause, seconds.")
+    p.add_argument("--emphasis-speed", type=float, default=0.9,
+                   help="Speed for «…»-marked emphasis spans (default 0.9 — ~10%% slower for "
+                        "weight). Mark whole clauses/sentences, not single words: Kokoro has no "
+                        "per-word stress, so an isolated word sounds like a broken island, but a "
+                        "full clause keeps its own intonation arc.")
+    p.add_argument("--emphasis-gap", type=float, default=0.25,
+                   help="Silence inserted just before each «…» emphasis span, seconds (default "
+                        "0.25 — an anticipatory beat that makes the span land). 0 disables.")
     p.add_argument("--max-pause-gap", type=float, default=150.0,
                    help="Hard cap: max seconds of speech between pauses. A breath is auto-inserted "
                         "at a sentence boundary to enforce it (0 disables). Default 150 = 2.5 min.")
@@ -945,6 +1135,11 @@ def main() -> None:
                         "--dry-run to get the script without synth.")
     p.add_argument("--out", type=Path, help="Also write the MP3 to this local path (single doc only).")
     p.add_argument("--no-upload", action="store_true", help="Skip the oxp.files upload.")
+    p.add_argument("--no-transcript", action="store_true",
+                   help="Skip the renderable .md transcript that is uploaded beside the MP3 by "
+                        "default (read mode → the source markdown with headers; narrative mode → "
+                        "the distilled script). On by default — the transcript always rides with "
+                        "the audio in oxp.files.")
     p.add_argument("--dry-run", action="store_true",
                    help="Normalize + chunk only; print a preview and exit. No network.")
     args = p.parse_args()
@@ -954,6 +1149,8 @@ def main() -> None:
             _die(f"Document not found: {doc}")
     if not (0.5 <= args.speed <= 2.0):
         _die("--speed must be between 0.5 and 2.0")
+    if not (0.5 <= args.emphasis_speed <= 2.0):
+        _die("--emphasis-speed must be between 0.5 and 2.0")
     if args.narrative and args.scrub:
         _die("--scrub is invalid with --narrative — narrative content is authored fresh, "
              "there is nothing to scrub.")
@@ -967,10 +1164,13 @@ def main() -> None:
 
     if args.dry_run:
         for doc in args.docs:
-            chunks, title, raw_len, total_chars = _normalize_and_chunk(doc, args)
+            chunks, title, _transcript_md, raw_len, total_chars = _normalize_and_chunk(doc, args)
             _log(f"📄 {doc.name}: {raw_len} raw → {total_chars} speakable → {len(chunks)} chunks")
             _log(f"   title: {title!r}")
-            preview = "\n\n".join(f"[{i+1}/{len(chunks)}] {c}" for i, c in enumerate(chunks[:3]))
+            preview = "\n\n".join(
+                f"[{i+1}/{len(chunks)}]{' «slow»' if isinstance(c, Emph) else ''} {c}"
+                for i, c in enumerate(chunks[:3])
+            )
             print(preview)
             if len(chunks) > 3:
                 print(f"\n… (+{len(chunks) - 3} more chunks)")

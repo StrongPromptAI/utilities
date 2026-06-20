@@ -80,13 +80,17 @@ from doc_to_speech import (
     _openrouter_key,
     _railway_vars,
     _safe_mp3_name,
+    _transcript_name,
     _Synth,
+    _silence,
     _wait_for_tts_ready,
     apply_pron_overrides,
-    chunk_text,
-    load_pron_overrides,
+    chunks_to_parts,
     normalize_markdown,
     pcm_to_mp3,
+    resolve_pron_overrides,
+    split_emphasis_chunks,
+    strip_llm_markup,
     synthesize_ordered,
     upload_to_oxp,
 )
@@ -141,7 +145,8 @@ HARD RULES:
 - Open with a hook in the first one or two turns. End with a clean, short sign-off.
 - About {words} words of spoken text total (~{minutes:g} minutes aloud). Tighter is better than padded — do NOT stuff filler to hit the count.
 - Turns alternate but not robotically: a host may take two short turns in a row, or a one-word reaction. Each turn is 1–4 sentences.
-- This is read by TTS, so write only what should be SPOKEN. NO stage directions, NO sound cues, NO markdown, NO asterisks, NO emoji, NO headings, NO host-name prefixes inside the text.
+- This is read by TTS, so write only what should be SPOKEN. NO stage directions, NO sound cues, NO markdown, NO asterisks, NO emoji, NO headings, NO host-name prefixes inside the text. (One narrow exception: the emphasis guillemets below.)
+- Emphasis, used SPARINGLY: wrap the single most load-bearing line of a turn — a WHOLE clause or sentence, never a single word, never a whole turn — in guillemets «like this», so the TTS reads it a touch slower for weight. At most a few in the whole episode, never more than one per turn, often none. Used rarely they land; used often they deaden. Guillemets are the ONLY markup allowed.
 - This is for a non-technical executive / sales audience: do NOT name or spell out file paths, file names, document names, section pointers, URLs, or code — convey the idea, never the pointer. Translate any technical, clinical, or product-internal jargon into plain business language, or drop it.
 - Lead with the business angle and keep returning to it — the opportunity, the money, the positioning, the bet. Do not dwell on implementation or step-by-step detail. Never invent numbers or prices; use only figures the source supports, and if the source leaves a price open, say it's still open.
 - For any term that must be spoken where a TTS would mangle it, write the spoken form ("JSON" as a word is fine; only spell out an acronym if it reads cleanly aloud).
@@ -224,15 +229,24 @@ def _voice_for(
 
 # ── PCM helpers ──────────────────────────────────────────────────────────────────
 
-def _silence(seconds: float) -> bytes:
-    return b"\x00" * (int(seconds * KOKORO_SAMPLE_RATE) * 2)  # s16le mono
-
-
 def _script_preview(data: dict) -> str:
     lines = [f"TITLE: {data.get('title', '(untitled)')}", ""]
     for turn in data["turns"]:
         lines.append(f"[{turn['speaker']}] {turn['text']}")
     return "\n".join(lines)
+
+
+def _dialogue_markdown(data: dict, title: str) -> str:
+    """Render the two-host dialogue as a renderable markdown transcript — a title heading
+    and one bold speaker label per turn. Lands beside the MP3 in oxp.files."""
+    lines = [f"# {title}", ""]
+    for turn in data["turns"]:
+        text = str(turn["text"]).strip().replace("«", "").replace("»", "")  # drop synth marks
+        if not text:
+            continue
+        lines.append(f"**{str(turn['speaker']).strip()}:** {text}")
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────────
@@ -266,8 +280,16 @@ def main() -> None:
                    help="Disable the Lever-2 pronunciation overrides (scripts/pron_overrides.json).")
     p.add_argument("--pron", action="append", default=[], metavar="WORD=SPOKEN",
                    help="Ad-hoc pronunciation override, repeatable (e.g. --pron irrevocable=irrevohcable).")
+    p.add_argument("--pron-file", action="append", default=[], type=Path, metavar="PATH",
+                   help="Additional pron-overrides JSON merged on top of the default file "
+                        "(per-DOMAIN sidecar; see scripts/pron_overrides.clinical.json).")
     p.add_argument("--turn-gap", type=float, default=0.45, help="Silence between speakers, seconds.")
     p.add_argument("--sub-gap", type=float, default=0.15, help="Silence between sub-chunks of one turn.")
+    p.add_argument("--emphasis-speed", type=float, default=0.9,
+                   help="Speed for «…»-marked emphasis spans (default 0.9 — ~10%% slower for "
+                        "weight). The script LLM marks whole load-bearing clauses; never single words.")
+    p.add_argument("--emphasis-gap", type=float, default=0.25,
+                   help="Silence just before each «…» emphasis span, seconds (default 0.25). 0 disables.")
     p.add_argument("--concurrency", type=int, default=TTS_CONCURRENCY_DEFAULT,
                    help=f"Parallel synth requests in flight (default {TTS_CONCURRENCY_DEFAULT}, "
                         "matching the TTS service's TTS_MAX_CONCURRENCY). Higher just queues "
@@ -297,11 +319,16 @@ def main() -> None:
                    help="sub claim for the oxp.files bearer (shown in its activity log).")
     p.add_argument("--out", type=Path, help="Also write the MP3 to this local path.")
     p.add_argument("--no-upload", action="store_true", help="Skip the oxp.files upload.")
+    p.add_argument("--no-transcript", action="store_true",
+                   help="Skip the renderable .md transcript (the dialogue, with speaker labels) "
+                        "uploaded beside the MP3 by default.")
     p.add_argument("--dry-run", action="store_true", help="Generate + print the script; no synth, no upload.")
     args = p.parse_args()
 
     if not (0.5 <= args.speed <= 2.0):
         _die("--speed must be between 0.5 and 2.0")
+    if not (0.5 <= args.emphasis_speed <= 2.0):
+        _die("--emphasis-speed must be between 0.5 and 2.0")
     if not args.script_in and not args.docs:
         _die("Provide source doc(s), or --script-in to reuse a saved script.")
 
@@ -347,19 +374,15 @@ def main() -> None:
     # Wake the service from serverless sleep (and gate synth on readiness) before synth.
     _wait_for_tts_ready(tts_url, timeout=args.warmup_timeout)
 
-    # Pronunciation overrides: file (unless --no-pron) plus any ad-hoc --pron WORD=SPOKEN.
-    overrides: dict[str, str] = {} if args.no_pron else load_pron_overrides()
-    for spec in args.pron:
-        if "=" not in spec:
-            _die(f"--pron expects WORD=SPOKEN, got {spec!r}")
-        w, _, s = spec.partition("=")
-        overrides[w.strip()] = s.strip()
+    # Pronunciation overrides: default file (unless --no-pron) + --pron-file sidecars + ad-hoc --pron.
+    overrides = resolve_pron_overrides(
+        no_pron=args.no_pron, pron_files=args.pron_file, ad_hoc=args.pron
+    )
     if overrides:
         _log(f"🗣️  {len(overrides)} pronunciation override(s) active: {', '.join(sorted(overrides))}")
 
     # 3) Synthesize each turn with its host's voice; concatenate with gaps.
     turn_gap = _silence(args.turn_gap)
-    sub_gap = _silence(args.sub_gap)
     prev_voice: str | None = None
     turns = [t for t in script["turns"] if str(t.get("text", "")).strip()]
 
@@ -369,7 +392,7 @@ def main() -> None:
     parts: list = []
     for i, turn in enumerate(turns, 1):
         speaker = str(turn["speaker"]).strip()
-        text = str(turn["text"]).strip()
+        text = strip_llm_markup(str(turn["text"]).strip())   # asterisk fix (parity)
         voice = _voice_for(
             speaker, female=args.female_name, male=args.male_name,
             female_voice=args.female_voice, male_voice=args.male_voice, prev_voice=prev_voice,
@@ -377,12 +400,13 @@ def main() -> None:
         prev_voice = voice
         if overrides:
             text = apply_pron_overrides(text, overrides)
-        subs = chunk_text(text, args.max_chars)
+        subs = split_emphasis_chunks(text, args.max_chars)   # «…» emphasis (parity)
         _log(f"🎙️  [{i}/{len(turns)}] {speaker} ({voice}) — {len(text)} chars, {len(subs)} piece(s)")
-        for k, sub in enumerate(subs):
-            parts.append(_Synth(sub, voice))
-            if k < len(subs) - 1:
-                parts.append(sub_gap)
+        # One voice per turn; sub_gap between this turn's pieces, emphasis spans slowed.
+        parts.extend(chunks_to_parts(
+            subs, voice, gap=args.sub_gap, section_gap=args.sub_gap,
+            emphasis_gap=args.emphasis_gap, emphasis_speed=args.emphasis_speed,
+        ))
         if i < len(turns):
             parts.append(turn_gap)
 
@@ -426,6 +450,16 @@ def main() -> None:
         secret=files_secret, email=args.email,
     )
     _log(f"✅ landed in oxp.files: {loc}")
+
+    # Always land a renderable .md transcript beside the audio (poka-yoke: built in).
+    if not args.no_transcript:
+        tname = _transcript_name(filename)
+        upload_to_oxp(
+            _dialogue_markdown(script, title).encode("utf-8"), filename=tname,
+            folder=args.folder, base_url=base_url, secret=files_secret, email=args.email,
+            content_type="text/markdown; charset=utf-8",
+        )
+        _log(f"📝 transcript: {args.folder}/{tname}")
     _log(f"   browse: {base_url}/?folder={args.folder}")
 
 

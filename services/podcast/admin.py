@@ -28,7 +28,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
-from starlette_admin import CustomView
+from starlette_admin import CustomView, StringField
 from starlette_admin.actions import action
 from starlette_admin.auth import AdminUser, AuthProvider
 from starlette_admin.contrib.sqla import Admin, ModelView
@@ -169,8 +169,9 @@ class OIDCAuthProvider(AuthProvider):
 # ── model views (with the self-serve actions) ──────────────────────────────
 
 class PodcastView(ModelView):
-    fields = ["slug", "title", "folder", "access", "code", "description",
-              "author", "category", "language", "explicit", "visible"]
+    fields = ["slug", "title", "folder", "access", "code",
+              StringField("feed_url", label="Feed URL", read_only=True),
+              "description", "author", "category", "language", "explicit", "visible"]
     actions = ["sync_episodes", "rotate_code", "delete"]
 
     @action(

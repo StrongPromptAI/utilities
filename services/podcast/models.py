@@ -10,6 +10,7 @@ with no row still appears, with defaults derived at build time.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
@@ -58,6 +59,15 @@ class Podcast(Base):
 
     def __str__(self) -> str:  # Starlette-Admin row label
         return f"{self.title} ({self.slug})"
+
+    @property
+    def feed_url(self) -> str:
+        """Copy-pasteable subscribe URL — code-bearing for private shows, codeless
+        for public. Surfaced read-only in the admin so the private link is one glance."""
+        base = os.environ.get("PODCAST_PUBLIC_BASE", "").rstrip("/")
+        if self.access == "public":
+            return f"{base}/{self.slug}/feed.xml"
+        return f"{base}/{self.slug}/{self.code}/feed.xml" if self.code else ""
 
 
 class Episode(Base):

@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir \
     "uvicorn[standard]>=0.29.0" \
     "sqlalchemy>=2.0" \
     "starlette-admin>=0.14.0" \
-    "PyJWT>=2.8.0" \
+    "PyJWT[crypto]>=2.8.0" \
     "itsdangerous>=2.1.0" \
     "httpx>=0.27.0" \
     "tzdata"

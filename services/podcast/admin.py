@@ -200,16 +200,20 @@ class EpisodeView(ModelView):
               "published_at", "duration_seconds", "hidden", "description"]
 
     async def before_delete(self, request: Request, obj) -> None:
-        # Deleting an episode row also removes its MP3 from the volume — otherwise
-        # the file would reappear in the feed (feed = on-disk listing ⟕ rows). To
-        # only hide an episode without deleting the audio, set `hidden` instead.
+        # Deleting an episode row also removes its files from the volume — the MP3
+        # AND its two sidecars (<base>.md blurb, <base>-transcript.md) — otherwise
+        # the audio reappears in the feed (feed = on-disk listing ⟕ rows) and the
+        # sidecars orphan. To hide an episode without deleting audio, set `hidden`.
         with SessionLocal() as s:
             show = s.get(Podcast, obj.podcast_slug)
         if show:
-            try:
-                delete_file(show.folder, obj.filename)
-            except Exception:
-                pass
+            name = obj.filename
+            base = name[:-4] if name.lower().endswith(".mp3") else name
+            for fn in (name, f"{base}.md", f"{base}-transcript.md"):
+                try:
+                    delete_file(show.folder, fn)
+                except Exception:
+                    pass
 
 
 # ── /admin/volume — read-only window into the Railway volume ────────────────

@@ -41,20 +41,17 @@ from __future__ import annotations
 import json
 import re
 import sys
-import time
 from pathlib import Path
-
-import requests
 
 # scripts/ is sys.path[0] when run as `python scripts/doc_to_audio.py`, so the sibling
 # module imports directly. One happy path: the shared TTS/upload/secret/chunking engine
-# lives in doc_to_speech; doc_to_audio resolves the endpoint + secrets and passes them in.
+# (and the model-routed LLM call, llm_chat) lives in doc_to_speech; doc_to_audio resolves
+# the endpoint + secrets and passes them in.
 from doc_to_speech import (
     KOKORO_SAMPLE_RATE,
-    OPENROUTER_URL,
     _die,
     _log,
-    _openrouter_key,
+    llm_chat,
     _safe_mp3_name,
     _transcript_name,
     _Synth,
@@ -70,7 +67,7 @@ from doc_to_speech import (
     upload_to_oxp,
 )
 
-DEFAULT_SCRIPT_MODEL = "anthropic/claude-opus-4.8"  # latest Opus; one short call
+DEFAULT_SCRIPT_MODEL = "claude-opus-4-8"  # native Anthropic (uses Anthropic credits); one short call
 WORDS_PER_MINUTE = 145  # conversational Kokoro pace, leaving headroom for turn gaps
 MAX_SOURCE_CHARS = 40000  # cap the LLM input; the brief steers focus, not the dump
 
@@ -151,38 +148,14 @@ def _parse_script_json(text: str) -> dict:
 
 
 def generate_dialogue(
-    source: str, *, model: str, api_key: str, female: str, male: str, minutes: float, brief: str
+    source: str, *, model: str, female: str, male: str, minutes: float, brief: str
 ) -> dict:
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    body = {
-        "model": model,
-        "temperature": 0.7,
-        "max_tokens": 4000,
-        "messages": [
-            {"role": "system", "content": _script_system(female, male, minutes, brief)},
-            {
-                "role": "user",
-                "content": f"SOURCE MATERIAL:\n\n{source}\n\nWrite the podcast script now as strict JSON.",
-            },
-        ],
-    }
-    last_err = None
-    for attempt in range(3):
-        try:
-            r = requests.post(OPENROUTER_URL, headers=headers, json=body, timeout=180)
-            if r.status_code == 200:
-                content = r.json()["choices"][0]["message"]["content"].strip()
-                if not content:
-                    _die("script LLM returned empty content")
-                return _parse_script_json(content)
-            if r.status_code in (401, 403):
-                _die(f"OpenRouter auth rejected ({r.status_code}): {r.text[:200]}")
-            last_err = f"{r.status_code}: {r.text[:200]}"
-        except (requests.RequestException, KeyError, ValueError) as exc:
-            last_err = str(exc)
-        if attempt < 2:
-            time.sleep(1.5 * (attempt + 1))
-    _die(f"script LLM failed after 3 attempts: {last_err}")
+    content = llm_chat(
+        system=_script_system(female, male, minutes, brief),
+        user=f"SOURCE MATERIAL:\n\n{source}\n\nWrite the podcast script now as strict JSON.",
+        model=model, max_tokens=4000, temperature=0.7, label="dialogue script",
+    )
+    return _parse_script_json(content)
 
 
 # ── Voice mapping ────────────────────────────────────────────────────────────────
@@ -243,7 +216,7 @@ def build_or_load_script(docs: list[Path], args) -> dict:
         source = _build_source(docs)
         _log(f"📄 {len(docs)} doc(s) → {len(source)} source chars → generating script ({args.model})…")
         script = generate_dialogue(
-            source, model=args.model, api_key=_openrouter_key(),
+            source, model=args.model,
             female=args.female_name, male=args.male_name, minutes=args.minutes, brief=args.brief,
         )
         words = sum(len(str(t["text"]).split()) for t in script["turns"])

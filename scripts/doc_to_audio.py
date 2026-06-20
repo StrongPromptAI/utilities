@@ -41,9 +41,11 @@ Usage:
   uv run python scripts/doc_to_audio.py DOC.md --local-tts --no-upload --out /tmp/o.mp3
 
 Auth (see symlink_docs/registries/AUTH_REGISTRY.md scenarios 4 + 5): TTS prod is an
-HS256 JWT aud="tts"; oxp.files is an HS256 session bearer; the LLM (scrub/narrative/
-dialogue) uses the OpenRouter key. Secrets pull live from Railway; --local-tts skips
-the TTS secret, --no-upload skips the files secret, --dry-run skips synth.
+HS256 JWT aud="tts"; oxp.files is an HS256 session bearer. The LLM routes by model id
+(see doc_to_speech.llm_chat): pm/exec/dialogue default to the native Anthropic API
+(`~/.config/keys.json → ANTHROPIC_API_KEY`, uses Anthropic credits); scrub uses Gemini
+via OpenRouter. TTS/files secrets pull live from Railway; --local-tts skips the TTS
+secret, --no-upload skips the files secret, --dry-run skips synth.
 """
 
 from __future__ import annotations

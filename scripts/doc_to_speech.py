@@ -99,8 +99,10 @@ LOCAL_TTS_URL = "http://localhost:8102"
 OXP_FILES_FALLBACK_URL = "https://oxp.files.strongprompt.ai"
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_SCRUB_MODEL = "google/gemini-3.5-flash"  # cheap; matches kb's backup LLM — mechanical cleanup
-DEFAULT_EXEC_MODEL = "anthropic/claude-opus-4.8"  # narrative recap needs judgment — matches dialogue's script model
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_VERSION = "2023-06-01"
+DEFAULT_SCRUB_MODEL = "google/gemini-3.5-flash"  # cheap mechanical cleanup — OpenRouter (no native Gemini)
+DEFAULT_EXEC_MODEL = "claude-opus-4-8"  # native Anthropic (uses Anthropic credits) — matches dialogue's script model
 SCRUB_SEG_CHARS = 6000   # scrub output ≈ input size → cap input to bound output tokens
 EXEC_SEG_CHARS = 24000   # exec recap output ≪ input → input can be larger (most docs → one pass)
 
@@ -159,7 +161,85 @@ def _openrouter_key() -> str:
         key = json.loads(KEYS_JSON.read_text()).get("openrouter")
         if key:
             return key
-    _die("No OpenRouter key for --scrub. Expected ~/.config/keys.json → openrouter.")
+    _die("No OpenRouter key. Expected ~/.config/keys.json → openrouter.")
+
+
+def _anthropic_key() -> str:
+    if KEYS_JSON.exists():
+        key = json.loads(KEYS_JSON.read_text()).get("ANTHROPIC_API_KEY")
+        if key:
+            return key
+    _die("No ANTHROPIC_API_KEY for a native-Anthropic model. Expected ~/.config/keys.json → ANTHROPIC_API_KEY.")
+
+
+# ── One chat-completion call, routed by model id ─────────────────────────────────
+#
+# A BARE model id (no "/", e.g. "claude-opus-4-8") hits the NATIVE Anthropic Messages
+# API and draws on Anthropic usage credits. A router-prefixed id ("google/…",
+# "anthropic/…") goes to OpenRouter. So the Anthropic-authored work (pm/exec narrative,
+# dialogue script) uses credits directly; Gemini (scrub) stays on OpenRouter. The two
+# wire shapes differ — native puts `system` top-level and rejects sampling params on
+# Opus 4.7/4.8, and the text lands in content[].text, not choices[].message.content.
+
+def llm_chat(
+    *, system: str, user: str, model: str, max_tokens: int, temperature: float, label: str,
+) -> str:
+    """Run one chat completion and return the response text. Retries transient/5xx 3×;
+    _die()s on auth, 4xx, or hard failure. Routes native-Anthropic vs OpenRouter by model id."""
+    native = "/" not in model
+    if native:
+        url = ANTHROPIC_API_URL
+        headers = {
+            "x-api-key": _anthropic_key(),
+            "anthropic-version": ANTHROPIC_VERSION,
+            "content-type": "application/json",
+        }
+        # Native Messages API: `system` is a top-level field (NOT a system-role message),
+        # and Opus 4.7/4.8 reject temperature/top_p — omit sampling params entirely.
+        body = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
+    else:
+        url = OPENROUTER_URL
+        headers = {"Authorization": f"Bearer {_openrouter_key()}", "Content-Type": "application/json"}
+        body = {
+            "model": model,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+    provider = "Anthropic" if native else "OpenRouter"
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.post(url, headers=headers, json=body, timeout=180)
+            if r.status_code == 200:
+                data = r.json()
+                if native:
+                    out = "".join(
+                        b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
+                    ).strip()
+                else:
+                    out = data["choices"][0]["message"]["content"].strip()
+                if not out:
+                    _die(f"{label} LLM returned empty content")
+                return out
+            if r.status_code in (401, 403):
+                _die(f"{provider} auth rejected ({r.status_code}): {r.text[:200]}")
+            if r.status_code < 500:
+                _die(f"{label} LLM error {r.status_code} ({provider}): {r.text[:300]}")
+            last_err = f"{r.status_code}: {r.text[:200]}"
+        except (requests.RequestException, KeyError, ValueError) as exc:
+            last_err = str(exc)
+        if attempt < 2:
+            time.sleep(1.0 * (attempt + 1))
+    _die(f"{label} LLM failed after 3 attempts ({provider}): {last_err}")
 
 
 # ── LLM passes: audience-specific rewrites of the speakable prose ─────────────────
@@ -263,46 +343,21 @@ def _segment(text: str, seg_chars: int) -> list[str]:
 
 
 def _llm_pass(
-    text: str, *, system: str, model: str, api_key: str,
+    text: str, *, system: str, model: str,
     seg_chars: int, max_tokens: int, label: str,
 ) -> str:
     """Run one LLM rewrite over the speakable prose, segmenting so each call's output
-    never truncates. `system` selects the transform (content-preserving scrub vs.
-    executive recap); the request shape is identical across audiences — one happy path."""
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    never truncates. `system` selects the transform (content-preserving scrub vs. pm/exec
+    recap); the provider (native Anthropic vs OpenRouter) is chosen by `model` in llm_chat."""
     out_parts: list[str] = []
     segments = _segment(text, seg_chars)
     for i, seg in enumerate(segments, 1):
         if len(segments) > 1:
             _log(f"   {label} segment {i}/{len(segments)}…")
-        body = {
-            "model": model,
-            "temperature": 0,
-            "max_tokens": max_tokens,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": seg},
-            ],
-        }
-        last_err = None
-        for attempt in range(3):
-            try:
-                r = requests.post(OPENROUTER_URL, headers=headers, json=body, timeout=120)
-                if r.status_code == 200:
-                    out = r.json()["choices"][0]["message"]["content"].strip()
-                    if not out:
-                        _die(f"{label} LLM returned empty content")
-                    out_parts.append(out)
-                    break
-                if r.status_code in (401, 403):
-                    _die(f"OpenRouter auth rejected ({r.status_code}): {r.text[:200]}")
-                last_err = f"{r.status_code}: {r.text[:200]}"
-            except (requests.RequestException, KeyError, ValueError) as exc:
-                last_err = str(exc)
-            if attempt < 2:
-                time.sleep(1.0 * (attempt + 1))
-        else:
-            _die(f"{label} LLM failed after 3 attempts: {last_err}")
+        out_parts.append(
+            llm_chat(system=system, user=seg, model=model, max_tokens=max_tokens,
+                     temperature=0.0, label=label)
+        )
     return "\n\n".join(out_parts)
 
 
@@ -853,15 +908,13 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, str, int, int
         _log(f"🎙️  [{doc.name}] {label} pass ({args.narrative_model})…")
         speakable = _llm_pass(
             speakable, system=system, model=args.narrative_model,
-            api_key=_openrouter_key(), seg_chars=EXEC_SEG_CHARS,
-            max_tokens=8000, label=label,
+            seg_chars=EXEC_SEG_CHARS, max_tokens=8000, label=label,
         )
     elif args.scrub:
         _log(f"🧽 [{doc.name}] LLM scrub pass ({args.scrub_model})…")
         speakable = _llm_pass(
             speakable, system=_SCRUB_SYSTEM, model=args.scrub_model,
-            api_key=_openrouter_key(), seg_chars=SCRUB_SEG_CHARS,
-            max_tokens=8000, label="scrub",
+            seg_chars=SCRUB_SEG_CHARS, max_tokens=8000, label="scrub",
         )
 
     # The LLM can emit markdown emphasis (*word*, **bold**), inline code, or link

@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-doc_to_speech — turn a markdown/text document into an MP3 and land it in oxp.files.
+doc_to_speech — the shared TTS engine + one-voice (monologue) render pipeline.
+
+This module is a LIBRARY, not a CLI — the command lives in doc_to_audio.py. It holds
+the engine both render formats share (markdown→speakable normalization, chunking, «…»
+emphasis pacing, pronunciation overrides, per-chunk PCM synth, ffmpeg→MP3, presigned
+oxp.files upload, Railway secret pulls) plus the one-voice pipeline (_normalize_and_chunk,
+_process_doc). dialogue.py adds the two-voice pipeline; doc_to_audio.py drives either.
 
 Pipeline:
   read doc → normalize markdown to *speakable* prose → chunk to ≤ N chars
@@ -94,7 +100,7 @@ OXP_FILES_FALLBACK_URL = "https://oxp.files.strongprompt.ai"
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_SCRUB_MODEL = "google/gemini-3.5-flash"  # cheap; matches kb's backup LLM — mechanical cleanup
-DEFAULT_EXEC_MODEL = "anthropic/claude-opus-4.8"  # exec recap needs judgment — matches doc_to_podcast's script model
+DEFAULT_EXEC_MODEL = "anthropic/claude-opus-4.8"  # narrative recap needs judgment — matches dialogue's script model
 SCRUB_SEG_CHARS = 6000   # scrub output ≈ input size → cap input to bound output tokens
 EXEC_SEG_CHARS = 24000   # exec recap output ≪ input → input can be larger (most docs → one pass)
 
@@ -554,7 +560,7 @@ def resolve_pron_overrides(
     *, no_pron: bool, pron_files: list[Path], ad_hoc: list[str]
 ) -> dict[str, str]:
     """Assemble the active override map for one run — the single happy path shared by
-    doc_to_speech AND doc_to_podcast. Layers, later wins:
+    the one-voice and two-voice pipelines. Layers, later wins:
 
       1. the global default file scripts/pron_overrides.json (skipped if --no-pron),
       2. each --pron-file sidecar in order,
@@ -698,7 +704,7 @@ def chunks_to_parts(
 ) -> list:
     """Turn a chunk list (plain strings, `_SECTION_SENTINEL`s, and `Emph` spans) into the
     ordered parts list `synthesize_ordered` consumes: `_Synth` markers interleaved with
-    silence bytes. Shared by doc_to_speech (one voice per doc) and doc_to_podcast (one voice
+    silence bytes. Shared by the one-voice pipeline (one voice per doc) and dialogue (one voice
     per turn) so emphasis + pacing behave identically in both — the drift-prone seam, made
     structural. `gap` is the normal inter-chunk pause, `section_gap` the longer topic-break;
     an `Emph` chunk gets an `emphasis_gap` beat before it and synthesizes at `emphasis_speed`.
@@ -1044,172 +1050,5 @@ def _process_doc(
     return loc
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────────
-
-def main() -> None:
-    p = argparse.ArgumentParser(
-        prog="doc_to_speech",
-        description="Convert a markdown/text document to an MP3 and land it in oxp.files.",
-    )
-    p.add_argument("docs", nargs="+", type=Path,
-                   help="One or more source documents (markdown or text). Each becomes its own "
-                        "MP3; multiple docs are synthesized concurrently (see --concurrency).")
-    p.add_argument("--folder", default="briefings",
-                   help="oxp.files folder (default: briefings — the private podcast folder).")
-    p.add_argument("--voice", default="af_nova", help="Kokoro voice (must be in TTS allowlist).")
-    p.add_argument("--no-pron", action="store_true",
-                   help="Disable the Lever-2 default-file overrides (scripts/pron_overrides.json). "
-                        "--pron / --pron-file still apply on top.")
-    p.add_argument("--pron", action="append", default=[], metavar="WORD=SPOKEN",
-                   help="Ad-hoc pronunciation override, repeatable (e.g. --pron live=liv). Applied "
-                        "on top of the file overrides; the per-run channel for declaring a homograph "
-                        "whose sense is fixed in this doc but ambiguous globally.")
-    p.add_argument("--pron-file", action="append", default=[], type=Path, metavar="PATH",
-                   help="Additional pron-overrides JSON (same shape as scripts/pron_overrides.json), "
-                        "merged on top of the default file. Use a per-DOMAIN sidecar (e.g. "
-                        "scripts/pron_overrides.clinical.json) for words whose sense is fixed in that "
-                        "doc-set — keeps the shared default file free of bare-homograph overrides.")
-    p.add_argument("--speed", type=float, default=1.0, help="0.5–2.0 (default 1.0).")
-    p.add_argument("--language", default="en-us")
-    p.add_argument("--max-chars", type=int, default=700, help="Per-chunk cap, < TTS's 800.")
-    p.add_argument("--gap", type=float, default=0.35, help="Silence between chunks, seconds.")
-    p.add_argument("--section-gap", type=float, default=1.4,
-                   help="Silence at major topic (heading) boundaries — the 'take a breath' pause, seconds.")
-    p.add_argument("--emphasis-speed", type=float, default=0.9,
-                   help="Speed for «…»-marked emphasis spans (default 0.9 — ~10%% slower for "
-                        "weight). Mark whole clauses/sentences, not single words: Kokoro has no "
-                        "per-word stress, so an isolated word sounds like a broken island, but a "
-                        "full clause keeps its own intonation arc.")
-    p.add_argument("--emphasis-gap", type=float, default=0.25,
-                   help="Silence inserted just before each «…» emphasis span, seconds (default "
-                        "0.25 — an anticipatory beat that makes the span land). 0 disables.")
-    p.add_argument("--max-pause-gap", type=float, default=150.0,
-                   help="Hard cap: max seconds of speech between pauses. A breath is auto-inserted "
-                        "at a sentence boundary to enforce it (0 disables). Default 150 = 2.5 min.")
-    p.add_argument("--loudness", type=float, default=-16.0,
-                   help="Target integrated loudness in LUFS via ffmpeg loudnorm (EBU R128), "
-                        "applied at transcode. Raw Kokoro PCM lands ~-28 LUFS — far too quiet "
-                        "for phone speakers; -16 is the podcast/streaming norm. loudnorm both "
-                        "boosts AND compresses+limits, so it can reach the target without "
-                        "clipping (linear gain can't). 0 disables. Default -16.")
-    p.add_argument("--volume", type=float, default=1.0,
-                   help="Extra linear gain applied AFTER loudness normalization (1.25 = +25%%). "
-                        "A soft limiter follows so it can't clip. Default 1.0 (no extra trim); "
-                        "normally leave this alone and tune --loudness instead.")
-    p.add_argument("--bitrate", default="64k", help="MP3 bitrate (default 64k, good for speech).")
-    p.add_argument("--concurrency", type=int, default=TTS_CONCURRENCY_DEFAULT,
-                   help=f"Max concurrent synth requests in flight (default {TTS_CONCURRENCY_DEFAULT}, "
-                        "matching the TTS service's TTS_MAX_CONCURRENCY). With ONE doc this is "
-                        "chunk-level parallelism; with MANY docs it's how many synth in parallel "
-                        "(each doc's chunks then go sequentially). 1 = fully sequential.")
-    p.add_argument("--name", help="Output filename override (single doc only; without needing .mp3).")
-    p.add_argument("--title", help="ID3 title (single doc only; default: doc's first H1, else filename).")
-    p.add_argument("--narrative", choices=["exec", "pm"], default=None,
-                   help="Distill the source(s) into a NARRATIVE script (LLM) instead of reading "
-                        "them. 'exec': tight recap for an impatient, non-technical business "
-                        "audience (model/pricing/positioning, no jargon). 'pm': a product-"
-                        "doctrine briefing for the product manager — synthesizes across the "
-                        "docs, surfaces design decisions, tradeoffs, and open questions. "
-                        "Multi-doc capable; auto-suffixes the filename '-exec'/'-pm'. Mutually "
-                        "exclusive with --scrub (narrative is authored fresh — nothing to scrub).")
-    p.add_argument("--scrub", action="store_true",
-                   help="(reading mode only) LLM cleanup pass: strip file paths/names, "
-                        "code/CLI fragments, URLs, and cross-ref scaffolding so you hear only "
-                        "the substance, WITHOUT summarizing. (Frontmatter + markdown are already "
-                        "stripped deterministically; this is the polish pass. NOT PHI scrubbing — "
-                        "that's `kb scrub`. Invalid with --narrative — there is nothing to scrub.)")
-    p.add_argument("--scrub-model", default=DEFAULT_SCRUB_MODEL,
-                   help=f"OpenRouter model for the --scrub + pronunciation-normalize passes (default: {DEFAULT_SCRUB_MODEL}).")
-    p.add_argument("--narrative-model", default=DEFAULT_EXEC_MODEL,
-                   help=f"OpenRouter model for the --narrative exec/pm distillation (default: {DEFAULT_EXEC_MODEL}).")
-    p.add_argument("--local-tts", action="store_true", help="Use localhost:8102 (no token).")
-    p.add_argument("--tts-url", help="Override the TTS base URL entirely.")
-    p.add_argument("--warmup-timeout", type=float, default=300.0,
-                   help="Seconds to wait for the TTS service to wake from serverless sleep before "
-                        "synth (polls /health; cold start ~30–40s). 0 = skip the warmup poll.")
-    p.add_argument("--email", default=os.environ.get("OXP_FILES_EMAIL", "doc-to-speech@oxp.files"),
-                   help="sub claim for the oxp.files bearer (shown in its activity log).")
-    p.add_argument("--save-script", type=Path,
-                   help="Write the full distilled/cleaned spoken text (the transcript of what "
-                        "gets voiced) to this path. Multi-doc infixes the stem. Pairs with "
-                        "--dry-run to get the script without synth.")
-    p.add_argument("--out", type=Path, help="Also write the MP3 to this local path (single doc only).")
-    p.add_argument("--no-upload", action="store_true", help="Skip the oxp.files upload.")
-    p.add_argument("--no-transcript", action="store_true",
-                   help="Skip the renderable .md transcript that is uploaded beside the MP3 by "
-                        "default (read mode → the source markdown with headers; narrative mode → "
-                        "the distilled script). On by default — the transcript always rides with "
-                        "the audio in oxp.files.")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Normalize + chunk only; print a preview and exit. No network.")
-    args = p.parse_args()
-
-    for doc in args.docs:
-        if not doc.exists():
-            _die(f"Document not found: {doc}")
-    if not (0.5 <= args.speed <= 2.0):
-        _die("--speed must be between 0.5 and 2.0")
-    if not (0.5 <= args.emphasis_speed <= 2.0):
-        _die("--emphasis-speed must be between 0.5 and 2.0")
-    if args.narrative and args.scrub:
-        _die("--scrub is invalid with --narrative — narrative content is authored fresh, "
-             "there is nothing to scrub.")
-    multi = len(args.docs) > 1
-    if multi and (args.out or args.name or args.title):
-        _die("--out/--name/--title apply to a single document; omit them with multiple docs "
-             "(each is auto-named from its filename / first H1).")
-    if multi and args.no_upload:
-        _die("--no-upload needs a local --out path, which is single-doc only; "
-             "multiple docs must upload to oxp.files.")
-
-    if args.dry_run:
-        for doc in args.docs:
-            chunks, title, _transcript_md, raw_len, total_chars = _normalize_and_chunk(doc, args)
-            _log(f"📄 {doc.name}: {raw_len} raw → {total_chars} speakable → {len(chunks)} chunks")
-            _log(f"   title: {title!r}")
-            preview = "\n\n".join(
-                f"[{i+1}/{len(chunks)}]{' «slow»' if isinstance(c, Emph) else ''} {c}"
-                for i, c in enumerate(chunks[:3])
-            )
-            print(preview)
-            if len(chunks) > 3:
-                print(f"\n… (+{len(chunks) - 3} more chunks)")
-        return
-
-    # Resolve the shared endpoint + secrets ONCE (token reused across all docs).
-    tts_url, tts_token = _resolve_tts_endpoint(args)
-    # Wake the service from serverless sleep (and gate synth on readiness) before any
-    # synth request fires — once per run, shared across all docs.
-    _wait_for_tts_ready(tts_url, timeout=args.warmup_timeout)
-    files_secret, base_url = (None, None)
-    if not args.no_upload:
-        files_secret, base_url = _resolve_files_target(args)
-
-    if multi:
-        # Doc-level parallelism: run up to --concurrency docs at once, chunks sequential
-        # within each, so total synth requests in flight ≈ --concurrency (the server's cap).
-        workers = max(1, min(args.concurrency, len(args.docs)))
-        _log(f"🎛️  {len(args.docs)} docs, {workers} synthesizing in parallel…")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = [
-                ex.submit(
-                    _process_doc, doc, args, tts_url=tts_url, tts_token=tts_token,
-                    files_secret=files_secret, base_url=base_url, chunk_concurrency=1,
-                )
-                for doc in args.docs
-            ]
-            for fut in concurrent.futures.as_completed(futs):
-                fut.result()  # _die() in a worker propagates here and exits
-    else:
-        # Single doc: --concurrency is chunk-level parallelism.
-        _process_doc(
-            args.docs[0], args, tts_url=tts_url, tts_token=tts_token,
-            files_secret=files_secret, base_url=base_url, chunk_concurrency=args.concurrency,
-        )
-
-    if base_url:
-        _log(f"   browse: {base_url}/?folder={args.folder}")
-
-
-if __name__ == "__main__":
-    main()
+# The CLI lives in doc_to_audio.py. This module is the shared TTS engine +
+# monologue (one-voice) render pipeline, imported by doc_to_audio and dialogue.

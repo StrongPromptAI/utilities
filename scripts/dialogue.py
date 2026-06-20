@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-doc_to_podcast — turn one or more docs into a two-voice (male + female) podcast MP3
-and land it in oxp.files.
+dialogue — the two-voice (male + female) podcast render pipeline.
+
+This module is a LIBRARY, not a CLI — the command lives in doc_to_audio.py (--format
+dialogue). It builds on doc_to_speech (the shared engine): an LLM rewrites the source
+docs into a two-host script of alternating turns, each host pinned to one Kokoro voice,
+then `process_dialogue` renders one episode (synth → MP3 → upload + transcript), the
+two-voice counterpart of doc_to_speech._process_doc.
 
 Built on doc_to_speech: same Railway secret pulls, same per-chunk PCM synthesis,
 same ffmpeg→MP3 transcode, same presigned oxp.files upload. The net-new piece is
@@ -20,41 +25,20 @@ Pipeline:
   → concatenate (small gap within a turn, larger gap between speakers)
   → ffmpeg → MP3 → upload to oxp.files via a presigned PUT.
 
-Usage:
-  uv run python scripts/doc_to_podcast.py DOC.md [DOC2.md ...] [options]
-
-  # 3-minute two-host episode from several docs, uploaded to the briefings folder:
-  uv run python scripts/doc_to_podcast.py a.md b.md --minutes 3 --brief "..." \
-      --name episode.mp3
-
-  # See the generated script only — no synthesis, no upload:
-  uv run python scripts/doc_to_podcast.py a.md --dry-run
-
-  # Synthesize against a locally-running TTS (services/tts on :8102, auth-off in
-  # dev — start it with TTS_VOICE_ALLOWLIST including BOTH voices):
-  uv run python scripts/doc_to_podcast.py a.md --local-tts --no-upload --out /tmp/ep.mp3
-
-  # Re-run synthesis from a saved script without re-calling the LLM:
-  uv run python scripts/doc_to_podcast.py --script-in script.json --local-tts ...
-
-Auth (see symlink_docs/registries/AUTH_REGISTRY.md scenarios 4 + 5):
-  • TTS prod   — HS256 JWT, aud="tts", signed with the shared-svcs JWT_SECRET.
-  • oxp.files  — HS256 session bearer {sub,iat,exp}, signed with the files JWT_SECRET.
-  • script LLM — OpenRouter key from ~/.config/keys.json.
-  Secrets are pulled live (Railway GraphQL); nothing is written to disk. --local-tts
-  skips the TTS secret; --no-upload skips the files secret; --script-in skips the LLM.
+Entry point: `doc_to_audio.py --format dialogue` (the CLI). It resolves the TTS
+endpoint + secrets once, then calls `process_dialogue` per episode. The public surface
+is `build_or_load_script` (script from --script-in or the LLM) and `process_dialogue`
+(render one episode → MP3 → oxp.files + transcript). Auth + flag semantics live in
+doc_to_audio.py.
 
 NOTE: the TTS service enforces a voice allowlist (TTS_VOICE_ALLOWLIST) in ALL modes,
-not just prod. Both --female-voice and --male-voice must be in it, or synth 400s.
-Prod default is "af_heart" only — add the male voice there, or use --local-tts with
-the allowlist widened locally.
+not just prod. Both --female-voice and --male-voice must be in it, or synth 400s. The
+prod default allowlist is "af_heart,af_nova,am_adam" — the af_nova/am_adam pair works.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-import os
 import re
 import sys
 import time
@@ -62,28 +46,19 @@ from pathlib import Path
 
 import requests
 
-# scripts/ is sys.path[0] when run as `python scripts/doc_to_podcast.py`, so the
-# sibling module imports directly. One happy path: all the TTS/upload/secret
-# plumbing lives in doc_to_speech and is reused verbatim here.
+# scripts/ is sys.path[0] when run as `python scripts/doc_to_audio.py`, so the sibling
+# module imports directly. One happy path: the shared TTS/upload/secret/chunking engine
+# lives in doc_to_speech; doc_to_audio resolves the endpoint + secrets and passes them in.
 from doc_to_speech import (
     KOKORO_SAMPLE_RATE,
-    LOCAL_TTS_URL,
     OPENROUTER_URL,
-    OXP_FILES_FALLBACK_URL,
-    OXP_KB,
-    PROD_TTS_URL,
-    SHARED_SVCS,
-    TTS_CONCURRENCY_DEFAULT,
     _die,
-    _hs256_jwt,
     _log,
     _openrouter_key,
-    _railway_vars,
     _safe_mp3_name,
     _transcript_name,
     _Synth,
     _silence,
-    _wait_for_tts_ready,
     apply_pron_overrides,
     chunks_to_parts,
     normalize_markdown,
@@ -249,150 +224,57 @@ def _dialogue_markdown(data: dict, title: str) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────────
+def _slug(title: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower() or "podcast"
 
-def main() -> None:
-    p = argparse.ArgumentParser(
-        prog="doc_to_podcast",
-        description="Turn one or more docs into a two-voice (male + female) podcast MP3, landed in oxp.files.",
-    )
-    p.add_argument("docs", nargs="*", type=Path, help="Source document(s): markdown or text.")
-    p.add_argument("--folder", default="briefings", help="oxp.files folder (default: briefings).")
 
-    # Hosts + voices.
-    p.add_argument("--female-name", default="Maya", help="Female host name (the LLM uses it verbatim).")
-    p.add_argument("--male-name", default="Ethan", help="Male host name.")
-    p.add_argument("--female-voice", default="af_nova", help="Kokoro voice for the female host.")
-    p.add_argument("--male-voice", default="am_adam", help="Kokoro voice for the male host.")
-    p.add_argument("--speed", type=float, default=1.0, help="0.5–2.0 (default 1.0).")
-    p.add_argument("--language", default="en-us")
+# ── Episode pipeline (the dialogue counterpart of doc_to_speech._process_doc) ─────
 
-    # Script generation.
-    p.add_argument("--minutes", type=float, default=3.0, help="Target spoken length (default 3).")
-    p.add_argument("--brief", default=DEFAULT_BRIEF, help="Editorial brief: the angle/tone for the episode.")
-    p.add_argument("--model", default=DEFAULT_SCRIPT_MODEL, help=f"OpenRouter model (default: {DEFAULT_SCRIPT_MODEL}).")
-    p.add_argument("--script-in", type=Path, help="Load a pre-made script JSON; skip the LLM entirely.")
-    p.add_argument("--script-out", type=Path, help="Save the generated script JSON here.")
-
-    # Synthesis / packaging.
-    p.add_argument("--max-chars", type=int, default=700, help="Per-synth cap, < TTS's 800.")
-    p.add_argument("--no-pron", action="store_true",
-                   help="Disable the Lever-2 pronunciation overrides (scripts/pron_overrides.json).")
-    p.add_argument("--pron", action="append", default=[], metavar="WORD=SPOKEN",
-                   help="Ad-hoc pronunciation override, repeatable (e.g. --pron irrevocable=irrevohcable).")
-    p.add_argument("--pron-file", action="append", default=[], type=Path, metavar="PATH",
-                   help="Additional pron-overrides JSON merged on top of the default file "
-                        "(per-DOMAIN sidecar; see scripts/pron_overrides.clinical.json).")
-    p.add_argument("--turn-gap", type=float, default=0.45, help="Silence between speakers, seconds.")
-    p.add_argument("--sub-gap", type=float, default=0.15, help="Silence between sub-chunks of one turn.")
-    p.add_argument("--emphasis-speed", type=float, default=0.9,
-                   help="Speed for «…»-marked emphasis spans (default 0.9 — ~10%% slower for "
-                        "weight). The script LLM marks whole load-bearing clauses; never single words.")
-    p.add_argument("--emphasis-gap", type=float, default=0.25,
-                   help="Silence just before each «…» emphasis span, seconds (default 0.25). 0 disables.")
-    p.add_argument("--concurrency", type=int, default=TTS_CONCURRENCY_DEFAULT,
-                   help=f"Parallel synth requests in flight (default {TTS_CONCURRENCY_DEFAULT}, "
-                        "matching the TTS service's TTS_MAX_CONCURRENCY). Higher just queues "
-                        "server-side; 1 = sequential.")
-    p.add_argument("--bitrate", default="64k", help="MP3 bitrate (default 64k, good for speech).")
-    p.add_argument("--loudness", type=float, default=-16.0,
-                   help="Target integrated loudness in LUFS via ffmpeg loudnorm (EBU R128), "
-                        "applied at transcode. Raw Kokoro PCM lands ~-28 LUFS — too quiet for "
-                        "phone speakers; -16 is the podcast/streaming norm. loudnorm boosts AND "
-                        "compresses+limits, so it hits the target without clipping. 0 disables. "
-                        "Default -16.")
-    p.add_argument("--volume", type=float, default=1.0,
-                   help="Extra linear gain applied AFTER loudness normalization (1.25 = +25%%). "
-                        "Default 1.0 (no extra trim); normally tune --loudness instead.")
-    p.add_argument("--name", help="Output filename (without needing .mp3).")
-    p.add_argument("--title", help="ID3 title (default: the script's title).")
-
-    # TTS endpoint.
-    p.add_argument("--local-tts", action="store_true", help="Use localhost:8102 (no token).")
-    p.add_argument("--tts-url", help="Override the TTS base URL entirely.")
-    p.add_argument("--warmup-timeout", type=float, default=300.0,
-                   help="Seconds to wait for the TTS service to wake from serverless sleep before "
-                        "synth (polls /health; cold start ~30–40s). 0 = skip the warmup poll.")
-
-    # Output.
-    p.add_argument("--email", default=os.environ.get("OXP_FILES_EMAIL", "doc-to-podcast@oxp.files"),
-                   help="sub claim for the oxp.files bearer (shown in its activity log).")
-    p.add_argument("--out", type=Path, help="Also write the MP3 to this local path.")
-    p.add_argument("--no-upload", action="store_true", help="Skip the oxp.files upload.")
-    p.add_argument("--no-transcript", action="store_true",
-                   help="Skip the renderable .md transcript (the dialogue, with speaker labels) "
-                        "uploaded beside the MP3 by default.")
-    p.add_argument("--dry-run", action="store_true", help="Generate + print the script; no synth, no upload.")
-    args = p.parse_args()
-
-    if not (0.5 <= args.speed <= 2.0):
-        _die("--speed must be between 0.5 and 2.0")
-    if not (0.5 <= args.emphasis_speed <= 2.0):
-        _die("--emphasis-speed must be between 0.5 and 2.0")
-    if not args.script_in and not args.docs:
-        _die("Provide source doc(s), or --script-in to reuse a saved script.")
-
-    # 1) Get the dialogue script — from a saved file or by generating one.
+def build_or_load_script(docs: list[Path], args) -> dict:
+    """Get the dialogue script for one episode — from a saved --script-in JSON, or by
+    generating it from `docs` via the LLM (then saving to --script-out if asked). Shared by
+    the dry-run preview and the full render so the LLM call is described in exactly one place."""
     if args.script_in:
         if not args.script_in.exists():
             _die(f"--script-in not found: {args.script_in}")
         script = _parse_script_json(args.script_in.read_text(encoding="utf-8"))
         _log(f"📜 loaded script from {args.script_in} ({len(script['turns'])} turns)")
     else:
-        source = _build_source(args.docs)
-        _log(f"📄 {len(args.docs)} doc(s) → {len(source)} source chars → generating script ({args.model})…")
+        source = _build_source(docs)
+        _log(f"📄 {len(docs)} doc(s) → {len(source)} source chars → generating script ({args.model})…")
         script = generate_dialogue(
             source, model=args.model, api_key=_openrouter_key(),
             female=args.female_name, male=args.male_name, minutes=args.minutes, brief=args.brief,
         )
-        word_count = sum(len(str(t["text"]).split()) for t in script["turns"])
-        _log(f"🎬 script: {script.get('title')!r} — {len(script['turns'])} turns, ~{word_count} words")
-
+        words = sum(len(str(t["text"]).split()) for t in script["turns"])
+        _log(f"🎬 script: {script.get('title')!r} — {len(script['turns'])} turns, ~{words} words")
     if args.script_out:
         args.script_out.write_text(json.dumps(script, indent=2, ensure_ascii=False), encoding="utf-8")
         _log(f"💾 wrote script → {args.script_out}")
+    return script
 
-    if args.dry_run:
-        print(_script_preview(script))
-        return
 
-    # 2) Resolve TTS endpoint + token.
-    if args.tts_url:
-        tts_url, tts_token = args.tts_url.rstrip("/"), None
-    elif args.local_tts:
-        tts_url, tts_token = LOCAL_TTS_URL, None
-    else:
-        tts_url = PROD_TTS_URL
-        _log("🔑 pulling shared-svcs JWT_SECRET from Railway…")
-        secret = _railway_vars(
-            project=SHARED_SVCS["project"], env=SHARED_SVCS["env"], service=SHARED_SVCS["tts_service"]
-        ).get("JWT_SECRET")
-        if not secret:
-            _die("JWT_SECRET not found on the shared-svcs TTS service.")
-        tts_token = _hs256_jwt({"iss": "doc-to-podcast", "aud": "tts", "exp": int(time.time()) + 1800}, secret)
+def process_dialogue(
+    docs: list[Path], args, *, tts_url: str, tts_token: str | None,
+    files_secret: str | None, base_url: str | None,
+) -> str | None:
+    """Full two-voice pipeline for ONE episode: script → per-turn synth (one Kokoro voice
+    per speaker, «…» emphasis, pron overrides) → MP3 → upload + dialogue transcript. Endpoint
+    and secrets are resolved once by the caller and passed in (mirrors _process_doc), so a
+    series of episodes shares one token. Returns the oxp.files location, or None on --no-upload."""
+    script = build_or_load_script(docs, args)
 
-    # Wake the service from serverless sleep (and gate synth on readiness) before synth.
-    _wait_for_tts_ready(tts_url, timeout=args.warmup_timeout)
-
-    # Pronunciation overrides: default file (unless --no-pron) + --pron-file sidecars + ad-hoc --pron.
-    overrides = resolve_pron_overrides(
-        no_pron=args.no_pron, pron_files=args.pron_file, ad_hoc=args.pron
-    )
+    overrides = resolve_pron_overrides(no_pron=args.no_pron, pron_files=args.pron_file, ad_hoc=args.pron)
     if overrides:
         _log(f"🗣️  {len(overrides)} pronunciation override(s) active: {', '.join(sorted(overrides))}")
 
-    # 3) Synthesize each turn with its host's voice; concatenate with gaps.
     turn_gap = _silence(args.turn_gap)
     prev_voice: str | None = None
     turns = [t for t in script["turns"] if str(t.get("text", "")).strip()]
-
-    # Build the ordered parts list across all turns (each turn's sub-chunks separated
-    # by sub-gaps, a turn-gap between speakers), then resolve every synth marker
-    # concurrently while preserving order.
     parts: list = []
     for i, turn in enumerate(turns, 1):
         speaker = str(turn["speaker"]).strip()
-        text = strip_llm_markup(str(turn["text"]).strip())   # asterisk fix (parity)
+        text = strip_llm_markup(str(turn["text"]).strip())            # asterisk fix
         voice = _voice_for(
             speaker, female=args.female_name, male=args.male_name,
             female_voice=args.female_voice, male_voice=args.male_voice, prev_voice=prev_voice,
@@ -400,9 +282,8 @@ def main() -> None:
         prev_voice = voice
         if overrides:
             text = apply_pron_overrides(text, overrides)
-        subs = split_emphasis_chunks(text, args.max_chars)   # «…» emphasis (parity)
+        subs = split_emphasis_chunks(text, args.max_chars)            # «…» emphasis
         _log(f"🎙️  [{i}/{len(turns)}] {speaker} ({voice}) — {len(text)} chars, {len(subs)} piece(s)")
-        # One voice per turn; sub_gap between this turn's pieces, emphasis spans slowed.
         parts.extend(chunks_to_parts(
             subs, voice, gap=args.sub_gap, section_gap=args.sub_gap,
             emphasis_gap=args.emphasis_gap, emphasis_speed=args.emphasis_speed,
@@ -420,38 +301,25 @@ def main() -> None:
     _log(f"🎚️  {seconds / 60:.1f} min of audio → MP3 ({args.bitrate})…")
 
     title = args.title or script.get("title") or "Podcast"
-    mp3 = pcm_to_mp3(pcm, title=title, bitrate=args.bitrate, volume=args.volume,
-                     loudness=args.loudness)
+    mp3 = pcm_to_mp3(pcm, title=title, bitrate=args.bitrate, volume=args.volume, loudness=args.loudness)
     _log(f"💿 MP3: {len(mp3) / 1_000_000:.1f} MB")
 
     if args.out:
         args.out.write_bytes(mp3)
         _log(f"💾 wrote {args.out}")
-
     if args.no_upload:
         if not args.out:
             _die("--no-upload given but no --out path — nothing would be saved.")
-        return
+        return None
 
-    # 4) Upload to oxp.files.
     filename = _safe_mp3_name(Path(args.name or _slug(title)), args.name)
-    _log("🔑 pulling oxp-files JWT_SECRET + PUBLIC_BASE_URL from Railway…")
-    files_vars = _railway_vars(
-        project=OXP_KB["project"], env=OXP_KB["env"], service=OXP_KB["files_service"]
-    )
-    files_secret = files_vars.get("JWT_SECRET")
-    if not files_secret:
-        _die("JWT_SECRET not found on the oxp-files service.")
-    base_url = (files_vars.get("PUBLIC_BASE_URL") or OXP_FILES_FALLBACK_URL).rstrip("/")
-
     _log(f"⬆️  uploading to {base_url} ({args.folder}/{filename})…")
     loc = upload_to_oxp(
         mp3, filename=filename, folder=args.folder, base_url=base_url,
         secret=files_secret, email=args.email,
     )
-    _log(f"✅ landed in oxp.files: {loc}")
+    _log(f"✅ {filename} → oxp.files: {loc}")
 
-    # Always land a renderable .md transcript beside the audio (poka-yoke: built in).
     if not args.no_transcript:
         tname = _transcript_name(filename)
         upload_to_oxp(
@@ -460,12 +328,5 @@ def main() -> None:
             content_type="text/markdown; charset=utf-8",
         )
         _log(f"📝 transcript: {args.folder}/{tname}")
-    _log(f"   browse: {base_url}/?folder={args.folder}")
+    return loc
 
-
-def _slug(title: str) -> str:
-    return re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").lower() or "podcast"
-
-
-if __name__ == "__main__":
-    main()

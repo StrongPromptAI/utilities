@@ -74,8 +74,9 @@ def main() -> None:
     up_hdr = {"Authorization": f"Bearer {up_tok}"}
 
     def move_one(folder: str, slug: str, name: str, size: int) -> bool:
-        """presign+download from oxp.files → PUT to podcast (idempotent), with retries.
-        Returns True iff the server-reported byte count matches the source."""
+        """presign on oxp.files → tell the podcast service to PULL that URL itself
+        (/import). Bytes never touch this client's slow uplink. Idempotent; retries.
+        Returns True iff the server-reported byte count matches the source size."""
         last = ""
         for attempt in range(4):
             try:
@@ -83,14 +84,14 @@ def main() -> None:
                                   params={"folder": folder}, headers=oxp_hdr, timeout=(15, 60))
                 if pr.status_code != 200:
                     last = f"presign {pr.status_code}"; continue
-                data = requests.get(pr.json()["url"], timeout=(15, 180)).content
-                ur = requests.put(f"{PODCAST_BASE}/upload/{slug}/{name}",
-                                  headers=up_hdr, data=data, timeout=(30, 600))
-                if ur.status_code != 200:
-                    last = f"upload {ur.status_code} {ur.text[:80]}"; continue
-                wrote = ur.json().get("bytes", -1)
-                ok = (wrote == len(data)) and (not size or len(data) == size)
-                print(f"  {'✓' if ok else '✗'} {name}: src={size:,} dl={len(data):,} server={wrote:,}"
+                src_url = pr.json()["url"]
+                ir = requests.post(f"{PODCAST_BASE}/import/{slug}/{name}",
+                                   headers=up_hdr, json={"source_url": src_url}, timeout=(30, 600))
+                if ir.status_code != 200:
+                    last = f"import {ir.status_code} {ir.text[:80]}"; continue
+                wrote = ir.json().get("bytes", -1)
+                ok = wrote == size if size else wrote > 0
+                print(f"  {'✓' if ok else '✗'} {name}: src={size:,} server={wrote:,}"
                       + ("" if ok else "  (byte mismatch)"))
                 return ok
             except requests.RequestException as exc:

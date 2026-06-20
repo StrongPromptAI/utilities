@@ -5,11 +5,11 @@ dialogue — the two-voice (male + female) podcast render pipeline.
 This module is a LIBRARY, not a CLI — the command lives in doc_to_audio.py (--format
 dialogue). It builds on doc_to_speech (the shared engine): an LLM rewrites the source
 docs into a two-host script of alternating turns, each host pinned to one Kokoro voice,
-then `process_dialogue` renders one episode (synth → MP3 → upload + transcript), the
-two-voice counterpart of doc_to_speech._process_doc.
+then `process_dialogue` renders one episode (synth → MP3 → publish via the shared
+_publish_episode), the two-voice counterpart of doc_to_speech._process_doc.
 
 Built on doc_to_speech: same Railway secret pulls, same per-chunk PCM synthesis,
-same ffmpeg→MP3 transcode, same presigned oxp.files upload. The net-new piece is
+same ffmpeg→MP3 transcode, same podcast-server publish. The net-new piece is
 *dialogue* — an LLM rewrites the source docs into a two-host script of alternating
 turns, and each host is pinned to one Kokoro voice.
 
@@ -23,12 +23,12 @@ Pipeline:
   → per turn: pick voice by speaker; if a turn exceeds the TTS 800-char cap,
     sub-chunk it (same voice) → synth each piece as raw 24 kHz mono PCM
   → concatenate (small gap within a turn, larger gap between speakers)
-  → ffmpeg → MP3 → upload to oxp.files via a presigned PUT.
+  → ffmpeg → MP3 → publish to the podcast show (PUT onto its volume).
 
 Entry point: `doc_to_audio.py --format dialogue` (the CLI). It resolves the TTS
 endpoint + secrets once, then calls `process_dialogue` per episode. The public surface
 is `build_or_load_script` (script from --script-in or the LLM) and `process_dialogue`
-(render one episode → MP3 → oxp.files + transcript). Auth + flag semantics live in
+(render one episode → MP3 → podcast show + description). Auth + flag semantics live in
 doc_to_audio.py.
 
 NOTE: the TTS service enforces a voice allowlist (TTS_VOICE_ALLOWLIST) in ALL modes,
@@ -52,8 +52,8 @@ from doc_to_speech import (
     _die,
     _log,
     llm_chat,
+    _publish_episode,
     _safe_mp3_name,
-    _transcript_name,
     _Synth,
     _silence,
     apply_pron_overrides,
@@ -64,7 +64,6 @@ from doc_to_speech import (
     split_emphasis_chunks,
     strip_llm_markup,
     synthesize_ordered,
-    upload_to_oxp,
 )
 
 DEFAULT_SCRIPT_MODEL = "claude-sonnet-4-6"  # native Anthropic (Anthropic credits); a writing format (opt-in)
@@ -186,7 +185,7 @@ def _script_preview(data: dict) -> str:
 
 def _dialogue_markdown(data: dict, title: str) -> str:
     """Render the two-host dialogue as a renderable markdown transcript — a title heading
-    and one bold speaker label per turn. Lands beside the MP3 in oxp.files."""
+    and one bold speaker label per turn. Feeds the episode-description pass."""
     lines = [f"# {title}", ""]
     for turn in data["turns"]:
         text = str(turn["text"]).strip().replace("«", "").replace("»", "")  # drop synth marks
@@ -229,12 +228,12 @@ def build_or_load_script(docs: list[Path], args) -> dict:
 
 def process_dialogue(
     docs: list[Path], args, *, tts_url: str, tts_token: str | None,
-    files_secret: str | None, base_url: str | None,
+    secret: str | None, base_url: str | None,
 ) -> str | None:
     """Full two-voice pipeline for ONE episode: script → per-turn synth (one Kokoro voice
-    per speaker, «…» emphasis, pron overrides) → MP3 → upload + dialogue transcript. Endpoint
+    per speaker, «…» emphasis, pron overrides) → MP3 → publish to the podcast show. Endpoint
     and secrets are resolved once by the caller and passed in (mirrors _process_doc), so a
-    series of episodes shares one token. Returns the oxp.files location, or None on --no-upload."""
+    series of episodes shares one token. Returns the podcast location, or None on --no-upload."""
     script = build_or_load_script(docs, args)
 
     overrides = resolve_pron_overrides(no_pron=args.no_pron, pron_files=args.pron_file, ad_hoc=args.pron)
@@ -286,20 +285,9 @@ def process_dialogue(
         return None
 
     filename = _safe_mp3_name(Path(args.name or _slug(title)), args.name)
-    _log(f"⬆️  uploading to {base_url} ({args.folder}/{filename})…")
-    loc = upload_to_oxp(
-        mp3, filename=filename, folder=args.folder, base_url=base_url,
-        secret=files_secret, email=args.email,
+    return _publish_episode(
+        mp3=mp3, description_source=_dialogue_markdown(script, title), doc_name=filename,
+        filename=filename, args=args, secret=secret, base_url=base_url,
+        duration_seconds=seconds,
     )
-    _log(f"✅ {filename} → oxp.files: {loc}")
-
-    if not args.no_transcript:
-        tname = _transcript_name(filename)
-        upload_to_oxp(
-            _dialogue_markdown(script, title).encode("utf-8"), filename=tname,
-            folder=args.folder, base_url=base_url, secret=files_secret, email=args.email,
-            content_type="text/markdown; charset=utf-8",
-        )
-        _log(f"📝 transcript: {args.folder}/{tname}")
-    return loc
 

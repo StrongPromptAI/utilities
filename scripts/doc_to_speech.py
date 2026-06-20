@@ -4,20 +4,21 @@ doc_to_speech — the shared TTS engine + one-voice (monologue) render pipeline.
 
 This module is a LIBRARY, not a CLI — the command lives in doc_to_audio.py. It holds
 the engine both render formats share (markdown→speakable normalization, chunking, «…»
-emphasis pacing, pronunciation overrides, per-chunk PCM synth, ffmpeg→MP3, presigned
-oxp.files upload, Railway secret pulls) plus the one-voice pipeline (_normalize_and_chunk,
-_process_doc). dialogue.py adds the two-voice pipeline; doc_to_audio.py drives either.
+emphasis pacing, pronunciation overrides, per-chunk PCM synth, ffmpeg→MP3, podcast-server
+publish + episode-description pass, Railway secret pulls) plus the one-voice pipeline
+(_normalize_and_chunk, _process_doc, _publish_episode). dialogue.py adds the two-voice
+pipeline; doc_to_audio.py drives either.
 
 Pipeline:
   read doc → normalize markdown to *speakable* prose → chunk to ≤ N chars
   → synthesize each chunk via the shared-svcs TTS service (Kokoro) as raw PCM
   → concatenate (with a short pause between chunks) → ffmpeg transcode to MP3
-  → upload to the oxp.files Tigris bucket via a presigned PUT.
+  → PUT to a podcast show's volume (services/podcast) + a brief description sidecar.
 
 This is an on-demand driver — run it per document; nothing is deployed. It is the
 first production consumer of services/tts.
 
-Why each step exists (the gaps between the raw TTS service and "MP3 in oxp.files"):
+Why each step exists (the gaps between the raw TTS service and "MP3 in the feed"):
   • TTS emits WAV/PCM, never MP3            → ffmpeg transcodes (MP3 is ~12× smaller
                                               and plays on every car head unit).
   • TTS caps input at 800 chars/request     → chunk sentence-aware, synth, concat.
@@ -49,14 +50,15 @@ Usage:
   # Use a locally-running TTS (services/tts on :8102, auth-off in dev):
   uv run python scripts/doc_to_speech.py PLAN.md --local-tts
 
-  # Produce a local MP3 only, skip the oxp.files upload:
+  # Produce a local MP3 only, skip the podcast publish:
   uv run python scripts/doc_to_speech.py PLAN.md --no-upload --out /tmp/doc.mp3
 
-Auth (see symlink_docs/registries/AUTH_REGISTRY.md scenarios 4 + 5):
-  • TTS prod   — HS256 JWT, aud="tts", signed with the shared-svcs JWT_SECRET.
-  • oxp.files  — HS256 session bearer {sub,iat,exp}, signed with the files JWT_SECRET.
+Auth:
+  • TTS prod  — HS256 JWT, aud="tts", signed with the shared-svcs JWT_SECRET.
+  • podcast   — HS256 bearer, aud="podcast-upload", signed with the show server's
+                PODCAST_UPLOAD_SECRET (services/podcast/app.py _verify_upload).
   Both secrets are pulled live from Railway (Railway GraphQL API); nothing is written
-  to disk. --local-tts skips the TTS secret; --no-upload skips the files secret.
+  to disk. --local-tts skips the TTS secret; --no-upload skips the podcast secret.
 """
 
 from __future__ import annotations
@@ -88,15 +90,19 @@ SHARED_SVCS = {
     "env": "1ea8ab63-10af-4b83-b562-68a4a5c4f670",
     "tts_service": "02ff6d94-a49c-464e-b1e0-44f6933d5209",
 }
-OXP_KB = {
-    "project": "96a6d9dd-b680-4821-bee6-ed850a19074b",
-    "env": "30bf77ef-ec92-472d-b92a-93e3806bd7e4",
-    "files_service": "56aebab1-320e-48d2-9053-44cacc82c241",
+# StrongPrompt podcast server (services/podcast) — the synth-publish target. A show is a
+# slug; the MP3 + a `<base>.md` description sidecar PUT straight onto its volume. This is the
+# sole sink: oxp.files was retired as a doc_to_audio target at cutover (its podcast content
+# migrated to the `tech` show; oxp.files is now OrthoXpress-client-only).
+PODCAST = {
+    "project": "f4451750-12a8-4cff-9bc8-1796a9c15508",
+    "env": "844d5562-ac1d-4a22-b249-986be610a0a5",
+    "service": "5a1fc29d-3556-4fd3-b039-dd9cb0d43ec7",
 }
 
 PROD_TTS_URL = "https://shared-svcs-tts.up.railway.app"
 LOCAL_TTS_URL = "http://localhost:8102"
-OXP_FILES_FALLBACK_URL = "https://oxp.files.strongprompt.ai"
+PODCAST_FALLBACK_URL = "https://podcast-production-31c9.up.railway.app"
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -349,6 +355,32 @@ _EMPHASIZE_SYSTEM = (
     "punctuation inside the marks. When in doubt, leave it unmarked.\n"
     "- Output ONLY the passage, verbatim, with the guillemets inserted."
 )
+
+
+# A SHORT podcast episode description (show notes), written by the in-CLI Sonnet tier from
+# the finished spoken script. Lands as the `<base>.md` sidecar the feed turns into
+# <description> — a purpose-written blurb, NOT the truncated transcript.
+_DESCRIBE_SYSTEM = (
+    "You are writing a SHORT podcast episode description (show notes) for ONE episode, given "
+    "its full spoken script. Write 1–3 sentences, under about 60 words, that tell a "
+    "prospective listener what the episode covers and why it's worth hearing. Present tense. "
+    "Do NOT open with a cliché like 'In this episode'. No markdown, headings, bullet points, "
+    "hashtags, emoji, or quotation marks around the whole thing. Output ONLY the description text."
+)
+
+
+def _episode_description(text: str, *, model: str, label: str = "description") -> str:
+    """One LLM call → a brief podcast episode description from the spoken script. The script's
+    lead carries the gist, so a long episode is capped on input to bound tokens. Markup the model
+    might emit despite the instruction is stripped (the feed shows it as plain text)."""
+    src = text.strip()
+    if len(src) > EXEC_SEG_CHARS:
+        src = src[:EXEC_SEG_CHARS]
+    out = llm_chat(
+        system=_DESCRIBE_SYSTEM, user=src, model=model,
+        max_tokens=400, temperature=0.3, label=label,
+    )
+    return strip_llm_markup(out).strip()
 
 
 def _emphasis_text_preserved(original: str, annotated: str) -> bool:
@@ -891,50 +923,97 @@ def _which(name: str) -> bool:
     return which(name) is not None
 
 
-# ── oxp.files upload (presigned PUT, see services/files/main.py) ─────────────────
+# ── podcast server upload (PUT /upload/{slug}/{name}, see services/podcast/app.py) ─
 
-def upload_to_oxp(
-    data: bytes, *, filename: str, folder: str, base_url: str, secret: str, email: str,
-    content_type: str = "audio/mpeg",
+def upload_to_podcast(
+    data: bytes, *, filename: str, slug: str, base_url: str, secret: str,
+    duration_seconds: float | None = None, content_type: str = "audio/mpeg",
 ) -> str:
+    """PUT one file (MP3 or transcript sidecar) onto a podcast show's volume folder.
+    Service-token auth: an HS256 bearer with aud="podcast-upload" signed by the show
+    server's PODCAST_UPLOAD_SECRET. The producer already holds the bytes + duration, so
+    this is a single direct PUT (the server's /import pull-path is migration-only). For an
+    MP3, X-Duration-Seconds rides along so the feed gets <itunes:duration> without ffprobe."""
     now = int(time.time())
-    bearer = _hs256_jwt({"sub": email, "iat": now, "exp": now + 600}, secret)
-    auth = {"Authorization": f"Bearer {bearer}"}
+    bearer = _hs256_jwt({"aud": "podcast-upload", "iat": now, "exp": now + 1800}, secret)
+    headers = {"Authorization": f"Bearer {bearer}", "Content-Type": content_type}
+    if duration_seconds is not None:
+        headers["X-Duration-Seconds"] = str(int(round(duration_seconds)))
+    url = f"{base_url}/upload/{slug}/{filename}"
+    # Retry transient network/5xx failures (a large MP3 over a slow uplink can time out
+    # mid-write); auth and 4xx fail closed immediately. Mirrors synthesize()'s retry shape.
+    last_err = None
+    for attempt in range(3):
+        try:
+            r = requests.put(url, data=data, headers=headers, timeout=300)
+            if r.status_code == 200:
+                return f"{slug}/{filename}"
+            if r.status_code in (401, 403):
+                _die(f"podcast upload auth rejected ({r.status_code}): {r.text[:200]}")
+            if r.status_code < 500:
+                # 404 here means the show slug isn't registered on the server — fail loud.
+                _die(f"podcast upload failed ({r.status_code}) for show {slug!r}: {r.text[:200]}")
+            last_err = f"{r.status_code}: {r.text[:200]}"
+        except requests.RequestException as exc:
+            last_err = str(exc)
+        if attempt < 2:
+            time.sleep(2.0 * (attempt + 1))
+    _die(f"podcast upload failed after 3 attempts for show {slug!r}: {last_err}")
 
-    r = requests.post(
-        f"{base_url}/api/files/upload-url",
-        headers={**auth, "Content-Type": "application/json"},
-        json={"filename": filename, "folder": folder},
-        timeout=30,
+
+def _publish_episode(
+    *, mp3: bytes, description_source: str, doc_name: str, filename: str, args,
+    secret: str, base_url: str, duration_seconds: float | None,
+) -> str:
+    """Publish one finished episode to its podcast show — the single upload sink shared by
+    the one-voice (_process_doc) and two-voice (dialogue.process_dialogue) pipelines, so the
+    publish seam can't drift between them. PUTs the MP3 onto the show's volume (it then appears
+    in the show's RSS feed) and, unless --no-transcript, writes a brief Sonnet-authored episode
+    description as the `<base>.md` sidecar the feed shows as <description> (from description_source,
+    the episode's spoken script — NOT the truncated transcript)."""
+    show = args.show
+    _log(f"⬆️  [{doc_name}] publishing to podcast show {show!r} at {base_url} ({filename})…")
+    loc = upload_to_podcast(
+        mp3, filename=filename, slug=show, base_url=base_url,
+        secret=secret, duration_seconds=duration_seconds,
     )
-    if r.status_code != 200:
-        _die(f"upload-url failed ({r.status_code}): {r.text[:200]}")
-    put_url = r.json()["url"]
+    _log(f"✅ {doc_name} → podcast/{loc}")
 
-    put = requests.put(put_url, data=data, headers={"Content-Type": content_type}, timeout=300)
-    if put.status_code not in (200, 201):
-        _die(f"presigned PUT failed ({put.status_code}): {put.text[:200]}")
+    # Brief blurb (`<base>.md`) → the feed's short <description>. Always published — it's the
+    # episode preview shown in app lists.
+    sname = _podcast_sidecar_name(filename)
+    _log(f"📝 [{doc_name}] writing episode description ({args.narrative_model})…")
+    desc = _episode_description(description_source, model=args.narrative_model)
+    upload_to_podcast(
+        desc.encode("utf-8"), filename=sname, slug=show,
+        base_url=base_url, secret=secret, content_type="text/markdown; charset=utf-8",
+    )
+    _log(f"📝 {doc_name} → podcast description: {show}/{sname}\n   “{desc}”")
 
-    # Activity-log the upload (best-effort; non-fatal).
-    try:
-        requests.post(
-            f"{base_url}/api/files/uploaded",
-            headers={**auth, "Content-Type": "application/json"},
-            json={"filename": filename, "folder": folder},
-            timeout=30,
+    # Full transcript (`<base>-transcript.md`) → the feed's <content:encoded> rich show notes.
+    # --no-transcript opts out of the transcript only (the blurb above still publishes).
+    if not args.no_transcript:
+        tname = _podcast_transcript_name(filename)
+        upload_to_podcast(
+            description_source.encode("utf-8"), filename=tname, slug=show,
+            base_url=base_url, secret=secret, content_type="text/markdown; charset=utf-8",
         )
-    except requests.RequestException:
-        pass
-
-    loc = f"{folder}/{filename}" if folder else filename
+        _log(f"📝 {doc_name} → podcast transcript: {show}/{tname}")
     return loc
 
 
-# ── Filename helpers (match services/files _safe_filename rules) ─────────────────
+def _podcast_sidecar_name(mp3_filename: str) -> str:
+    """`foo.mp3` → `foo.md` — the brief-blurb sidecar the feed turns into <description>.
+    The server matches it by `with_suffix('.md')` (storage.list_audio), so it must be the
+    SAME base as the MP3, or the description won't attach."""
+    base = mp3_filename[:-4] if mp3_filename.lower().endswith(".mp3") else mp3_filename
+    return f"{base}.md"
 
-def _transcript_name(mp3_filename: str) -> str:
-    """`foo.mp3` → `foo-transcript.md` — the renderable transcript that rides with the
-    audio in oxp.files. Always .md so it renders with its section headers (never .txt)."""
+
+def _podcast_transcript_name(mp3_filename: str) -> str:
+    """`foo.mp3` → `foo-transcript.md` — the full-transcript sidecar the feed renders as
+    <content:encoded> rich show notes. The server pairs it as `<stem>-transcript.md`
+    (storage.list_audio) — distinct from the `<base>.md` blurb so both can coexist."""
     base = mp3_filename[:-4] if mp3_filename.lower().endswith(".mp3") else mp3_filename
     return f"{base}-transcript.md"
 
@@ -998,10 +1077,10 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, str, int, int
         if args.narrative:
             title = f"{title} — {args.narrative} narrative"
 
-    # Renderable markdown transcript, landed in oxp.files beside the MP3. Captured BEFORE
-    # pron respelling so it reads cleanly ('content', not 'con-tent'). Read mode → the
-    # source markdown (section headers intact, frontmatter dropped); narrative mode → the
-    # distilled script under a title heading. Always .md (never .txt) so it renders.
+    # The full spoken script (`transcript_md`) — `_publish_episode` feeds it to the Sonnet
+    # episode-description pass. Captured BEFORE pron respelling so it reads cleanly ('content',
+    # not 'con-tent'). Read/emphasize mode → the source markdown (section headers intact,
+    # frontmatter dropped); narrative mode → the distilled script under a title heading.
     if args.narrative:
         transcript_md = f"# {title}\n\n{speakable.strip()}\n"
     else:
@@ -1099,25 +1178,26 @@ def _wait_for_tts_ready(tts_url: str, *, timeout: float = 300.0) -> None:
         time.sleep(3.0)
 
 
-def _resolve_files_target(args) -> tuple[str, str]:
-    """Resolve the oxp.files session secret + base URL. Once per run."""
-    _log("🔑 pulling oxp-files JWT_SECRET + PUBLIC_BASE_URL from Railway…")
-    files_vars = _railway_vars(
-        project=OXP_KB["project"], env=OXP_KB["env"], service=OXP_KB["files_service"]
+def _resolve_podcast_target(args) -> tuple[str, str]:
+    """Resolve the podcast server's upload secret + base URL. Once per run. The synth
+    target when --show is set; same trust boundary as the migrate client (PODCAST_UPLOAD_SECRET)."""
+    _log("🔑 pulling podcast PODCAST_UPLOAD_SECRET from Railway…")
+    pod_vars = _railway_vars(
+        project=PODCAST["project"], env=PODCAST["env"], service=PODCAST["service"]
     )
-    secret = files_vars.get("JWT_SECRET")
+    secret = pod_vars.get("PODCAST_UPLOAD_SECRET")
     if not secret:
-        _die("JWT_SECRET not found on the oxp-files service.")
-    base_url = (files_vars.get("PUBLIC_BASE_URL") or OXP_FILES_FALLBACK_URL).rstrip("/")
+        _die("PODCAST_UPLOAD_SECRET not found on the podcast service.")
+    base_url = (pod_vars.get("PODCAST_PUBLIC_BASE") or PODCAST_FALLBACK_URL).rstrip("/")
     return secret, base_url
 
 
 def _process_doc(
     doc: Path, args, *, tts_url: str, tts_token: str | None,
-    files_secret: str | None, base_url: str | None, chunk_concurrency: int,
+    secret: str | None, base_url: str | None, chunk_concurrency: int,
 ) -> str | None:
-    """Full pipeline for one document: normalize → synth → MP3 → (upload). Returns the
-    oxp.files location, or None when --no-upload. Endpoint/secrets are resolved once by
+    """Full pipeline for one document: normalize → synth → MP3 → publish. Returns the
+    podcast location, or None when --no-upload. Endpoint/secrets are resolved once by
     the caller and passed in, so this is safe to run concurrently (one call per doc)."""
     chunks, title, transcript_md, raw_len, total_chars = _normalize_and_chunk(doc, args)
     _log(f"📄 {doc.name}: {raw_len} raw → {total_chars} speakable → {len(chunks)} chunks")
@@ -1148,24 +1228,10 @@ def _process_doc(
         return None
 
     filename = _safe_mp3_name(doc, args.name, args.narrative)
-    _log(f"⬆️  [{doc.name}] uploading to {base_url} ({args.folder}/{filename})…")
-    loc = upload_to_oxp(
-        mp3, filename=filename, folder=args.folder, base_url=base_url,
-        secret=files_secret, email=args.email,
+    return _publish_episode(
+        mp3=mp3, description_source=transcript_md, doc_name=doc.name, filename=filename,
+        args=args, secret=secret, base_url=base_url, duration_seconds=seconds,
     )
-    _log(f"✅ {doc.name} → oxp.files: {loc}")
-
-    # Always land a renderable .md transcript beside the audio (poka-yoke: built in, not
-    # an operator step). --no-transcript opts out.
-    if not args.no_transcript:
-        tname = _transcript_name(filename)
-        upload_to_oxp(
-            transcript_md.encode("utf-8"), filename=tname, folder=args.folder,
-            base_url=base_url, secret=files_secret, email=args.email,
-            content_type="text/markdown; charset=utf-8",
-        )
-        _log(f"📝 {doc.name} → transcript: {args.folder}/{tname}")
-    return loc
 
 
 # The CLI lives in doc_to_audio.py. This module is the shared TTS engine +

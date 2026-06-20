@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-doc_to_audio — turn document(s) into narrated MP3(s) and land them in oxp.files.
+doc_to_audio — turn document(s) into narrated MP3(s) and publish them to a podcast show.
 
 ONE CLI over a shared TTS engine. --format picks what happens to your text — and the
 formats split into two camps:
@@ -27,8 +27,14 @@ So a series in either voice is just `doc_to_audio ep1.md ep2.md --format pm`
 single multi-source episode by pre-assembling its file, or with --combine.
 
 The shared engine (chunking, «…» emphasis pacing, pron overrides, per-chunk PCM
-synthesis, ffmpeg→MP3, presigned oxp.files upload, Railway secret pulls) lives in
+synthesis, ffmpeg→MP3, podcast-server publish, Railway secret pulls) lives in
 doc_to_speech.py; the dialogue script generation + render lives in dialogue.py.
+
+Every episode publishes to a podcast show on the StrongPrompt podcast server
+(services/podcast) — the default --show is `tech` (Healing Journey Tech Review).
+The MP3 PUTs onto the show's volume and appears in that show's RSS feed, with a
+brief Sonnet-written episode description as the `<base>.md` sidecar. (oxp.files was
+retired as a target at cutover; its podcast content migrated to the `tech` show.)
 
 Usage:
   uv run python scripts/doc_to_audio.py DOC.md [DOC2.md ...] [options]
@@ -44,22 +50,25 @@ Usage:
   uv run python scripts/doc_to_audio.py DOC.md --format pm --dry-run
   uv run python scripts/doc_to_audio.py DOC.md --format dialogue --dry-run
 
-  # Local TTS (services/tts on :8102, auth-off in dev), no upload:
+  # Publish an authored episode to a specific show (default show is `tech`):
+  uv run python scripts/doc_to_audio.py ep.md --show clinical --name ep.mp3 --title "…"
+
+  # Local TTS (services/tts on :8102, auth-off in dev), no publish:
   uv run python scripts/doc_to_audio.py DOC.md --local-tts --no-upload --out /tmp/o.mp3
 
-Auth (see symlink_docs/registries/AUTH_REGISTRY.md scenarios 4 + 5): TTS prod is an
-HS256 JWT aud="tts"; oxp.files is an HS256 session bearer. The LLM routes by model id
-(see doc_to_speech.llm_chat): pm/exec/dialogue default to the native Anthropic API
-(`~/.config/keys.json → ANTHROPIC_API_KEY`, uses Anthropic credits); scrub uses Gemini
-via OpenRouter. TTS/files secrets pull live from Railway; --local-tts skips the TTS
-secret, --no-upload skips the files secret, --dry-run skips synth.
+Auth: TTS prod is an HS256 JWT aud="tts" (AUTH_REGISTRY scenario 4); the podcast upload
+is an HS256 bearer aud="podcast-upload" signed with the show server's PODCAST_UPLOAD_SECRET
+(see services/podcast/app.py _verify_upload). The LLM routes by model id (see
+doc_to_speech.llm_chat): pm/exec/dialogue/emphasize/description default to the native
+Anthropic API (`~/.config/keys.json → ANTHROPIC_API_KEY`, uses Anthropic credits);
+scrub uses Gemini via OpenRouter. TTS/podcast secrets pull live from Railway; --local-tts
+skips the TTS secret, --no-upload skips the podcast secret, --dry-run skips synth.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -76,7 +85,7 @@ from doc_to_speech import (
     _log,
     _normalize_and_chunk,
     _process_doc,
-    _resolve_files_target,
+    _resolve_podcast_target,
     _resolve_tts_endpoint,
     _wait_for_tts_ready,
 )
@@ -108,7 +117,7 @@ def _episode_doc(ep_docs: list[Path]) -> Path:
 def main() -> None:
     p = argparse.ArgumentParser(
         prog="doc_to_audio",
-        description="Turn document(s) into narrated MP3(s) (one- or two-voice) and land them in oxp.files.",
+        description="Turn document(s) into narrated MP3(s) (one- or two-voice) and publish them to a podcast show.",
     )
     p.add_argument("docs", nargs="+", type=Path, help="Source document(s): markdown or text.")
     p.add_argument("--format", choices=["emphasize", "read", "scrub", "pm", "exec", "dialogue"],
@@ -121,7 +130,12 @@ def main() -> None:
     p.add_argument("--combine", action="store_true",
                    help="Merge ALL input docs into ONE episode (N→1). Default: each doc is its "
                         "own episode (N→N). Same rule for every format.")
-    p.add_argument("--folder", default="briefings", help="oxp.files folder (default: briefings).")
+    p.add_argument("--show", default="tech",
+                   help="Podcast show slug to publish to — the synth target (default: tech, the "
+                        "Healing Journey Tech Review feed). The MP3 PUTs onto the show's volume and "
+                        "appears in that show's RSS feed; a brief Sonnet-written episode description "
+                        "rides along as the `<base>.md` sidecar the feed shows as <description>. "
+                        "Other shows: clinical, sales, general. (oxp.files was retired at cutover.)")
 
     # ── One-voice options (read/scrub/pm/exec) ──
     one = p.add_argument_group("one-voice (read/scrub/pm/exec)")
@@ -153,12 +167,13 @@ def main() -> None:
     two.add_argument("--sub-gap", type=float, default=0.15, help="Silence between sub-chunks of one turn.")
 
     # ── Shared synthesis / packaging ──
-    p.add_argument("--speed", type=float, default=1.0, help="0.5–2.0 (default 1.0).")
+    p.add_argument("--speed", type=float, default=0.9,
+                   help="0.5–2.0 (default 0.9 — a touch under natural pace; reads as measured, not rushed).")
     p.add_argument("--language", default="en-us")
     p.add_argument("--max-chars", type=int, default=700, help="Per-synth chunk cap, < TTS's 800.")
-    p.add_argument("--emphasis-speed", type=float, default=0.9,
-                   help="Speed for «…»-marked emphasis spans (default 0.9 — ~10%% slower for weight). "
-                        "Whole clauses, never single words.")
+    p.add_argument("--emphasis-speed", type=float, default=0.81,
+                   help="Speed for «…»-marked emphasis spans (default 0.81 — ~10%% slower than the 0.9 "
+                        "base, preserving the emphasis contrast). Whole clauses, never single words.")
     p.add_argument("--emphasis-gap", type=float, default=0.25,
                    help="Silence just before each «…» emphasis span, seconds (default 0.25). 0 disables.")
     p.add_argument("--no-pron", action="store_true",
@@ -183,12 +198,10 @@ def main() -> None:
     p.add_argument("--tts-url", help="Override the TTS base URL entirely.")
     p.add_argument("--warmup-timeout", type=float, default=300.0,
                    help="Seconds to wait for the TTS service to wake from serverless sleep (0 = skip).")
-    p.add_argument("--email", default=os.environ.get("OXP_FILES_EMAIL", "doc-to-audio@oxp.files"),
-                   help="sub claim for the oxp.files bearer (shown in its activity log).")
     p.add_argument("--out", type=Path, help="Also write the MP3 to this local path (single episode only).")
-    p.add_argument("--no-upload", action="store_true", help="Skip the oxp.files upload (needs --out).")
+    p.add_argument("--no-upload", action="store_true", help="Skip the podcast publish (needs --out).")
     p.add_argument("--no-transcript", action="store_true",
-                   help="Skip the renderable .md transcript uploaded beside each MP3.")
+                   help="Skip the episode description sidecar published beside each MP3.")
     p.add_argument("--dry-run", action="store_true",
                    help="No synth/upload. One-voice: chunk preview. Dialogue: generate + print the script.")
     p.add_argument("-y", "--yes", action="store_true",
@@ -252,6 +265,10 @@ def main() -> None:
             f"--format dialogue option; not valid with --format {args.format}",
         )
 
+    # The podcast show is the synth target; an empty slug has nowhere to publish.
+    if not args.no_upload and not (args.show and args.show.strip()):
+        _die("--show needs a podcast show slug (e.g. tech, clinical, sales, general).")
+
     # Cardinality: one episode per doc, or all docs combined into one.
     episodes = [list(args.docs)] if args.combine else [[d] for d in args.docs]
     if len(episodes) > 1 and (args.name or args.title or args.out):
@@ -281,16 +298,16 @@ def main() -> None:
     # Resolve endpoint + secrets ONCE; the token is shared across every episode.
     tts_url, tts_token = _resolve_tts_endpoint(args)
     _wait_for_tts_ready(tts_url, timeout=args.warmup_timeout)
-    files_secret, base_url = (None, None)
+    secret, base_url = (None, None)
     if not args.no_upload:
-        files_secret, base_url = _resolve_files_target(args)
+        secret, base_url = _resolve_podcast_target(args)
 
     if is_dialogue:
         # Sequential episodes: each is its own LLM call + multi-turn synth.
         for ep_docs in episodes:
             process_dialogue(
                 ep_docs, args, tts_url=tts_url, tts_token=tts_token,
-                files_secret=files_secret, base_url=base_url,
+                secret=secret, base_url=base_url,
             )
     else:
         ep_inputs = [_episode_doc(ep) for ep in episodes]
@@ -303,7 +320,7 @@ def main() -> None:
                 futs = [
                     ex.submit(
                         _process_doc, doc, args, tts_url=tts_url, tts_token=tts_token,
-                        files_secret=files_secret, base_url=base_url, chunk_concurrency=1,
+                        secret=secret, base_url=base_url, chunk_concurrency=1,
                     )
                     for doc in ep_inputs
                 ]
@@ -312,11 +329,11 @@ def main() -> None:
         else:
             _process_doc(
                 ep_inputs[0], args, tts_url=tts_url, tts_token=tts_token,
-                files_secret=files_secret, base_url=base_url, chunk_concurrency=args.concurrency,
+                secret=secret, base_url=base_url, chunk_concurrency=args.concurrency,
             )
 
     if base_url:
-        _log(f"   browse: {base_url}/?folder={args.folder}")
+        _log(f"   show {args.show!r} → {base_url}/{args.show}/<code>/feed.xml — episode is now in the feed")
 
 
 if __name__ == "__main__":

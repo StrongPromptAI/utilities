@@ -169,9 +169,14 @@ class OIDCAuthProvider(AuthProvider):
 # ── model views (with the self-serve actions) ──────────────────────────────
 
 class PodcastView(ModelView):
-    fields = ["slug", "title", "folder", "access", "code",
+    fields = ["slug", "title",
+              "episodes",  # HasMany → clickable links to this show's episodes (list + detail)
+              "folder", "access", "code",
               StringField("feed_url", label="Feed URL", read_only=True),
               "description", "author", "category", "language", "explicit", "visible"]
+    # `episodes` is navigation-only (read links); keep it out of the create/edit forms.
+    exclude_fields_from_create = ["episodes"]
+    exclude_fields_from_edit = ["episodes"]
     actions = ["sync_episodes", "rotate_code", "delete"]
 
     @action(
@@ -197,7 +202,9 @@ class PodcastView(ModelView):
 
 
 class EpisodeView(ModelView):
-    fields = ["id", "podcast_slug", "filename", "title", "sort_order",
+    fields = ["id",
+              "podcast",  # HasOne → clickable link to the show this episode belongs to
+              "filename", "title", "sort_order",
               "published_at", "duration_seconds", "hidden", "description"]
 
     async def before_delete(self, request: Request, obj) -> None:

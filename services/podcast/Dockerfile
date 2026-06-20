@@ -19,4 +19,8 @@ COPY app.py db.py models.py seed.py storage.py feed.py admin.py ./
 ENV PORT=8000
 # seed is insert-only, so running it on every boot is safe (creates missing
 # shows/episodes on the volume without clobbering admin edits).
-CMD ["sh", "-c", "python seed.py && uvicorn app:app --host 0.0.0.0 --port $PORT"]
+# --proxy-headers + --forwarded-allow-ips '*' so uvicorn honors Railway's edge
+# X-Forwarded-Proto=https. Without it the request scheme is http, and Starlette-Admin's
+# url_for() builds http:// asset URLs that the browser blocks as mixed content on the
+# https page (unstyled admin + stuck "Loading…").
+CMD ["sh", "-c", "python seed.py && uvicorn app:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips '*'"]

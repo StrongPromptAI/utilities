@@ -22,16 +22,17 @@ from __future__ import annotations
 import hmac
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 
+import httpx
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from db import SessionLocal, init_db
 from feed import build_feed
 from models import Episode, Podcast
-from storage import artwork_path, audio_path, write_upload
+from storage import artwork_path, audio_path, delete_file, write_upload
 
 UPLOAD_SECRET = os.environ.get("PODCAST_UPLOAD_SECRET", "")
 
@@ -128,25 +129,66 @@ async def upload(slug: str, name: str, request: Request, _: None = Depends(_veri
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
-        # An MP3 upload may carry its duration (doc_to_podcast computes it) — upsert
+        # An MP3 upload may carry its duration (the producer computes it) — upsert
         # the episode row so the feed gets <itunes:duration> without an ffprobe pass.
         if name.lower().endswith(".mp3"):
-            dur = request.headers.get("X-Duration-Seconds")
-            if dur:
-                ep = (
-                    session.query(Episode)
-                    .filter_by(podcast_slug=slug, filename=name)
-                    .one_or_none()
-                )
-                if ep is None:
-                    ep = Episode(podcast_slug=slug, filename=name)
-                    session.add(ep)
-                try:
-                    ep.duration_seconds = int(float(dur))
-                except ValueError:
-                    pass
-                session.commit()
+            _set_duration(session, slug, name, request.headers.get("X-Duration-Seconds"))
     return {"written": name, "bytes": len(body)}
+
+
+def _set_duration(session, slug: str, name: str, seconds) -> None:
+    try:
+        secs = int(float(seconds))
+    except (TypeError, ValueError):
+        return
+    ep = session.query(Episode).filter_by(podcast_slug=slug, filename=name).one_or_none()
+    if ep is None:
+        ep = Episode(podcast_slug=slug, filename=name)
+        session.add(ep)
+    ep.duration_seconds = secs
+    session.commit()
+
+
+class ImportRequest(BaseModel):
+    source_url: str
+    duration_seconds: int | None = None
+
+
+@app.post("/import/{slug}/{name}")
+async def import_from_url(
+    slug: str, name: str, req: ImportRequest, _: None = Depends(_verify_upload)
+):
+    """Server-side pull: the service fetches `source_url` (e.g. a presigned oxp.files
+    URL) and writes it to the volume. Keeps large bytes off a slow client uplink —
+    Railway↔origin is fast cloud-to-cloud."""
+    with SessionLocal() as session:
+        show = _load_show(session, slug)
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+                r = await client.get(req.source_url, follow_redirects=True)
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"fetch failed: {exc}") from exc
+        if r.status_code != 200 or not r.content:
+            raise HTTPException(502, f"source returned {r.status_code}, {len(r.content)} bytes")
+        try:
+            write_upload(show.folder, name, r.content)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if name.lower().endswith(".mp3") and req.duration_seconds:
+            _set_duration(session, slug, name, req.duration_seconds)
+    return {"written": name, "bytes": len(r.content)}
+
+
+@app.delete("/upload/{slug}/{name}")
+async def delete_upload(slug: str, name: str, _: None = Depends(_verify_upload)):
+    """Service-token delete of one file from a show's volume folder."""
+    with SessionLocal() as session:
+        show = _load_show(session, slug)
+    try:
+        removed = delete_file(show.folder, name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"deleted": name, "removed": removed}
 
 
 # ── artwork ─────────────────────────────────────────────────────────────────

@@ -1,0 +1,22 @@
+[project]
+name = "podcast-service"
+version = "0.1.0"
+description = "StrongPrompt podcast server — multi-show RSS over a Railway volume"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.0",
+    "sqlalchemy>=2.0",
+    "starlette-admin>=0.14.0",
+    "PyJWT>=2.8.0",
+    "itsdangerous>=2.1.0",
+    "httpx>=0.27.0",
+]
+
+[tool.setuptools]
+py-modules = ["app", "db", "models", "seed"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

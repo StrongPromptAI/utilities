@@ -1,0 +1,91 @@
+"""SQLAlchemy models — the editable metadata overlay.
+
+The bucket-free design: the Railway volume holds both this SQLite DB
+(`/data/podcast.db`) and the audio (`/data/audio/<folder>/*.mp3`). These tables
+carry only *editable overrides* — title, description, ordering, publish date,
+duration, hidden — on top of whatever MP3s actually exist on disk. A feed is the
+on-disk listing of a show's folder LEFT-JOINed with its episode rows; an MP3
+with no row still appears, with defaults derived at build time.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import DateTime
+
+
+def _utcnow() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Podcast(Base):
+    """One show. `folder` is the on-volume audio dir (`/data/audio/<folder>/`).
+
+    `access` is the fail-closed gate: 'private' requires a `code` and the feed
+    URL carries it (`/{slug}/{code}/feed.xml`); 'public' has `code = NULL` and a
+    codeless feed URL (`/{slug}/feed.xml`).
+    """
+
+    __tablename__ = "podcasts"
+
+    slug: Mapped[str] = mapped_column(String, primary_key=True)
+    folder: Mapped[str] = mapped_column(String, nullable=False)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    author: Mapped[str] = mapped_column(String, nullable=False, default="")
+    artwork_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    access: Mapped[str] = mapped_column(String, nullable=False, default="private")
+    code: Mapped[str | None] = mapped_column(String, nullable=True)
+    language: Mapped[str] = mapped_column(String, nullable=False, default="en-us")
+    category: Mapped[str] = mapped_column(String, nullable=False, default="Technology")
+    explicit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    episodes: Mapped[list[Episode]] = relationship(
+        back_populates="podcast", cascade="all, delete-orphan"
+    )
+
+    def __str__(self) -> str:  # Starlette-Admin row label
+        return f"{self.title} ({self.slug})"
+
+
+class Episode(Base):
+    """Editable overrides for one MP3 in a show's folder.
+
+    NULL columns fall back to derived defaults at feed-build time:
+    title←filename, description←transcript `.md` sidecar, published_at←file mtime,
+    duration_seconds←supplied at upload (doc_to_podcast computes it) or ffprobe.
+    `sort_order` set → explicit `<itunes:episode>` ordering; else newest-first by
+    published_at.
+    """
+
+    __tablename__ = "episodes"
+    __table_args__ = (UniqueConstraint("podcast_slug", "filename", name="uq_show_file"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    podcast_slug: Mapped[str] = mapped_column(
+        ForeignKey("podcasts.slug", ondelete="CASCADE"), nullable=False, index=True
+    )
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    title: Mapped[str | None] = mapped_column(String, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sort_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    podcast: Mapped[Podcast] = relationship(back_populates="episodes")
+
+    def __str__(self) -> str:
+        return self.title or self.filename

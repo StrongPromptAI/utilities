@@ -945,7 +945,9 @@ def upload_to_podcast(
     last_err = None
     for attempt in range(3):
         try:
-            r = requests.put(url, data=data, headers=headers, timeout=300)
+            # (connect, read) — generous read window so a large episode over a normal
+            # uplink isn't cut off mid-transfer.
+            r = requests.put(url, data=data, headers=headers, timeout=(30, 1800))
             if r.status_code == 200:
                 return f"{slug}/{filename}"
             if r.status_code in (401, 403):

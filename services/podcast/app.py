@@ -32,7 +32,7 @@ from pydantic import BaseModel
 from db import SessionLocal, init_db
 from feed import build_feed
 from models import Episode, Podcast
-from storage import artwork_path, audio_path, delete_file, write_upload
+from storage import artwork_path, audio_path, delete_file, write_upload, write_upload_stream
 
 UPLOAD_SECRET = os.environ.get("PODCAST_UPLOAD_SECRET", "")
 
@@ -119,21 +119,23 @@ def _verify_upload(request: Request) -> None:
 
 @app.put("/upload/{slug}/{name}")
 async def upload(slug: str, name: str, request: Request, _: None = Depends(_verify_upload)):
+    # Resolve + validate the show, then release the DB session BEFORE the (possibly long,
+    # large) transfer — don't hold a connection open while bytes stream in.
     with SessionLocal() as session:
-        show = _load_show(session, slug)
-        body = await request.body()
-        if not body:
-            raise HTTPException(400, "empty body")
-        try:
-            write_upload(show.folder, name, body)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+        folder = _load_show(session, slug).folder
+    # Stream the body straight to disk (constant memory) so large episodes don't OOM or
+    # stall the app by buffering the whole file in RAM.
+    try:
+        _, nbytes = await write_upload_stream(folder, name, request.stream())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
-        # An MP3 upload may carry its duration (the producer computes it) — upsert
-        # the episode row so the feed gets <itunes:duration> without an ffprobe pass.
-        if name.lower().endswith(".mp3"):
+    # An MP3 upload may carry its duration (the producer computes it) — upsert the episode
+    # row so the feed gets <itunes:duration> without an ffprobe pass.
+    if name.lower().endswith(".mp3"):
+        with SessionLocal() as session:
             _set_duration(session, slug, name, request.headers.get("X-Duration-Seconds"))
-    return {"written": name, "bytes": len(body)}
+    return {"written": name, "bytes": nbytes}
 
 
 def _set_duration(session, slug: str, name: str, seconds) -> None:

@@ -91,8 +91,11 @@ def _serve_audio(show: Podcast, name: str) -> FileResponse:
     p = audio_path(show.folder, name)
     if p is None:
         raise HTTPException(404, "not found")
-    # FileResponse sets Accept-Ranges + emits 206 on Range: requests on its own.
-    return FileResponse(p, media_type="audio/mpeg", filename=name)
+    # No content-disposition: attachment (don't pass filename) — serve as a normal, cacheable
+    # podcast enclosure so clients add it to the library and KEEP it, instead of treating it as a
+    # throwaway download. FileResponse still sets Accept-Ranges + emits 206 on Range: requests.
+    return FileResponse(p, media_type="audio/mpeg",
+                        headers={"Cache-Control": "public, max-age=604800"})
 
 
 def _serve_transcript(show: Podcast, name: str) -> FileResponse:
@@ -284,6 +287,38 @@ async def show_episodes(slug: str, _: None = Depends(_verify_upload)):
             for f in files
         ]
     return {"episodes": episodes}
+
+
+class EpisodeMeta(BaseModel):
+    title: str | None = None
+    sort_order: int | None = None
+    hidden: bool | None = None
+
+
+@app.post("/show/{slug}/ep/{name}/meta")
+async def set_episode_meta(
+    slug: str, name: str, meta: EpisodeMeta, _: None = Depends(_verify_upload)
+):
+    """Service-token: set editable feed overrides (title, sort_order, hidden) on one episode
+    WITHOUT re-uploading its audio. The feed item `<title>` is `Episode.title`; a plain CLI
+    upload doesn't send one, so a published episode shows its prettified filename until this sets
+    a real title. Upserts the row (an on-disk MP3 may not have an Episode row yet). The scriptable
+    equivalent of the admin Episodes edit — only fields supplied are touched."""
+    with SessionLocal() as session:
+        _load_show(session, slug)  # 404s an unknown/hidden show
+        ep = session.query(Episode).filter_by(podcast_slug=slug, filename=name).one_or_none()
+        if ep is None:
+            ep = Episode(podcast_slug=slug, filename=name)
+            session.add(ep)
+        if meta.title is not None:
+            ep.title = meta.title
+        if meta.sort_order is not None:
+            ep.sort_order = meta.sort_order
+        if meta.hidden is not None:
+            ep.hidden = meta.hidden
+        session.commit()
+    return {"ok": True, "slug": slug, "name": name,
+            "title": meta.title, "sort_order": meta.sort_order, "hidden": meta.hidden}
 
 
 # ── artwork ─────────────────────────────────────────────────────────────────

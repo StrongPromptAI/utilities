@@ -969,6 +969,26 @@ def upload_to_podcast(
     _die(f"podcast upload failed after 3 attempts for show {slug!r}: {last_err}")
 
 
+def set_podcast_episode_title(
+    title: str, *, filename: str, slug: str, base_url: str, secret: str
+) -> None:
+    """Set an episode's polished feed `<title>` (Episode.title) after publish. A plain MP3 upload
+    carries no feed title, so without this the feed shows the prettified filename. Non-fatal: the
+    title is cosmetic, so a failure warns rather than aborting the (already-published) episode."""
+    now = int(time.time())
+    bearer = _hs256_jwt({"aud": "podcast-upload", "iat": now, "exp": now + 1800}, secret)
+    url = f"{base_url}/show/{slug}/ep/{filename}/meta"
+    try:
+        r = requests.post(url, json={"title": title},
+                          headers={"Authorization": f"Bearer {bearer}"}, timeout=(15, 60))
+    except requests.RequestException as exc:
+        _log(f"⚠️  feed-title set failed (network): {exc}")
+        return
+    if r.status_code != 200:
+        _log(f"⚠️  feed-title set failed ({r.status_code}): {r.text[:160]} "
+             f"(deploy podcast-server → main for the /meta endpoint)")
+
+
 # Publish dates are stamped in Pacific time and sent as ISO-8601 with offset (the feed turns
 # them into RFC-822 <pubDate>). Pacific is the house timezone for these shows.
 _PACIFIC = ZoneInfo("America/Los_Angeles")
@@ -1036,6 +1056,13 @@ def _publish_episode(
         secret=secret, duration_seconds=duration_seconds, published_at=published_at,
     )
     _log(f"✅ {doc_name} → podcast/{loc}  (dur {int(round(duration_seconds or 0))}s, pub {published_at})")
+
+    # Set the polished feed <title> (Episode.title) — a plain upload doesn't carry one, so without
+    # this the feed shows the prettified filename. Uses --title when given.
+    title = (getattr(args, "title", None) or "").strip()
+    if title:
+        set_podcast_episode_title(title, filename=filename, slug=show, base_url=base_url, secret=secret)
+        _log(f"🏷️  {doc_name} → feed title: {title!r}")
 
     # Brief blurb (`<base>.md`) → the feed's short <description>. Always published — it's the
     # episode preview shown in app lists.

@@ -189,11 +189,10 @@ def main() -> None:
                    help="0.5–2.0 (default 0.9 — a touch under natural pace; reads as measured, not rushed).")
     p.add_argument("--language", default="en-us")
     p.add_argument("--max-chars", type=int, default=700, help="Per-synth chunk cap, < TTS's 800.")
-    p.add_argument("--emphasis-speed", type=float, default=0.81,
-                   help="Speed for «…»-marked emphasis spans (default 0.81 — ~10%% slower than the 0.9 "
-                        "base, preserving the emphasis contrast). Whole clauses, never single words.")
     p.add_argument("--emphasis-gap", type=float, default=0.25,
-                   help="Silence just before each «…» emphasis span, seconds (default 0.25). 0 disables.")
+                   help="Silence bracketing each «…» emphasis span — before AND after, seconds "
+                        "(default 0.25). The span is spoken at the normal speed; the pauses set it "
+                        "apart. 0 disables emphasis bracketing. Whole clauses, never single words.")
     p.add_argument("--no-pron", action="store_true",
                    help="Disable the default-file pronunciation overrides (scripts/pron_overrides.json).")
     p.add_argument("--pron", action="append", default=[], metavar="WORD=SPOKEN",
@@ -260,8 +259,6 @@ def main() -> None:
             _die(f"Document not found: {doc}")
     if not (0.5 <= args.speed <= 2.0):
         _die("--speed must be between 0.5 and 2.0")
-    if not (0.5 <= args.emphasis_speed <= 2.0):
-        _die("--emphasis-speed must be between 0.5 and 2.0")
 
     # Cross-format arg hygiene: reject options that belong to the other format so a
     # mistaken flag fails loud instead of being silently ignored.

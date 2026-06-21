@@ -620,20 +620,22 @@ def chunk_text(text: str, max_chars: int) -> list[str]:
     return chunks
 
 
-# ── Emphasis (Lever 3: pace a load-bearing span slower, with a beat before it) ───
+# ── Emphasis (frame a load-bearing span with silence — same tempo, no slowdown) ───
 #
 # Kokoro has no per-word prosody control — its only knobs are per-call speed and the
 # silence we splice between calls. So "emphasis" is: isolate a marked span into its own
-# synth call at a slower speed, and put a short anticipatory pause in front of it. This
-# reads as weight WITHOUT the broken-island sound you get from slowing a single word,
-# *provided the span is a whole clause or sentence* (it then has its own complete
-# intonation arc). Mark spans in the source with guillemets «…» — never emitted by
-# markdown, so they survive normalization untouched.
+# synth call and BRACKET it with a short pause before AND after — at the normal speaking
+# tempo. The bracketing silence reads as weight (the listener hears the clause set apart,
+# anticipated and landed upon) the way a narrator pauses around a key line. We do NOT slow
+# the span: slowing it down violated the surrounding tempo and sounded unnatural — the pause
+# does the work without the drag. Mark spans in the source with guillemets «…» — never
+# emitted by markdown, so they survive normalization untouched.
 
 class Emph(str):
-    """A chunk to synthesize at --emphasis-speed with an anticipatory pause before it.
-    Subclasses str so it flows through the chunk list, len(), the pause-cap, and the
-    dry-run preview unchanged — only _process_doc treats it specially."""
+    """A chunk that gets bracketed by an --emphasis-gap pause before AND after it (synthesized
+    at the normal speed — no slowdown). Subclasses str so it flows through the chunk list,
+    len(), the pause-cap, and the dry-run preview unchanged — only the assembly treats it
+    specially."""
     __slots__ = ()
 
 
@@ -850,35 +852,37 @@ def _silence(seconds: float) -> bytes:
 def chunks_to_parts(
     chunks: list[str], voice: str, *,
     gap: float, section_gap: float,
-    emphasis_gap: float = 0.0, emphasis_speed: float | None = None,
+    emphasis_gap: float = 0.0,
 ) -> list:
     """Turn a chunk list (plain strings, `_SECTION_SENTINEL`s, and `Emph` spans) into the
     ordered parts list `synthesize_ordered` consumes: `_Synth` markers interleaved with
     silence bytes. Shared by the one-voice pipeline (one voice per doc) and dialogue (one voice
     per turn) so emphasis + pacing behave identically in both — the drift-prone seam, made
-    structural. `gap` is the normal inter-chunk pause, `section_gap` the longer topic-break;
-    an `Emph` chunk gets an `emphasis_gap` beat before it and synthesizes at `emphasis_speed`.
+    structural. `gap` is the normal inter-chunk pause, `section_gap` the longer topic-break; an
+    `Emph` span is BRACKETED by an `emphasis_gap` beat before AND after it (same speaking tempo,
+    no slowdown), which sets the clause apart by silence the way a narrator pauses around a key
+    line. Everything synthesizes at the base voice/speed.
     """
     gap_b = _silence(gap)
     section_b = _silence(section_gap)
     emph_b = _silence(emphasis_gap)
-    n_synth = sum(1 for c in chunks if c != _SECTION_SENTINEL)
     parts: list = []
-    done = 0
-    for i, chunk in enumerate(chunks):
+    prev_synth = False          # did the previous emitted part synthesize a chunk?
+    prev_chunk: str | None = None
+    for chunk in chunks:
         if chunk == _SECTION_SENTINEL:
             parts.append(section_b)
+            prev_synth = False                       # the section silence stands in for any gap
             continue
-        done += 1
-        if isinstance(chunk, Emph):
-            if emphasis_gap > 0:
-                parts.append(emph_b)                 # anticipatory beat before the span
-            parts.append(_Synth(chunk, voice, speed=emphasis_speed))
-        else:
-            parts.append(_Synth(chunk, voice))
-        nxt = chunks[i + 1] if i + 1 < len(chunks) else None
-        if done < n_synth and nxt != _SECTION_SENTINEL:
-            parts.append(gap_b)
+        if prev_synth:
+            # Silence between two consecutive spoken chunks: a beat that brackets an emphasized
+            # span (either side adjacent to an `Emph` uses `emph_b`, so the span is flanked
+            # symmetrically — never the normal gap stacked on top); the normal `gap` otherwise.
+            adjacent_emph = isinstance(chunk, Emph) or isinstance(prev_chunk, Emph)
+            parts.append(emph_b if (adjacent_emph and emphasis_gap > 0) else gap_b)
+        parts.append(_Synth(chunk, voice))           # base voice + speed — no slowdown, ever
+        prev_synth = True
+        prev_chunk = chunk
     return parts
 
 
@@ -1295,7 +1299,7 @@ def _process_doc(
     # each spoken chunk, unless the next is a section break (own longer silence) or last.
     parts = chunks_to_parts(
         chunks, args.voice, gap=args.gap, section_gap=args.section_gap,
-        emphasis_gap=args.emphasis_gap, emphasis_speed=args.emphasis_speed,
+        emphasis_gap=args.emphasis_gap,
     )
     pcm = synthesize_ordered(
         parts, tts_url=tts_url, speed=args.speed, language=args.language,

@@ -258,7 +258,7 @@ def process_dialogue(
         _log(f"🎙️  [{i}/{len(turns)}] {speaker} ({voice}) — {len(text)} chars, {len(subs)} piece(s)")
         parts.extend(chunks_to_parts(
             subs, voice, gap=args.sub_gap, section_gap=args.sub_gap,
-            emphasis_gap=args.emphasis_gap, emphasis_speed=args.emphasis_speed,
+            emphasis_gap=args.emphasis_gap,
         ))
         if i < len(turns):
             parts.append(turn_gap)

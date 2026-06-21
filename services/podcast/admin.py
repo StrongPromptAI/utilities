@@ -213,38 +213,50 @@ class EpisodeView(ModelView):
     exclude_fields_from_create = ["updated_at"]
     exclude_fields_from_edit = ["updated_at"]
 
+    def _episode_url_base(self, pk: Any) -> str | None:
+        """`/{slug}/{code}/ep/{name}` for this episode (code only for private shows), or None if
+        the row/show is gone. The shared base for both the audio link (play) and the rendered
+        transcript link — built from url-safe parts (slug/code/percent-encoded name)."""
+        try:
+            ep_id = int(pk)
+        except (TypeError, ValueError):
+            return None
+        with SessionLocal() as s:
+            ep = s.get(Episode, ep_id)
+            if ep is None:
+                return None
+            show = s.get(Podcast, ep.podcast_slug)
+            if show is None:
+                return None
+            name = quote(ep.filename)
+            if show.access == "private" and show.code:
+                return f"/{show.slug}/{show.code}/ep/{name}"
+            return f"/{show.slug}/ep/{name}"
+
+    # New-tab row-action links via `javascript:window.open(...)`: the row-actions template renders
+    # a plain `<a>` with no `target="_blank"`, and forking the vendor template to add one is the
+    # dependency coupling we avoid. The admin JS only binds non-link actions, so it doesn't
+    # intercept these links; the URLs are url-safe so there's nothing to break out of the JS string.
     @link_row_action(
         name="play",
         text="Play episode audio",
         icon_class="fa-solid fa-circle-play",
     )
     def play_row_action(self, request: Request, pk: Any) -> str:
-        """A ▶ in the row-actions group (beside view/edit/delete) that opens this episode's audio
-        in a NEW TAB (the browser plays the MP3). Private shows carry the code in the path
-        (`/{slug}/{code}/ep/{name}`); public shows are codeless. '#' if the row/show/code is missing.
+        """▶ — opens the episode audio in a new tab (the browser plays the MP3)."""
+        base = self._episode_url_base(pk)
+        return f"javascript:window.open('{base}','_blank')" if base else "#"
 
-        New tab via a `javascript:window.open(...)` href: the row-actions template renders a plain
-        `<a>` with no `target="_blank"`, and forking the vendor template to add one is the
-        dependency coupling we avoid. The admin JS only binds non-link actions, so it does not
-        intercept this link; the URL is built from url-safe parts (slug/code/percent-encoded name)
-        so there's nothing to break out of the JS string."""
-        try:
-            ep_id = int(pk)
-        except (TypeError, ValueError):
-            return "#"
-        with SessionLocal() as s:
-            ep = s.get(Episode, ep_id)
-            if ep is None:
-                return "#"
-            show = s.get(Podcast, ep.podcast_slug)
-            if show is None:
-                return "#"
-            name = quote(ep.filename)
-            if show.access == "private" and show.code:
-                url = f"/{show.slug}/{show.code}/ep/{name}"
-            else:
-                url = f"/{show.slug}/ep/{name}"
-            return f"javascript:window.open('{url}','_blank')"
+    @link_row_action(
+        name="transcript",
+        text="View transcript",
+        icon_class="fa-solid fa-file-lines",
+    )
+    def transcript_row_action(self, request: Request, pk: Any) -> str:
+        """📄 — opens the episode's transcript, rendered as HTML (marked.js), in a new tab.
+        A transcript-less episode lands on a friendly 'No transcript' page, not a 404."""
+        base = self._episode_url_base(pk)
+        return f"javascript:window.open('{base}/transcript.html','_blank')" if base else "#"
 
     async def before_delete(self, request: Request, obj) -> None:
         # Deleting an episode row also removes its files from the volume — the MP3

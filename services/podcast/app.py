@@ -12,6 +12,8 @@ Routes:
   GET  /{slug}/ep/{name}            public episode audio
   GET  /{slug}/{code}/ep/{name}/transcript   private episode transcript (raw markdown)
   GET  /{slug}/ep/{name}/transcript          public episode transcript
+  GET  /{slug}/{code}/ep/{name}/transcript.html  private transcript, rendered HTML
+  GET  /{slug}/ep/{name}/transcript.html         public transcript, rendered HTML
   GET  /artwork/{slug}             channel cover art
   PUT  /upload/{slug}/{name}        service-token upload (headless producers)
 
@@ -25,11 +27,12 @@ import hmac
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from html import escape
 
 import httpx
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from db import SessionLocal, init_db
@@ -106,6 +109,49 @@ def _serve_transcript(show: Podcast, name: str) -> FileResponse:
     if p is None:
         raise HTTPException(404, "no transcript")
     return FileResponse(p, media_type="text/markdown; charset=utf-8", filename=p.name)
+
+
+def _render_transcript_page(name: str, md: str | None) -> str:
+    """A standalone HTML page that renders the transcript markdown with marked.js (client-side,
+    pinned major version) — readable prose, not raw `.md`. The raw markdown is HTML-escaped into a
+    hidden node and read back via `textContent` (which decodes the entities → the original
+    markdown), so nothing in the transcript can inject markup into the page before marked renders
+    it. Missing transcript → a friendly message, not a blank page."""
+    t = escape(name)
+    if md is None:
+        inner = '<div id="out"><p style="color:#888">No transcript for this episode.</p></div>'
+        script = ""
+    else:
+        inner = f'<div id="md-src" hidden>{escape(md)}</div><div id="out"></div>'
+        script = (
+            '<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>'
+            '<script>document.getElementById("out").innerHTML='
+            'marked.parse(document.getElementById("md-src").textContent);</script>'
+        )
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        f"<title>Transcript — {t}</title>"
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<style>"
+        "body{font:16px/1.65 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;"
+        "max-width:46rem;margin:2.5rem auto;padding:0 1.25rem;color:#1a1a1a}"
+        "h1{font-size:1.6rem;line-height:1.25}h2{font-size:1.3rem;margin-top:2rem;line-height:1.3}"
+        "h3{font-size:1.1rem;margin-top:1.5rem}p{margin:1rem 0}a{color:#0b66c3}"
+        "code{background:#f3f3f3;padding:.1em .3em;border-radius:3px}"
+        "pre{background:#f6f8fa;padding:1rem;overflow:auto;border-radius:6px}"
+        "blockquote{border-left:3px solid #ddd;margin:1rem 0;padding:.2rem 1rem;color:#555}"
+        "</style></head><body>"
+        f"{inner}{script}"
+        "</body></html>"
+    )
+
+
+def _serve_transcript_html(show: Podcast, name: str) -> Response:
+    """Render the `<base>-transcript.md` sidecar as a readable HTML page (the admin's
+    'View transcript' link, opened in a new tab). Same code/visibility gate as the raw route."""
+    p = transcript_path(show.folder, name)
+    md = p.read_text(encoding="utf-8", errors="replace") if p is not None else None
+    return HTMLResponse(_render_transcript_page(name, md))
 
 
 def _feed_response(slug: str, code: str | None, request: Request) -> Response:
@@ -368,6 +414,15 @@ async def private_transcript(slug: str, code: str, name: str):
     return _serve_transcript(folder_show, name)
 
 
+@app.get("/{slug}/{code}/ep/{name}/transcript.html")
+async def private_transcript_html(slug: str, code: str, name: str):
+    with SessionLocal() as session:
+        show = _load_show(session, slug)
+        _gate_private(show, code)
+        folder_show = show
+    return _serve_transcript_html(folder_show, name)
+
+
 @app.get("/{slug}/feed.xml")
 async def public_feed(slug: str, request: Request):
     return _feed_response(slug, None, request)
@@ -389,6 +444,15 @@ async def public_transcript(slug: str, name: str):
         _require_public(show)
         folder_show = show
     return _serve_transcript(folder_show, name)
+
+
+@app.get("/{slug}/ep/{name}/transcript.html")
+async def public_transcript_html(slug: str, name: str):
+    with SessionLocal() as session:
+        show = _load_show(session, slug)
+        _require_public(show)
+        folder_show = show
+    return _serve_transcript_html(folder_show, name)
 
 
 # ── admin (Starlette-Admin + OIDC) — mounted at /admin, session middleware ──

@@ -43,5 +43,17 @@ SessionLocal = sessionmaker(bind=engine, class_=Session, future=True, expire_on_
 
 
 def init_db() -> None:
-    """Create tables if absent. Idempotent; safe on every boot."""
+    """Create tables if absent + apply lightweight column migrations. Idempotent; safe on every boot."""
     Base.metadata.create_all(engine)
+    _ensure_columns()
+
+
+def _ensure_columns() -> None:
+    """Add columns that `create_all` won't add to a pre-existing table — SQLite's
+    `ALTER TABLE ADD COLUMN` is the one safe in-place migration. Guarded on `PRAGMA table_info`
+    so it's idempotent (a fresh DB already has the column from `create_all`; an existing one gets
+    it added once). Fail-fast: a genuine ALTER error surfaces at boot, not mid-request."""
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(episodes)")}
+        if "updated_at" not in cols:
+            conn.exec_driver_sql("ALTER TABLE episodes ADD COLUMN updated_at DATETIME")

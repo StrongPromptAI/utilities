@@ -163,6 +163,7 @@ async def upload(slug: str, name: str, request: Request, _: None = Depends(_veri
                 session, slug, name,
                 request.headers.get("X-Duration-Seconds"),
                 request.headers.get("X-Published-At"),
+                mark_updated=True,   # the audio was just (re)written → stamp "last rendered"
             )
     return {"written": name, "bytes": nbytes}
 
@@ -200,13 +201,18 @@ def _iso_utc(dt) -> "str | None":
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _set_episode_meta(session, slug: str, name: str, duration_seconds, published_at) -> None:
+def _set_episode_meta(
+    session, slug: str, name: str, duration_seconds, published_at, *, mark_updated: bool = False
+) -> None:
     """Upsert one episode row's duration + publish date from upload/import metadata. Each is
     set only when supplied, so a producer can send one without clobbering the other; a single
-    row write covers both."""
+    row write covers both. `mark_updated` stamps `updated_at = now` — the audio was just
+    (re)rendered. That's the admin-only "last rendered" signal; `published_at` stays the original
+    publication date, so a recut is visible to the admin (file changed) WITHOUT resurfacing the
+    episode in subscribers' feeds (same GUID + same date = a silent correction)."""
     secs = _coerce_int(duration_seconds)
     dt = _coerce_dt(published_at)
-    if secs is None and dt is None:
+    if secs is None and dt is None and not mark_updated:
         return
     ep = session.query(Episode).filter_by(podcast_slug=slug, filename=name).one_or_none()
     if ep is None:
@@ -216,6 +222,8 @@ def _set_episode_meta(session, slug: str, name: str, duration_seconds, published
         ep.duration_seconds = secs
     if dt is not None:
         ep.published_at = dt
+    if mark_updated:
+        ep.updated_at = datetime.now(timezone.utc)
     session.commit()
 
 
@@ -245,8 +253,9 @@ async def import_from_url(
             write_upload(show.folder, name, r.content)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        if name.lower().endswith(".mp3") and (req.duration_seconds or req.published_at):
-            _set_episode_meta(session, slug, name, req.duration_seconds, req.published_at)
+        if name.lower().endswith(".mp3"):
+            _set_episode_meta(session, slug, name, req.duration_seconds, req.published_at,
+                              mark_updated=True)   # audio (re)written → stamp "last rendered"
     return {"written": name, "bytes": len(r.content)}
 
 

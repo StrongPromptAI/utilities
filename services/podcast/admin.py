@@ -206,7 +206,12 @@ class EpisodeView(ModelView):
     fields = ["id",
               "podcast",  # HasOne → clickable link to the show this episode belongs to
               "filename", "title", "sort_order",
-              "published_at", "duration_seconds", "hidden", "description"]
+              "published_at",      # listener-facing original publication date (preserved across recuts)
+              "updated_at",        # admin-only "last rendered" — bumps on every (re)cut; published_at does NOT
+              "duration_seconds", "hidden", "description"]
+    # updated_at is system-stamped on (re)upload — not a hand-editable field.
+    exclude_fields_from_create = ["updated_at"]
+    exclude_fields_from_edit = ["updated_at"]
 
     @link_row_action(
         name="play",
@@ -214,10 +219,15 @@ class EpisodeView(ModelView):
         icon_class="fa-solid fa-circle-play",
     )
     def play_row_action(self, request: Request, pk: Any) -> str:
-        """A ▶ in the row-actions group (beside view/edit/delete) that links to this episode's
-        audio on the same host. Private shows carry the code in the path (`/{slug}/{code}/ep/
-        {name}`); public shows are codeless. Opens the MP3 (the browser plays it); '#' if the
-        row/show/code is missing."""
+        """A ▶ in the row-actions group (beside view/edit/delete) that opens this episode's audio
+        in a NEW TAB (the browser plays the MP3). Private shows carry the code in the path
+        (`/{slug}/{code}/ep/{name}`); public shows are codeless. '#' if the row/show/code is missing.
+
+        New tab via a `javascript:window.open(...)` href: the row-actions template renders a plain
+        `<a>` with no `target="_blank"`, and forking the vendor template to add one is the
+        dependency coupling we avoid. The admin JS only binds non-link actions, so it does not
+        intercept this link; the URL is built from url-safe parts (slug/code/percent-encoded name)
+        so there's nothing to break out of the JS string."""
         try:
             ep_id = int(pk)
         except (TypeError, ValueError):
@@ -231,8 +241,10 @@ class EpisodeView(ModelView):
                 return "#"
             name = quote(ep.filename)
             if show.access == "private" and show.code:
-                return f"/{show.slug}/{show.code}/ep/{name}"
-            return f"/{show.slug}/ep/{name}"
+                url = f"/{show.slug}/{show.code}/ep/{name}"
+            else:
+                url = f"/{show.slug}/ep/{name}"
+            return f"javascript:window.open('{url}','_blank')"
 
     async def before_delete(self, request: Request, obj) -> None:
         # Deleting an episode row also removes its files from the volume — the MP3

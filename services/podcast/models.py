@@ -94,6 +94,11 @@ class Episode(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # "Last rendered" — stamped when the audio file is (re)uploaded (a cut/recut). Distinct from
+    # published_at (the listener-facing original publication date, preserved across recuts): this
+    # is the admin-only signal that the file changed. NULL until the episode is (re)published
+    # through this service.
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     podcast: Mapped[Podcast] = relationship(back_populates="episodes")
 

@@ -1203,7 +1203,7 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, str, int, int
     spoken_chars = sum(len(c) for c in chunks if c != _SECTION_SENTINEL)
     if emph_chars and spoken_chars:
         pct = 100 * emph_chars / spoken_chars
-        _log(f"✨ [{doc.name}] emphasis: {emph_chars}/{spoken_chars} chars ({pct:.0f}%) marked slow")
+        _log(f"✨ [{doc.name}] emphasis: {emph_chars}/{spoken_chars} chars ({pct:.0f}%) bracketed")
         if pct > 5:
             _log(f"⚠️  [{doc.name}] emphasis is {pct:.0f}% of spoken text (>5%) — it lands best kept rare.")
     if args.max_pause_gap > 0:

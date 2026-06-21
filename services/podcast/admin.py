@@ -19,7 +19,8 @@ import secrets
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
-from urllib.parse import urlencode
+from typing import Any
+from urllib.parse import quote, urlencode
 
 import httpx
 import jwt as pyjwt
@@ -29,7 +30,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
 from starlette_admin import CustomView, StringField
-from starlette_admin.actions import action
+from starlette_admin.actions import action, link_row_action
 from starlette_admin.auth import AdminUser, AuthProvider
 from starlette_admin.contrib.sqla import Admin, ModelView
 
@@ -206,6 +207,32 @@ class EpisodeView(ModelView):
               "podcast",  # HasOne → clickable link to the show this episode belongs to
               "filename", "title", "sort_order",
               "published_at", "duration_seconds", "hidden", "description"]
+
+    @link_row_action(
+        name="play",
+        text="Play episode audio",
+        icon_class="fa-solid fa-circle-play",
+    )
+    def play_row_action(self, request: Request, pk: Any) -> str:
+        """A ▶ in the row-actions group (beside view/edit/delete) that links to this episode's
+        audio on the same host. Private shows carry the code in the path (`/{slug}/{code}/ep/
+        {name}`); public shows are codeless. Opens the MP3 (the browser plays it); '#' if the
+        row/show/code is missing."""
+        try:
+            ep_id = int(pk)
+        except (TypeError, ValueError):
+            return "#"
+        with SessionLocal() as s:
+            ep = s.get(Episode, ep_id)
+            if ep is None:
+                return "#"
+            show = s.get(Podcast, ep.podcast_slug)
+            if show is None:
+                return "#"
+            name = quote(ep.filename)
+            if show.access == "private" and show.code:
+                return f"/{show.slug}/{show.code}/ep/{name}"
+            return f"/{show.slug}/ep/{name}"
 
     async def before_delete(self, request: Request, obj) -> None:
         # Deleting an episode row also removes its files from the volume — the MP3

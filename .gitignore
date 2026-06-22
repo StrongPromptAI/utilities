@@ -35,3 +35,6 @@ database/
 
 # gitnexus-generated cluster skills (regen via post-commit hook)
 .claude/skills/generated/
+
+# generated TTS voice previews (regenerable scratch, not for git)
+.voice-samples/

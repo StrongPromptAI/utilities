@@ -1,4 +1,5 @@
 .venv/
 data/
+brain/
 __pycache__/
 *.egg-info/

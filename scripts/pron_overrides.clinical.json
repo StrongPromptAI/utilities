@@ -1,0 +1,8 @@
+{
+  "_comment": "PER-DOMAIN pronunciation sidecar for clinical / product briefings (the thj + roadmap doc-sets). Layered ON TOP of the global scripts/pron_overrides.json via `--pron-file scripts/pron_overrides.clinical.json` on a doc_to_speech / doc_to_podcast run. This file is the sanctioned home for BARE homograph overrides the global file must NOT carry — because within THIS domain the sense is fixed: 'content' is always the noun (CONtent, authored material — never the adjective 'I'm content'), and 'live' / 'lives' always mean reside (/lIv/, e.g. 'where the bike content lives' — never a live broadcast). espeak resolves these homographs by sentence-position heuristic and gets them wrong (a sentence-final '…content.' flips to conTENT; bare 'live'/'lives' default to /laIv/), and a sentence-position flip is NOT phrase-disambiguable, so the global file's phrase-only doctrine cannot reach it — declaring the fixed sense here is the only deterministic fix. DO NOT point general-purpose audio at this file. Validate any addition against phonemes per the global file's _comment recipe ('content'->'con-tent' = kˈɑːntˈɛnt first-syllable stress; 'live'->'liv' = lˈɪv; 'lives'->'livz' = lˈɪvz). Keep ENTRIES that are genuinely domain-fixed homographs only; ordinary words espeak already says right do not belong here.",
+  "overrides": {
+    "content": "con-tent",
+    "live": "liv",
+    "lives": "livz"
+  }
+}

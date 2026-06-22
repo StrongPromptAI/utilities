@@ -78,7 +78,7 @@ Shared services live under `services/` and are deployed in the `shared-svcs` Rai
 
 - `services/embed/` — nomic-embed-text-v1.5 ONNX, 768 dims, port 8100. Two endpoints: TEI-native `/embed` and OpenAI-compatible `/v1/embeddings`. Deployed **twice**: always-on `embed` (interactive) and hibernated `embed-batch` (ingest).
 - `services/stt/` — sherpa-onnx streaming speech-to-text. Port 8101. WebSocket `/transcribe`.
-- `services/tts/` — Kokoro-82M ONNX text-to-speech, 24 kHz mono. Port 8102. OpenAI-compatible REST `/v1/audio/speech`. Prod allowlist `af_heart,af_nova,am_adam`, default voice `af_nova`; the `af_nova` (F) + `am_adam` (M) pair are the two-voice podcast defaults (see `scripts/doc_to_podcast.py`). Env-tunable via `TTS_VOICE_ALLOWLIST` / `TTS_DEFAULT_VOICE`.
+- `services/tts/` — Kokoro-82M ONNX text-to-speech, 24 kHz mono. Port 8102. OpenAI-compatible REST `/v1/audio/speech`. Prod allowlist `af_heart,af_nova,am_adam`, default voice `af_nova`; the `af_nova` (F) + `am_adam` (M) pair are the two-voice podcast defaults (see `scripts/doc_to_audio.py --format dialogue`). Env-tunable via `TTS_VOICE_ALLOWLIST` / `TTS_DEFAULT_VOICE`.
 - `services/whisper/` — faster-whisper batch transcription. OpenAI-compatible REST `/v1/audio/transcriptions`.
 
 #### Embed: chat vs batch split

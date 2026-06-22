@@ -54,6 +54,7 @@ from doc_to_speech import (
     llm_chat,
     _publish_episode,
     _safe_mp3_name,
+    _split_shownotes,
     _Synth,
     _silence,
     apply_pron_overrides,
@@ -284,10 +285,21 @@ def process_dialogue(
             _die("--no-upload given but no --out path — nothing would be saved.")
         return None
 
+    # Show-notes footer (citations/sources) — the turns JSON can't carry the `<!-- shownotes -->`
+    # sentinel, so pull it from the positional source doc(s), which are present even on --script-in.
+    # Mirrors the one-voice path (_normalize_and_chunk → _split_shownotes); additive (defaults "").
+    show_notes = ""
+    for d in docs:
+        _, sn = _split_shownotes(d.read_text(encoding="utf-8"))
+        if sn:
+            show_notes = sn
+            _log(f"📓 show-notes footer found in {d.name} ({len(sn)} chars) — appended to transcript")
+            break
+
     filename = _safe_mp3_name(Path(args.name or _slug(title)), args.name)
     return _publish_episode(
         mp3=mp3, description_source=_dialogue_markdown(script, title), doc_name=filename,
         filename=filename, args=args, secret=secret, base_url=base_url,
-        duration_seconds=seconds, published_at=published_at,
+        duration_seconds=seconds, published_at=published_at, show_notes=show_notes,
     )
 

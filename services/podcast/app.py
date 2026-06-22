@@ -12,6 +12,8 @@ Routes:
   GET  /{slug}/ep/{name}            public episode audio
   GET  /{slug}/{code}/ep/{name}/transcript   private episode transcript (raw markdown)
   GET  /{slug}/ep/{name}/transcript          public episode transcript
+  GET  /{slug}/{code}/ep/{name}/transcript.html  private transcript, rendered HTML
+  GET  /{slug}/ep/{name}/transcript.html         public transcript, rendered HTML
   GET  /artwork/{slug}             channel cover art
   PUT  /upload/{slug}/{name}        service-token upload (headless producers)
 
@@ -25,11 +27,12 @@ import hmac
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from html import escape
 
 import httpx
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from db import SessionLocal, init_db
@@ -94,8 +97,12 @@ def _serve_audio(show: Podcast, name: str) -> FileResponse:
     # No content-disposition: attachment (don't pass filename) — serve as a normal, cacheable
     # podcast enclosure so clients add it to the library and KEEP it, instead of treating it as a
     # throwaway download. FileResponse still sets Accept-Ranges + emits 206 on Range: requests.
+    # `no-cache` = store-but-revalidate: clients may keep the file, but must revalidate against the
+    # ETag/Last-Modified before reuse, so a --recut (same name, new bytes → new ETag) propagates
+    # immediately instead of being masked for up to a week by a long max-age. Unchanged files
+    # revalidate to a cheap 304 (no re-download), so the cost is a conditional round-trip, not the MP3.
     return FileResponse(p, media_type="audio/mpeg",
-                        headers={"Cache-Control": "public, max-age=604800"})
+                        headers={"Cache-Control": "public, no-cache"})
 
 
 def _serve_transcript(show: Podcast, name: str) -> FileResponse:
@@ -105,7 +112,56 @@ def _serve_transcript(show: Podcast, name: str) -> FileResponse:
     p = transcript_path(show.folder, name)
     if p is None:
         raise HTTPException(404, "no transcript")
-    return FileResponse(p, media_type="text/markdown; charset=utf-8", filename=p.name)
+    # Revalidate (FileResponse sets an ETag) so a recut's new transcript sidecar isn't masked by a
+    # stale cached copy — cheap 304 when unchanged. Mirrors _serve_audio.
+    return FileResponse(p, media_type="text/markdown; charset=utf-8", filename=p.name,
+                        headers={"Cache-Control": "public, no-cache"})
+
+
+def _render_transcript_page(name: str, md: str | None) -> str:
+    """A standalone HTML page that renders the transcript markdown with marked.js (client-side,
+    pinned major version) — readable prose, not raw `.md`. The raw markdown is HTML-escaped into a
+    hidden node and read back via `textContent` (which decodes the entities → the original
+    markdown), so nothing in the transcript can inject markup into the page before marked renders
+    it. Missing transcript → a friendly message, not a blank page."""
+    t = escape(name)
+    if md is None:
+        inner = '<div id="out"><p style="color:#888">No transcript for this episode.</p></div>'
+        script = ""
+    else:
+        inner = f'<div id="md-src" hidden>{escape(md)}</div><div id="out"></div>'
+        script = (
+            '<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>'
+            '<script>document.getElementById("out").innerHTML='
+            'marked.parse(document.getElementById("md-src").textContent);</script>'
+        )
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        f"<title>Transcript — {t}</title>"
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<style>"
+        "body{font:16px/1.65 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;"
+        "max-width:46rem;margin:2.5rem auto;padding:0 1.25rem;color:#1a1a1a}"
+        "h1{font-size:1.6rem;line-height:1.25}h2{font-size:1.3rem;margin-top:2rem;line-height:1.3}"
+        "h3{font-size:1.1rem;margin-top:1.5rem}p{margin:1rem 0}a{color:#0b66c3}"
+        "code{background:#f3f3f3;padding:.1em .3em;border-radius:3px}"
+        "pre{background:#f6f8fa;padding:1rem;overflow:auto;border-radius:6px}"
+        "blockquote{border-left:3px solid #ddd;margin:1rem 0;padding:.2rem 1rem;color:#555}"
+        "</style></head><body>"
+        f"{inner}{script}"
+        "</body></html>"
+    )
+
+
+def _serve_transcript_html(show: Podcast, name: str) -> Response:
+    """Render the `<base>-transcript.md` sidecar as a readable HTML page (the admin's
+    'View transcript' link, opened in a new tab). Same code/visibility gate as the raw route."""
+    p = transcript_path(show.folder, name)
+    md = p.read_text(encoding="utf-8", errors="replace") if p is not None else None
+    # Rendered HTML has no validator (it's generated, not a file), so `no-store` — always fresh,
+    # never a stale rendered transcript after a recut.
+    return HTMLResponse(_render_transcript_page(name, md),
+                        headers={"Cache-Control": "no-store"})
 
 
 def _feed_response(slug: str, code: str | None, request: Request) -> Response:
@@ -163,6 +219,7 @@ async def upload(slug: str, name: str, request: Request, _: None = Depends(_veri
                 session, slug, name,
                 request.headers.get("X-Duration-Seconds"),
                 request.headers.get("X-Published-At"),
+                mark_updated=True,   # the audio was just (re)written → stamp "last rendered"
             )
     return {"written": name, "bytes": nbytes}
 
@@ -200,13 +257,18 @@ def _iso_utc(dt) -> "str | None":
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _set_episode_meta(session, slug: str, name: str, duration_seconds, published_at) -> None:
+def _set_episode_meta(
+    session, slug: str, name: str, duration_seconds, published_at, *, mark_updated: bool = False
+) -> None:
     """Upsert one episode row's duration + publish date from upload/import metadata. Each is
     set only when supplied, so a producer can send one without clobbering the other; a single
-    row write covers both."""
+    row write covers both. `mark_updated` stamps `updated_at = now` — the audio was just
+    (re)rendered. That's the admin-only "last rendered" signal; `published_at` stays the original
+    publication date, so a recut is visible to the admin (file changed) WITHOUT resurfacing the
+    episode in subscribers' feeds (same GUID + same date = a silent correction)."""
     secs = _coerce_int(duration_seconds)
     dt = _coerce_dt(published_at)
-    if secs is None and dt is None:
+    if secs is None and dt is None and not mark_updated:
         return
     ep = session.query(Episode).filter_by(podcast_slug=slug, filename=name).one_or_none()
     if ep is None:
@@ -216,6 +278,8 @@ def _set_episode_meta(session, slug: str, name: str, duration_seconds, published
         ep.duration_seconds = secs
     if dt is not None:
         ep.published_at = dt
+    if mark_updated:
+        ep.updated_at = datetime.now(timezone.utc)
     session.commit()
 
 
@@ -245,8 +309,9 @@ async def import_from_url(
             write_upload(show.folder, name, r.content)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
-        if name.lower().endswith(".mp3") and (req.duration_seconds or req.published_at):
-            _set_episode_meta(session, slug, name, req.duration_seconds, req.published_at)
+        if name.lower().endswith(".mp3"):
+            _set_episode_meta(session, slug, name, req.duration_seconds, req.published_at,
+                              mark_updated=True)   # audio (re)written → stamp "last rendered"
     return {"written": name, "bytes": len(r.content)}
 
 
@@ -359,6 +424,15 @@ async def private_transcript(slug: str, code: str, name: str):
     return _serve_transcript(folder_show, name)
 
 
+@app.get("/{slug}/{code}/ep/{name}/transcript.html")
+async def private_transcript_html(slug: str, code: str, name: str):
+    with SessionLocal() as session:
+        show = _load_show(session, slug)
+        _gate_private(show, code)
+        folder_show = show
+    return _serve_transcript_html(folder_show, name)
+
+
 @app.get("/{slug}/feed.xml")
 async def public_feed(slug: str, request: Request):
     return _feed_response(slug, None, request)
@@ -380,6 +454,15 @@ async def public_transcript(slug: str, name: str):
         _require_public(show)
         folder_show = show
     return _serve_transcript(folder_show, name)
+
+
+@app.get("/{slug}/ep/{name}/transcript.html")
+async def public_transcript_html(slug: str, name: str):
+    with SessionLocal() as session:
+        show = _load_show(session, slug)
+        _require_public(show)
+        folder_show = show
+    return _serve_transcript_html(folder_show, name)
 
 
 # ── admin (Starlette-Admin + OIDC) — mounted at /admin, session middleware ──

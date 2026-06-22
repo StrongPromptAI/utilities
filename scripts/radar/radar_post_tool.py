@@ -38,7 +38,7 @@ from pathlib import Path
 
 # Local import — Skill Radar embed client, backed by the utilities ONNX service.
 sys.path.insert(0, str(Path(__file__).parent))
-from embed_client import embed as _shared_embed, EmbedUnavailable, EmbedAuthError
+from embed_client import embed as _shared_embed, EmbedUnavailable
 from event_adapter import ToolEvent, normalize_event
 from output_adapter import render_additional_context
 import schema_corpus as sc
@@ -717,10 +717,9 @@ def main():
     try:
         query_vec = embed(QUERY_PREFIX + error_text)
     except EmbedUnavailable as e:
-        # Backend not usable — either unreachable (EmbedUnavailable) or auth-rejected
-        # (EmbedAuthError subclass: bad/wrong/expired JWT). Record the signal so harvest
-        # still sees the error, then fail LOUD (exit 2) rather than silently dropping
-        # radar coverage. (503/busy is "up" → None below.)
+        # No embed backend reachable at all (neither local ONNX nor Railway). Record
+        # the signal so harvest still sees the error, then fail LOUD (exit 2) rather
+        # than silently dropping radar coverage. (503/busy is "up" → None below.)
         if session_log_append(
             event_type="bash_error",
             tool=event.tool_name or "Bash",
@@ -729,20 +728,12 @@ def main():
             outcome="missed",
         ):
             _touch_heartbeat()
-        if isinstance(e, EmbedAuthError):
-            print(
-                f"❌ Skill Radar: embed auth rejected — {e}\n"
-                "Fix shared_svc_jwt_secret in ~/.config/keys.json (= shared-svcs Railway "
-                "JWT_SECRET), or unset SKILL_RADAR_EMBED_URL to use local ONNX.",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                f"❌ Skill Radar: embed backend unavailable — {e}\n"
-                "Start local ONNX (services/embed on :8100) or point SKILL_RADAR_EMBED_URL "
-                "at Railway.",
-                file=sys.stderr,
-            )
+        print(
+            f"❌ Skill Radar: embed backend unavailable — {e}\n"
+            "Start local ONNX (services/embed on :8100) or point SKILL_RADAR_EMBED_URL "
+            "at Railway.",
+            file=sys.stderr,
+        )
         sys.exit(2)
     if not query_vec:
         # Backend up but the call failed (busy/transient) — record the error so we

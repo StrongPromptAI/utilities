@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir \
     "boto3>=1.34.0" \
     "httpx>=0.27.0" \
     "python-multipart>=0.0.9" \
+    "markdown>=3.6" \
     "tzdata"
 
 COPY main.py templates.py ./

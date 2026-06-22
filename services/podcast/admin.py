@@ -29,7 +29,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
-from starlette_admin import CustomView
+from starlette_admin import CustomView, StringField
 from starlette_admin.actions import action, link_row_action
 from starlette_admin.auth import AdminUser, AuthProvider
 from starlette_admin.contrib.sqla import Admin, ModelView
@@ -170,8 +170,14 @@ class OIDCAuthProvider(AuthProvider):
 # ── model views (with the self-serve actions) ──────────────────────────────
 
 class PodcastView(ModelView):
-    fields = ["slug", "title", "folder", "access", "code", "description",
-              "author", "category", "language", "explicit", "visible"]
+    fields = ["slug", "title",
+              "episodes",  # HasMany → clickable links to this show's episodes (list + detail)
+              "folder", "access", "code",
+              StringField("feed_url", label="Feed URL", read_only=True),
+              "description", "author", "category", "language", "explicit", "visible"]
+    # `episodes` is navigation-only (read links); keep it out of the create/edit forms.
+    exclude_fields_from_create = ["episodes"]
+    exclude_fields_from_edit = ["episodes"]
     actions = ["sync_episodes", "rotate_code", "delete"]
 
     @action(
@@ -197,33 +203,60 @@ class PodcastView(ModelView):
 
 
 class EpisodeView(ModelView):
-    fields = ["id", "podcast_slug", "filename", "title", "sort_order",
-              "published_at", "duration_seconds", "hidden", "description"]
+    fields = ["id",
+              "podcast",  # HasOne → clickable link to the show this episode belongs to
+              "filename", "title", "sort_order",
+              "published_at",      # listener-facing original publication date (preserved across recuts)
+              "updated_at",        # admin-only "last rendered" — bumps on every (re)cut; published_at does NOT
+              "duration_seconds", "hidden", "description"]
+    # updated_at is system-stamped on (re)upload — not a hand-editable field.
+    exclude_fields_from_create = ["updated_at"]
+    exclude_fields_from_edit = ["updated_at"]
 
+    def _episode_url_base(self, pk: Any) -> str | None:
+        """`/{slug}/{code}/ep/{name}` for this episode (code only for private shows), or None if
+        the row/show is gone. The shared base for both the audio link (play) and the rendered
+        transcript link — built from url-safe parts (slug/code/percent-encoded name)."""
+        try:
+            ep_id = int(pk)
+        except (TypeError, ValueError):
+            return None
+        with SessionLocal() as s:
+            ep = s.get(Episode, ep_id)
+            if ep is None:
+                return None
+            show = s.get(Podcast, ep.podcast_slug)
+            if show is None:
+                return None
+            name = quote(ep.filename)
+            if show.access == "private" and show.code:
+                return f"/{show.slug}/{show.code}/ep/{name}"
+            return f"/{show.slug}/ep/{name}"
+
+    # New-tab row-action links via `javascript:window.open(...)`: the row-actions template renders
+    # a plain `<a>` with no `target="_blank"`, and forking the vendor template to add one is the
+    # dependency coupling we avoid. The admin JS only binds non-link actions, so it doesn't
+    # intercept these links; the URLs are url-safe so there's nothing to break out of the JS string.
     @link_row_action(
         name="play",
         text="Play episode audio",
         icon_class="fa-solid fa-circle-play",
     )
     def play_row_action(self, request: Request, pk: Any) -> str:
-        """A ▶ in the row-actions group that links to this episode's audio on the same host.
-        Private shows carry the code in the path (`/{slug}/{code}/ep/{name}`); public shows are
-        codeless. Opens the MP3 (the browser plays it); '#' if the row/show/code is missing."""
-        try:
-            ep_id = int(pk)
-        except (TypeError, ValueError):
-            return "#"
-        with SessionLocal() as s:
-            ep = s.get(Episode, ep_id)
-            if ep is None:
-                return "#"
-            show = s.get(Podcast, ep.podcast_slug)
-            if show is None:
-                return "#"
-            name = quote(ep.filename)
-            if show.access == "private" and show.code:
-                return f"/{show.slug}/{show.code}/ep/{name}"
-            return f"/{show.slug}/ep/{name}"
+        """▶ — opens the episode audio in a new tab (the browser plays the MP3)."""
+        base = self._episode_url_base(pk)
+        return f"javascript:window.open('{base}','_blank')" if base else "#"
+
+    @link_row_action(
+        name="transcript",
+        text="View transcript",
+        icon_class="fa-solid fa-file-lines",
+    )
+    def transcript_row_action(self, request: Request, pk: Any) -> str:
+        """📄 — opens the episode's transcript, rendered as HTML (marked.js), in a new tab.
+        A transcript-less episode lands on a friendly 'No transcript' page, not a 404."""
+        base = self._episode_url_base(pk)
+        return f"javascript:window.open('{base}/transcript.html','_blank')" if base else "#"
 
     async def before_delete(self, request: Request, obj) -> None:
         # Deleting an episode row also removes its files from the volume — the MP3

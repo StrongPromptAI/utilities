@@ -10,6 +10,7 @@ with no row still appears, with defaults derived at build time.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
@@ -59,6 +60,15 @@ class Podcast(Base):
     def __str__(self) -> str:  # Starlette-Admin row label
         return f"{self.title} ({self.slug})"
 
+    @property
+    def feed_url(self) -> str:
+        """Copy-pasteable subscribe URL — code-bearing for private shows, codeless
+        for public. Surfaced read-only in the admin so the private link is one glance."""
+        base = os.environ.get("PODCAST_PUBLIC_BASE", "").rstrip("/")
+        if self.access == "public":
+            return f"{base}/{self.slug}/feed.xml"
+        return f"{base}/{self.slug}/{self.code}/feed.xml" if self.code else ""
+
 
 class Episode(Base):
     """Editable overrides for one MP3 in a show's folder.
@@ -84,6 +94,11 @@ class Episode(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     hidden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # "Last rendered" — stamped when the audio file is (re)uploaded (a cut/recut). Distinct from
+    # published_at (the listener-facing original publication date, preserved across recuts): this
+    # is the admin-only signal that the file changed. NULL until the episode is (re)published
+    # through this service.
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     podcast: Mapped[Podcast] = relationship(back_populates="episodes")
 

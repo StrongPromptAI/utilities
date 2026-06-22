@@ -97,8 +97,12 @@ def _serve_audio(show: Podcast, name: str) -> FileResponse:
     # No content-disposition: attachment (don't pass filename) — serve as a normal, cacheable
     # podcast enclosure so clients add it to the library and KEEP it, instead of treating it as a
     # throwaway download. FileResponse still sets Accept-Ranges + emits 206 on Range: requests.
+    # `no-cache` = store-but-revalidate: clients may keep the file, but must revalidate against the
+    # ETag/Last-Modified before reuse, so a --recut (same name, new bytes → new ETag) propagates
+    # immediately instead of being masked for up to a week by a long max-age. Unchanged files
+    # revalidate to a cheap 304 (no re-download), so the cost is a conditional round-trip, not the MP3.
     return FileResponse(p, media_type="audio/mpeg",
-                        headers={"Cache-Control": "public, max-age=604800"})
+                        headers={"Cache-Control": "public, no-cache"})
 
 
 def _serve_transcript(show: Podcast, name: str) -> FileResponse:
@@ -108,7 +112,10 @@ def _serve_transcript(show: Podcast, name: str) -> FileResponse:
     p = transcript_path(show.folder, name)
     if p is None:
         raise HTTPException(404, "no transcript")
-    return FileResponse(p, media_type="text/markdown; charset=utf-8", filename=p.name)
+    # Revalidate (FileResponse sets an ETag) so a recut's new transcript sidecar isn't masked by a
+    # stale cached copy — cheap 304 when unchanged. Mirrors _serve_audio.
+    return FileResponse(p, media_type="text/markdown; charset=utf-8", filename=p.name,
+                        headers={"Cache-Control": "public, no-cache"})
 
 
 def _render_transcript_page(name: str, md: str | None) -> str:
@@ -151,7 +158,10 @@ def _serve_transcript_html(show: Podcast, name: str) -> Response:
     'View transcript' link, opened in a new tab). Same code/visibility gate as the raw route."""
     p = transcript_path(show.folder, name)
     md = p.read_text(encoding="utf-8", errors="replace") if p is not None else None
-    return HTMLResponse(_render_transcript_page(name, md))
+    # Rendered HTML has no validator (it's generated, not a file), so `no-store` — always fresh,
+    # never a stale rendered transcript after a recut.
+    return HTMLResponse(_render_transcript_page(name, md),
+                        headers={"Cache-Control": "no-store"})
 
 
 def _feed_response(slug: str, code: str | None, request: Request) -> Response:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -20,6 +21,20 @@ from sqlalchemy.types import DateTime
 
 def _utcnow() -> datetime:
     return datetime.now(tz=timezone.utc)
+
+
+_PACIFIC = ZoneInfo("America/Los_Angeles")
+
+
+def _fmt_pacific(dt: datetime | None) -> str:
+    """A stored (UTC) datetime → human string in US Pacific with a PDT/PST label, for admin
+    display only. Storage stays UTC; HTTP/feed timestamps stay UTC/GMT. Naive values are read
+    as UTC (SQLite drops tzinfo on round-trip)."""
+    if dt is None:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_PACIFIC).strftime("%b %-d, %Y %-I:%M %p %Z")
 
 
 class Base(DeclarativeBase):
@@ -101,6 +116,12 @@ class Episode(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     podcast: Mapped[Podcast] = relationship(back_populates="episodes")
+
+    @property
+    def updated_at_pacific(self) -> str:
+        """`updated_at` ('last rendered') in US Pacific (PDT/PST) for the admin column — the stored
+        value is UTC; this only localizes the display."""
+        return _fmt_pacific(self.updated_at)
 
     def __str__(self) -> str:
         return self.title or self.filename

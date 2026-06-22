@@ -207,11 +207,13 @@ class EpisodeView(ModelView):
               "podcast",  # HasOne → clickable link to the show this episode belongs to
               "filename", "title", "sort_order",
               "published_at",      # listener-facing original publication date (preserved across recuts)
-              "updated_at",        # admin-only "last rendered" — bumps on every (re)cut; published_at does NOT
+              # admin-only "last rendered" — bumps on every (re)cut; published_at does NOT. Shown in
+              # US Pacific (PDT/PST) via the model's updated_at_pacific property; stored value is UTC.
+              StringField("updated_at_pacific", label="Updated (PT)", read_only=True),
               "duration_seconds", "hidden", "description"]
-    # updated_at is system-stamped on (re)upload — not a hand-editable field.
-    exclude_fields_from_create = ["updated_at"]
-    exclude_fields_from_edit = ["updated_at"]
+    # updated_at is system-stamped on (re)upload — never hand-editable.
+    exclude_fields_from_create = ["updated_at_pacific"]
+    exclude_fields_from_edit = ["updated_at_pacific"]
 
     def _episode_url_base(self, pk: Any) -> str | None:
         """`/{slug}/{code}/ep/{name}` for this episode (code only for private shows), or None if

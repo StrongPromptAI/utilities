@@ -206,14 +206,20 @@ class EpisodeView(ModelView):
     fields = ["id",
               "podcast",  # HasOne → clickable link to the show this episode belongs to
               "filename", "title", "sort_order",
-              "published_at",      # listener-facing original publication date (preserved across recuts)
+              # listener-facing original publication date (preserved across recuts). Displayed in
+              # US Pacific (PDT/PST) via published_at_pacific; the raw `published_at` is kept on the
+              # edit form (excluded from the list) so a date is still hand-correctable.
+              StringField("published_at_pacific", label="Published (PT)", read_only=True),
+              "published_at",
               # admin-only "last rendered" — bumps on every (re)cut; published_at does NOT. Shown in
               # US Pacific (PDT/PST) via the model's updated_at_pacific property; stored value is UTC.
               StringField("updated_at_pacific", label="Updated (PT)", read_only=True),
               "duration_seconds", "hidden", "description"]
-    # updated_at is system-stamped on (re)upload — never hand-editable.
-    exclude_fields_from_create = ["updated_at_pacific"]
-    exclude_fields_from_edit = ["updated_at_pacific"]
+    # Show only the Pacific column in the list; keep the raw editable field on the create/edit form.
+    exclude_fields_from_list = ["published_at"]
+    # updated_at is system-stamped on (re)upload — never hand-editable; the *_pacific props are display-only.
+    exclude_fields_from_create = ["published_at_pacific", "updated_at_pacific"]
+    exclude_fields_from_edit = ["published_at_pacific", "updated_at_pacific"]
 
     def _episode_url_base(self, pk: Any) -> str | None:
         """`/{slug}/{code}/ep/{name}` for this episode (code only for private shows), or None if

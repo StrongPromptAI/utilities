@@ -118,6 +118,13 @@ class Episode(Base):
     podcast: Mapped[Podcast] = relationship(back_populates="episodes")
 
     @property
+    def published_at_pacific(self) -> str:
+        """`published_at` (listener-facing publication date) in US Pacific (PDT/PST) for the admin
+        column — the stored value is UTC; this only localizes the display. The feed `<pubDate>`
+        stays UTC/GMT (apps localize it); this is admin display only, mirroring updated_at_pacific."""
+        return _fmt_pacific(self.published_at)
+
+    @property
     def updated_at_pacific(self) -> str:
         """`updated_at` ('last rendered') in US Pacific (PDT/PST) for the admin column — the stored
         value is UTC; this only localizes the display."""

@@ -1044,7 +1044,7 @@ def _next_recut_name(mp3_name: str, existing: set[str]) -> str:
 def _publish_episode(
     *, mp3: bytes, description_source: str, doc_name: str, filename: str, args,
     secret: str, base_url: str, duration_seconds: float | None,
-    published_at: str | None = None,
+    published_at: str | None = None, show_notes: str = "",
 ) -> str:
     """Publish one finished episode to its podcast show — the single upload sink shared by
     the one-voice (_process_doc) and two-voice (dialogue.process_dialogue) pipelines, so the
@@ -1083,11 +1083,17 @@ def _publish_episode(
     # --no-transcript opts out of the transcript only (the blurb above still publishes).
     if not args.no_transcript:
         tname = _podcast_transcript_name(filename)
+        # The transcript sidecar is the spoken script PLUS any `<!-- shownotes -->` footer (citations
+        # / Sources) — the footer rides in the show notes (<content:encoded>) but was never voiced.
+        transcript_md = description_source
+        if show_notes:
+            transcript_md = description_source.rstrip() + "\n\n" + show_notes.strip() + "\n"
         upload_to_podcast(
-            description_source.encode("utf-8"), filename=tname, slug=show,
+            transcript_md.encode("utf-8"), filename=tname, slug=show,
             base_url=base_url, secret=secret, content_type="text/markdown; charset=utf-8",
         )
-        _log(f"📝 {doc_name} → podcast transcript: {show}/{tname}")
+        extra = f" (+{len(show_notes)} chars show-notes footer)" if show_notes else ""
+        _log(f"📝 {doc_name} → podcast transcript: {show}/{tname}{extra}")
     return loc
 
 
@@ -1121,13 +1127,40 @@ def _safe_mp3_name(doc_path: Path, override: str | None, audience: str = "techni
 
 # ── Per-document pipeline (shared by single- and multi-doc runs) ─────────────────
 
-def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, str, int, int]:
+SHOWNOTES_SENTINEL = "<!-- shownotes -->"
+
+
+def _split_shownotes(text: str) -> tuple[str, str]:
+    """Split an authored source on a `<!-- shownotes -->` line into (spoken, show_notes).
+
+    Everything AFTER the sentinel is Show Notes: NEVER synthesized (not read aloud) and NOT fed to
+    the description-blurb pass — but appended to the published `-transcript.md` sidecar (→ the feed's
+    <content:encoded>). It is the durable home for a citation / Sources footer that must ride in the
+    show notes and survive every recut (the spoken script is the source of truth; a footer here is
+    reproduced on every cut). No sentinel → (text, "").
+    """
+    out: list[str] = []
+    notes: list[str] = []
+    hit = False
+    for ln in text.splitlines():
+        if not hit and ln.strip().lower() == SHOWNOTES_SENTINEL:
+            hit = True
+            continue
+        (notes if hit else out).append(ln)
+    return ("\n".join(out).rstrip() + "\n", "\n".join(notes).strip())
+
+
+def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, str, str, int, int]:
     """Read a doc → speakable prose → optional LLM pass → pron overrides → chunks.
 
-    Returns (chunks, title, transcript_md, raw_chars, speakable_chars). No network beyond
-    the optional LLM pass; safe to call from a worker thread (one per doc).
+    Returns (chunks, title, transcript_md, show_notes, raw_chars, speakable_chars). No network
+    beyond the optional LLM pass; safe to call from a worker thread (one per doc).
     """
     raw = doc.read_text(encoding="utf-8")
+    raw, show_notes = _split_shownotes(raw)
+    if show_notes:
+        _log(f"📓 [{doc.name}] show-notes footer found ({len(show_notes)} chars) — kept for the "
+             f"transcript sidecar (<content:encoded>), excluded from audio + the description blurb.")
     # Narrative modes distill the ideas, never read code aloud — drop the code cue.
     code_cue = "" if args.narrative else "Code block omitted."
     speakable, h1 = normalize_markdown(raw, code_cue=code_cue, section_breaks=True)
@@ -1215,7 +1248,7 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, str, int, int
     if not chunks:
         _die(f"Nothing speakable in {doc.name} (empty or all code/markup).")
 
-    return chunks, title, transcript_md, len(raw), sum(len(c) for c in chunks)
+    return chunks, title, transcript_md, show_notes, len(raw), sum(len(c) for c in chunks)
 
 
 def _resolve_tts_endpoint(args) -> tuple[str, str | None]:
@@ -1292,7 +1325,7 @@ def _process_doc(
     """Full pipeline for one document: normalize → synth → MP3 → publish. Returns the
     podcast location, or None when --no-upload. Endpoint/secrets are resolved once by
     the caller and passed in, so this is safe to run concurrently (one call per doc)."""
-    chunks, title, transcript_md, raw_len, total_chars = _normalize_and_chunk(doc, args)
+    chunks, title, transcript_md, show_notes, raw_len, total_chars = _normalize_and_chunk(doc, args)
     _log(f"📄 {doc.name}: {raw_len} raw → {total_chars} speakable → {len(chunks)} chunks")
 
     # Build the ordered parts list (silence bytes + _Synth markers). Normal gap after
@@ -1324,7 +1357,7 @@ def _process_doc(
     return _publish_episode(
         mp3=mp3, description_source=transcript_md, doc_name=doc.name, filename=filename,
         args=args, secret=secret, base_url=base_url, duration_seconds=seconds,
-        published_at=published_at,
+        published_at=published_at, show_notes=show_notes,
     )
 
 

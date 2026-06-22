@@ -277,7 +277,7 @@ def main() -> None:
     else:
         _reject(
             [("female-name", args.female_name, "Maya"), ("male-name", args.male_name, "Ethan"),
-             ("female-voice", args.female_voice, "af_nova"), ("male-voice", args.male_voice, "am_adam"),
+             ("female-voice", args.female_voice, "af_nova"), ("male-voice", args.male_voice, "am_liam"),
              ("minutes", args.minutes, 3.0), ("brief", args.brief, DEFAULT_BRIEF),
              ("model", args.model, DEFAULT_SCRIPT_MODEL), ("script-in", args.script_in, None),
              ("script-out", args.script_out, None)],

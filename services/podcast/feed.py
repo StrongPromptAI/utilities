@@ -24,18 +24,43 @@ def _derive_title(filename: str) -> str:
     return stem.replace("_", " ").strip()
 
 
+def _md_inline(text: str) -> str:
+    """Inline markdown → HTML on ALREADY entity-escaped text. `xml.sax.saxutils.escape`
+    only touches `& < >`, so the markdown markers (`* _ [ ]`) survive to be converted here,
+    and the tags we insert (added after escaping) stay literal. Order matters: links, then
+    bold (`**`), then italics (`_`/`*`) so the double-star isn't eaten by the single-star rule."""
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", r'<a href="\2">\1</a>', text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"(?<![A-Za-z0-9_])_([^_\n]+)_(?![A-Za-z0-9_])", r"<em>\1</em>", text)
+    text = re.sub(r"(?<![*\w])\*([^*\n]+)\*(?![*\w])", r"<em>\1</em>", text)
+    return text
+
+
+_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
+_BULLET = re.compile(r"^\s*[-*]\s+(.*)$")
+
+
 def _transcript_html(md: str) -> str:
-    """Render a transcript markdown body to the minimal HTML <content:encoded> carries:
-    a leading `# Title` → <h2>, every other blank-line-separated block → a <p> with its
-    wrapped lines joined. Text is entity-escaped (it sits inside CDATA but must still be
-    valid HTML), and any literal `]]>` is defanged so it can't close the CDATA early."""
+    """Render a transcript markdown body to the HTML <content:encoded> carries — headings
+    (`#`→<h2> … `######`→<h6>, capped), `**bold**`/`_italic_`/`*italic*`, `[text](url)` links,
+    and `- ` bullet blocks → <ul>; every other blank-line-separated block → a <p>. Without this,
+    podcast apps render the raw `**`/`##`/`_` characters. Text is entity-escaped first (it sits in
+    CDATA but must still be valid HTML) and any literal `]]>` is defanged so it can't close it early."""
     blocks = [b.strip() for b in re.split(r"\n\s*\n", md.strip()) if b.strip()]
     parts: list[str] = []
     for b in blocks:
-        if b.startswith("# "):
-            parts.append(f"<h2>{escape(b[2:].strip())}</h2>")
+        lines = b.split("\n")
+        h = _HEADING.match(b) if len(lines) == 1 else None
+        if h:
+            level = min(len(h.group(1)) + 1, 6)  # `#`→h2, `##`→h3, …
+            parts.append(f"<h{level}>{_md_inline(escape(h.group(2).strip()))}</h{level}>")
+        elif all(_BULLET.match(ln) for ln in lines):
+            items = "".join(
+                f"<li>{_md_inline(escape(_BULLET.match(ln).group(1).strip()))}</li>" for ln in lines
+            )
+            parts.append(f"<ul>{items}</ul>")
         else:
-            parts.append(f"<p>{escape(' '.join(b.split()))}</p>")
+            parts.append(f"<p>{_md_inline(escape(' '.join(b.split())))}</p>")
     return "".join(parts).replace("]]>", "]]&gt;")
 
 

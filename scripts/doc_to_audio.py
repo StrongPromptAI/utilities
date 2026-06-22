@@ -175,7 +175,7 @@ def main() -> None:
     two.add_argument("--female-name", default="Maya", help="Female host name (LLM uses it verbatim).")
     two.add_argument("--male-name", default="Ethan", help="Male host name.")
     two.add_argument("--female-voice", default="af_nova", help="Kokoro voice for the female host.")
-    two.add_argument("--male-voice", default="am_adam", help="Kokoro voice for the male host.")
+    two.add_argument("--male-voice", default="am_liam", help="Kokoro voice for the male host (default am_liam; am_eric is the documented backup).")
     two.add_argument("--minutes", type=float, default=3.0, help="Target spoken length per episode (default 3).")
     two.add_argument("--brief", default=DEFAULT_BRIEF, help="Editorial brief: angle/tone for the episode.")
     two.add_argument("--model", default=DEFAULT_SCRIPT_MODEL, help=f"Dialogue-script model (default: {DEFAULT_SCRIPT_MODEL}).")

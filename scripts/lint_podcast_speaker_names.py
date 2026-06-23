@@ -41,17 +41,22 @@ NEUTRAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Dramatizations: a narrated SCENE with named story characters, not anonymous
+# hosts. The names — and their genders — are intentional to the story, so neither
+# the anonymous-voice rule nor the 1M/1F pairing applies. A PERMANENT exception,
+# not debt: "fixing" it would gut the scene (e.g. voicing a female patient with a
+# male voice). Paths relative to TRANSCRIPTS.
+DRAMATIZATIONS = {
+    "sales/HealingJourneyPodcast_EP2.md",   # "Sara Delivers Nancy's Equipment": Narrator + Sara (rep) + Nancy (patient), both women by design
+    "sales/HealingJourneyPodcast_EP2.json",
+}
+
 # Episodes that predate the anonymous-voice rule and still ship with personal-name
 # hosts in their published show notes. DELIBERATE, DOCUMENTED bridge (global
 # CLAUDE.md § Fail Fast). End-condition: when one is next recut, drop the names
 # (neutral turn markers, no self-introductions in the text) and DELETE it here.
 # Do not add new entries — new named scripts must fail. Paths relative to TRANSCRIPTS.
-GRANDFATHERED = {
-    "sales/HealingJourneyPodcast_EP2.md",
-    "sales/HealingJourneyPodcast_EP2.json",
-    "sales/HealingJourneyPodcast_EP4.md",
-    "sales/HealingJourneyPodcast_EP4.json",
-}
+GRANDFATHERED: set[str] = set()  # empty — EP4 + teaser de-named; EP2 is a dramatization (above)
 
 
 def _md_speakers(path: Path) -> set[str]:
@@ -108,11 +113,13 @@ def main() -> int:
         if path.suffix not in (".md", ".json"):
             continue
         scanned += 1
+        rel = path.relative_to(TRANSCRIPTS).as_posix()
+        if rel in DRAMATIZATIONS:
+            continue  # named characters are intentional here — not a host episode
         result = _check(path)
         if not result:
             continue
         reason, labels = result
-        rel = path.relative_to(TRANSCRIPTS).as_posix()
         msg = f"{rel}: {reason}: {labels}"
         (grandfathered_hits if rel in GRANDFATHERED else failures).append(msg)
 

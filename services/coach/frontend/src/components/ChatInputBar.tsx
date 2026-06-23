@@ -109,7 +109,10 @@ export function ChatInputBar({
               onChange={(e) => { if (!isListening) onChange(e.target.value); resizeTextarea(e.target) }}
               onKeyDown={handleKeyDown}
               placeholder={placeholder}
-              className={`flex-1 bg-transparent px-4 py-3 text-[15px] text-text placeholder-text-muted focus:outline-none resize-none ${isListening && heldInterim ? 'text-text-secondary' : ''}`}
+              enterKeyHint="send"
+              autoCapitalize="sentences"
+              // text-base (16px) — anything smaller triggers iOS auto-zoom on focus.
+              className={`flex-1 bg-transparent px-4 py-3 text-base text-text placeholder-text-muted focus:outline-none resize-none ${isListening && heldInterim ? 'text-text-secondary' : ''}`}
               style={{ maxHeight: `${getInputMaxHeight()}px` }}
             />
             <button

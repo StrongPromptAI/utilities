@@ -44,6 +44,12 @@ async def health():
     return {"status": "ok", "service": "coach"}
 
 
+@app.get("/")
+async def root():
+    """Bare domain → the chat widget at /coach/ (the build is base-pathed there)."""
+    return RedirectResponse(url="/coach/", status_code=307)
+
+
 @app.get("/figures/{name}")
 async def get_figure(name: str):
     try:

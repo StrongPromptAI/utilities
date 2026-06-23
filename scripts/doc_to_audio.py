@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -85,6 +86,7 @@ from doc_to_speech import (
     _log,
     _epoch_to_pacific_iso,
     _list_show_episodes,
+    _get_show_meta,
     _next_recut_name,
     _normalize_and_chunk,
     _now_pacific_iso,
@@ -92,7 +94,9 @@ from doc_to_speech import (
     _resolve_podcast_target,
     _resolve_tts_endpoint,
     _safe_mp3_name,
+    _split_shownotes,
     _wait_for_tts_ready,
+    normalize_markdown,
 )
 from dialogue import (
     DEFAULT_BRIEF,
@@ -104,6 +108,122 @@ from dialogue import (
 
 ONE_VOICE_FORMATS = ("read", "emphasize", "scrub", "pm", "exec")
 WRITING_FORMATS = ("pm", "exec", "dialogue")  # these REWRITE the source with an LLM
+
+# Empirical speaking rates (words/min) incl. inter-turn/section gaps, at the default
+# 0.9 speed — for the preflight's *approximate* length estimate only (not exact).
+_WPM_ONE_VOICE = 200
+_WPM_TWO_VOICE = 185
+
+
+def _voice_gender(voice: str) -> str:
+    return "F" if voice.startswith("af_") else "M" if voice.startswith("am_") else "?"
+
+
+def _fmt_mmss(seconds: float) -> str:
+    s = int(round(seconds))
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def _preflight_stats(args, is_dialogue: bool, src: Path) -> tuple[int, int, bool]:
+    """(word_count, emphasis_spans, emphasis_added_at_synth) for one source, with NO LLM call.
+    Words come from the normalized speakable text (the emphasis pass preserves words verbatim);
+    emphasis spans are counted in the text that will actually be synthesized."""
+    if is_dialogue and getattr(args, "script_in", None):
+        data = json.loads(Path(args.script_in).read_text(encoding="utf-8"))
+        turns = data.get("turns", [])
+        text = " ".join(str(t.get("text", "")) for t in turns)
+        return len(text.split()), text.count("«"), False
+    raw = src.read_text(encoding="utf-8")
+    raw, _notes = _split_shownotes(raw)
+    speakable, _h1 = normalize_markdown(raw)
+    words = len(speakable.split())
+    # emphasize ADDS «…» during synth (so 0 pre-marked here is expected); read/dialogue are verbatim.
+    added = args.format == "emphasize"
+    return words, speakable.count("«"), added
+
+
+def _hosts_line(src: Path) -> str:
+    """The 'transcription reviewed (no host names)' field — reuses the speaker-name lint so
+    there is one source of truth for what counts as anonymous."""
+    try:
+        from lint_podcast_speaker_names import _check as _speaker_check
+        from lint_podcast_speaker_names import DRAMATIZATIONS, TRANSCRIPTS
+    except Exception:
+        return "(lint unavailable)"
+    try:
+        rel = src.resolve().relative_to(TRANSCRIPTS.resolve()).as_posix()
+    except ValueError:
+        rel = None
+    if rel in DRAMATIZATIONS:
+        return "✓ dramatization — named characters intentional"
+    result = _speaker_check(src)
+    if result is None:
+        return "✓ anonymous — no host names"
+    reason, labels = result
+    return f"⚠ {reason}: {labels}"
+
+
+def _preflight(args, episodes, is_dialogue: bool, *, recut_before, base_url, secret) -> None:
+    """Print a formatted publish summary BEFORE the billed synth — source, target, new/recut,
+    words, voices, ~length, channel + show title/description, episode, anonymity check, emphasis,
+    and the feed link. A pure read: no synth, no LLM."""
+    grp = episodes[0]
+    src = grp[0] if isinstance(grp, list) else grp
+    extra_eps = len(episodes) - 1
+
+    if args.recut and not args.force_redownload:
+        mode = "RECUT — replace in place (same GUID + pubDate)"
+    elif args.recut:
+        mode = "RECUT — new GUID (subscribers re-download)"
+    else:
+        mode = "NEW episode"
+
+    if is_dialogue:
+        fv, mv = args.female_voice, args.male_voice
+        voices = (f"2 — {args.female_name}→{fv} ({_voice_gender(fv)}) · "
+                  f"{args.male_name}→{mv} ({_voice_gender(mv)})")
+    else:
+        voices = f"1 — {args.voice} ({_voice_gender(args.voice)})"
+    if "dramatization" in _hosts_line(src).lower():
+        voices += " · dramatization"
+
+    words, emph, emph_added = _preflight_stats(args, is_dialogue, src)
+    est = _fmt_mmss(words / (_WPM_TWO_VOICE if is_dialogue else _WPM_ONE_VOICE) * 60)
+    emph_str = f"{emph} «…» span(s)" + (" · more added at synth" if emph_added else
+                                        (" (flat)" if emph == 0 else ""))
+
+    meta = None
+    if base_url and secret and args.show:
+        meta = _get_show_meta(args.show, base_url=base_url, secret=secret)
+    channel = args.show
+    if meta and meta.get("title"):
+        channel = f"{args.show} — {meta['title']}"
+    show_desc = (meta or {}).get("description") or "(run live for server lookup)"
+    if len(show_desc) > 64:
+        show_desc = show_desc[:61] + "…"
+    feed = (meta or {}).get("feed_url") or (f"…/{args.show}/<code>/feed.xml  (confirm show in admin)"
+                                            if not args.no_upload else "(--no-upload)")
+
+    def _row(label, value):
+        print(f"  {label:<11} {value}")
+
+    bar = "─" * 60
+    print(f"\n{bar}\n  PODCAST PREFLIGHT — review before TTS synth\n{bar}")
+    _row("Source", str(src) + (f"  (+{extra_eps} more)" if extra_eps else ""))
+    _row("Target", (args.name or "(auto-named)"))
+    _row("Mode", mode)
+    _row("Channel", channel)
+    if meta:
+        _row("Show desc", show_desc)
+    _row("Episode", f"\"{args.title}\"" if args.title else "(title from filename)")
+    _row("Voices", voices)
+    _row("Words", f"{words:,}        Est. length  ~{est}")
+    _row("Emphasis", emph_str)
+    _row("Hosts", _hosts_line(src))
+    _row("Notes", "full transcript + any citations footer → show notes"
+         if not args.no_transcript else "blurb only (--no-transcript)")
+    _row("Feed", feed)
+    print(bar)
 
 
 def _episode_doc(ep_docs: list[Path]) -> Path:
@@ -238,8 +358,10 @@ def main() -> None:
 
     # Guard: the rewriting formats REWRITE the source with an LLM (even a dry-run invokes it
     # to preview), so authored files would not be spoken verbatim. Confirm before doing that
-    # (fail-closed when non-interactive).
-    if args.format in WRITING_FORMATS and not args.yes:
+    # (fail-closed when non-interactive). A verbatim `dialogue --script-in` is NOT a rewrite —
+    # it skips this gate and is covered by the pre-synth preflight confirm instead.
+    _rewrites = args.format in WRITING_FORMATS and not (is_dialogue and getattr(args, "script_in", None))
+    if _rewrites and not args.yes:
         kind = "two-host dialogue script" if is_dialogue else f"{args.format} briefing"
         msg = (f"⚠️  --format {args.format} REWRITES your text — an LLM authors a {kind}, so your "
                f"files will NOT be spoken verbatim.\n"
@@ -352,6 +474,14 @@ def main() -> None:
             published_at = prior.get("published_at") or _epoch_to_pacific_iso(prior["mtime"])
             _log(f"♻️  recut: overwriting {target!r} in place — same GUID (new subscribers get the fix; "
                  f"prior downloaders keep the old copy). Preserving publish date {published_at}.")
+
+    # Preflight: show exactly what the (billed) synth will publish, then confirm. Interactive
+    # only — a non-tty run prints the panel and proceeds (so background/CI publishing is
+    # unchanged); pass --yes to skip the prompt in a tty.
+    _preflight(args, episodes, is_dialogue, recut_before=recut_before, base_url=base_url, secret=secret)
+    if not args.yes and sys.stdin.isatty():
+        if input("\n  Proceed with synthesis? [y/N] ").strip().lower() not in ("y", "yes"):
+            _die("Aborted at preflight — nothing synthesized or published.")
 
     if is_dialogue:
         # Sequential episodes: each is its own LLM call + multi-turn synth.

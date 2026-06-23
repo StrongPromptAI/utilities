@@ -354,6 +354,24 @@ async def show_episodes(slug: str, _: None = Depends(_verify_upload)):
     return {"episodes": episodes}
 
 
+@app.get("/show/{slug}")
+async def show_meta(slug: str, _: None = Depends(_verify_upload)):
+    """Service-token show metadata for the producer's publish preflight: the show's title,
+    description, and (code-bearing) feed URL, plus its episode count — so the CLI can show
+    *which branded show* a billed synth will land in before it runs."""
+    with SessionLocal() as session:
+        show = _load_show(session, slug)
+        count = session.query(Episode).filter_by(podcast_slug=slug).count()
+        return {
+            "slug": show.slug,
+            "title": show.title,
+            "description": show.description,
+            "access": show.access,
+            "feed_url": show.feed_url,
+            "episode_count": count,
+        }
+
+
 class EpisodeMeta(BaseModel):
     title: str | None = None
     sort_order: int | None = None

@@ -1028,6 +1028,24 @@ def _list_show_episodes(slug: str, *, base_url: str, secret: str) -> list[dict]:
     return r.json().get("episodes", [])
 
 
+def _get_show_meta(slug: str, *, base_url: str, secret: str) -> dict | None:
+    """GET /show/{slug} (service-token) → {title, description, feed_url, episode_count, …} for
+    the publish preflight. Returns None (never fatal) if the server lacks the endpoint (older
+    deploy) or the lookup fails — the preflight degrades to the slug rather than blocking a synth."""
+    now = int(time.time())
+    bearer = _hs256_jwt({"aud": "podcast-upload", "iat": now, "exp": now + 1800}, secret)
+    try:
+        r = requests.get(
+            f"{base_url}/show/{slug}",
+            headers={"Authorization": f"Bearer {bearer}"}, timeout=15,
+        )
+    except requests.RequestException:
+        return None
+    if r.status_code != 200:
+        return None
+    return r.json()
+
+
 def _next_recut_name(mp3_name: str, existing: set[str]) -> str:
     """Bump `foo.mp3` → `foo-r2.mp3` (next free `-rN`) for --force-redownload — a NEW filename,
     hence a new feed GUID, so existing subscribers re-pull. Strips any current `-rN` so revisions

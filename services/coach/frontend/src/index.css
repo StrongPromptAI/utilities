@@ -70,6 +70,9 @@ body { overscroll-behavior-y: none; }
 @keyframes fade-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 .animate-fade-in { animation: fade-in 0.3s ease-out; }
 
+@keyframes slide-up { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.animate-slide-up { animation: slide-up 0.22s ease-out; }
+
 @keyframes ring-blink { 0%, 100% { opacity: 0; } 10%, 30% { opacity: 1; } 20%, 40% { opacity: 0; } }
 .animate-ring-blink { animation: ring-blink 2s ease-out forwards; }
 @media (prefers-reduced-motion: reduce) { .animate-ring-blink { animation: none; opacity: 0.5; } }

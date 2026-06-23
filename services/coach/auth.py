@@ -20,8 +20,8 @@ COACH_JWT_SECRET = os.environ.get("COACH_JWT_SECRET", "")
 COOKIE_NAME = "coach_session"
 
 
-def email_from_request(authorization: str | None, cookie_token: str | None) -> str | None:
-    """Verified email from a Bearer header or the coach_session cookie, else None."""
+def session_payload(authorization: str | None, cookie_token: str | None) -> dict | None:
+    """Verified JWT claims from a Bearer header or the coach_session cookie, else None."""
     if not COACH_JWT_SECRET:
         return None
     token = None
@@ -32,8 +32,15 @@ def email_from_request(authorization: str | None, cookie_token: str | None) -> s
     if not token:
         return None
     try:
-        payload = jwt.decode(token, COACH_JWT_SECRET, algorithms=["HS256"], options={"verify_aud": False})
+        return jwt.decode(token, COACH_JWT_SECRET, algorithms=["HS256"], options={"verify_aud": False})
     except jwt.InvalidTokenError:
+        return None
+
+
+def email_from_request(authorization: str | None, cookie_token: str | None) -> str | None:
+    """Verified email from a Bearer header or the coach_session cookie, else None."""
+    payload = session_payload(authorization, cookie_token)
+    if not payload:
         return None
     email = payload.get("email")
     return email.strip().lower() if isinstance(email, str) and email.strip() else None

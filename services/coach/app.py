@@ -179,11 +179,13 @@ async def chat(request: Request):
 
 @app.get("/api/me")
 async def me(request: Request):
-    """Who the current session belongs to (for the account menu). 401 if not signed in."""
-    email = auth.email_from_request(request.headers.get("Authorization"), request.cookies.get(auth.COOKIE_NAME))
-    if not email:
+    """Who the current session belongs to + when the link expires (for the account menu).
+    401 if not signed in."""
+    payload = auth.session_payload(request.headers.get("Authorization"), request.cookies.get(auth.COOKIE_NAME))
+    email = (payload or {}).get("email")
+    if not payload or not email:
         raise HTTPException(401, "not authenticated")
-    return {"email": email}
+    return {"email": email.strip().lower(), "exp": payload.get("exp")}
 
 
 @app.get("/api/stt-token")

@@ -8,8 +8,9 @@ const GREETING: CoachMessage = {
   id: 'coach-greeting',
   role: 'assistant',
   content:
-    "I'm your DME sales coach. Ask me how to win or grow a surgeon account, handle an objection, " +
-    "or prep for a meeting — name a practice and I'll pull live review intel and an opener.",
+    "I'm your Healing Journey sales coach — here to help you sign surgeons up for The Healing Journey. " +
+    "Ask me how to introduce it, win or grow an account, or handle an objection. Or name a doctor or " +
+    "practice you're about to meet, and I'll pull their public reviews and a natural way to open the conversation.",
 }
 
 // Conversation memory sent with each turn; the backend caps it too, this keeps requests small.

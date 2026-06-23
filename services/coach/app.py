@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import json
 import os
-
 import os.path
+import time
 
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
@@ -101,26 +101,36 @@ async def upload_figure(file: UploadFile, _: None = Depends(_verify_upload)):
 app.state.embed_fn = embed_query
 
 
-def _load_system() -> str:
-    """Build the system prompt once at startup: persona + the floor (value registry) from
-    the coach_floor DB row. Fail-soft — if the DB/row is absent, persona-only (the tools +
-    persona still work; only the always-on value spine is missing)."""
-    floor = ""
+# System prompt = persona + tunable behavior + value floor, composed from the coach_floor DB
+# rows ('value_registry' + 'behavior'). Cached with a short TTL so a SQL UPDATE to either row
+# takes effect within ~2 min — behavioral tuning is a data edit, not a redeploy (config-as-data,
+# mirrors roadmap.settings). The hard integrity rules live in agent._PERSONA_CORE (code), not here.
+_SYSTEM_TTL_SECONDS = 120
+_system_cache: dict = {"text": None, "ts": 0.0}
+
+
+def current_system(conn) -> str:
+    """The current system prompt, rebuilt from coach_floor at most once per TTL. Fail-soft:
+    on any DB error, reuse the last good prompt, or persona-only if we never loaded one."""
+    now = time.time()
+    if _system_cache["text"] is not None and now - _system_cache["ts"] <= _SYSTEM_TTL_SECONDS:
+        return _system_cache["text"]
     try:
-        conn = db.get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT content FROM coach_floor WHERE key = 'value_registry'")
-                row = cur.fetchone()
-            floor = row["content"] if row else ""
-        finally:
-            conn.close()
+        floor = behavior = None
+        with conn.cursor() as cur:
+            cur.execute("SELECT key, content FROM coach_floor WHERE key IN ('value_registry', 'behavior')")
+            for row in cur.fetchall():
+                if row["key"] == "value_registry":
+                    floor = row["content"]
+                elif row["key"] == "behavior":
+                    behavior = row["content"]
+        _system_cache["text"] = agent.build_system(floor or "", behavior)
+        _system_cache["ts"] = now
     except Exception as exc:  # noqa: BLE001
-        print(f"[coach] floor load failed (persona-only): {exc!r}")
-    return agent.build_system(floor)
-
-
-app.state.system = _load_system()
+        print(f"[coach] system reload failed (using cached/persona): {exc!r}")
+        if _system_cache["text"] is None:
+            _system_cache["text"] = agent.build_system("", None)
+    return _system_cache["text"]
 
 
 @app.post("/api/chat")
@@ -148,7 +158,7 @@ async def chat(request: Request):
 
     async def gen():
         try:
-            async for ev in agent.run_agent(message, history, embed_fn=embed_fn, conn=conn, zai_key=ZAI_API_KEY, system=request.app.state.system):
+            async for ev in agent.run_agent(message, history, embed_fn=embed_fn, conn=conn, zai_key=ZAI_API_KEY, system=current_system(conn)):
                 # Typed events: answer text → 'delta'; slow-tool phase updates → 'progress'
                 # (the widget shows progress as a transient status, not appended to the answer).
                 if ev["type"] == "delta":

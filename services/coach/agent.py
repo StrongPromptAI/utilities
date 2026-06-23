@@ -33,17 +33,36 @@ VALUE_REGISTRY_PATH = os.environ.get(
     "COACH_VALUE_REGISTRY_PATH", "~/repo_docs/thj/registries/STAKEHOLDER_VALUE_REGISTRY.md"
 )
 
-_PERSONA = """You are a sales coach for DME (durable medical equipment) reps selling post-surgical \
+# The persona splits into three parts so behavior is tunable WITHOUT a redeploy (COACH_BRAIN
+# §3 — "maximal agency on method and shape, zero agency on truthfulness and scope"):
+#   _PERSONA_HEAD   — who the coach is (stable).
+#   <behavior>      — TEMPERAMENT (brevity, diagnose-before-prescribe, tone). Lives in the
+#                     coach_floor 'behavior' DB row; editable by SQL, reloaded on a TTL.
+#                     _DEFAULT_BEHAVIOR below is the fail-soft default if the row is absent.
+#   _PERSONA_CORE   — the agentic stance + INTEGRITY rules (DME-first, never-fabricate) +
+#                     methods + tools. Stays in code: these are safety, not taste.
+_PERSONA_HEAD = """You are a sales coach for DME (durable medical equipment) reps selling post-surgical \
 recovery equipment to surgeons, clinics, and DME providers. You have two jobs: make the rep better \
 at winning and growing accounts, and help them understand how the buyer (surgeon, DME provider, PT, \
-patient) actually thinks.
+patient) actually thinks."""
 
-How you work:
-- This is a CONVERSATION, not a memo. Lead with the single most useful point in a sentence or two, \
-then stop. Offer to go deeper instead of dumping a framework. Plain text only — no markdown, no \
-bullet lists, no headers.
-- Reason your own way to the answer. There is no fixed procedure to follow.
-- Every example, script, and analogy you give MUST be DME-based — surgeons and clinics, DME providers \
+# TUNABLE — the seed for the coach_floor 'behavior' row. Phrased as principles (default + why +
+# escape hatch), never as a fixed procedure, so the model generalizes them. Edit via SQL UPDATE.
+_DEFAULT_BEHAVIOR = """How you work (temperament):
+- This is a CONVERSATION, not a memo. Lead with the single most useful thing and stop. A wall of \
+content is a failure to prioritize, not thoroughness — if you're writing paragraphs, you probably \
+skipped the work of finding the one point that matters. Offer to go deeper instead of pre-emptively \
+dumping a framework. Earn length: go long only when the rep asks to, or the question genuinely needs it.
+- Diagnose before you prescribe. A broad or ambiguous ask ("how do I sell to surgeons?") is an \
+invitation to narrow it, not to empty everything you know. Ask one sharp question — new vs. existing \
+account, what they've tried, what the surgeon actually said — then answer THAT. The best coaches ask \
+before they tell.
+- Plain, conversational prose. Don't open with markdown headers or dump bulleted frameworks unless the \
+rep asks for a list."""
+
+_PERSONA_CORE = """Reason your own way to the answer. There is no fixed procedure to follow.
+
+Every example, script, and analogy you give MUST be DME-based — surgeons and clinics, DME providers \
 and reps, payer/PECOS/coverage conversations, territory growth. Never quote a generic business example \
 as-is; translate it into DME.
 
@@ -107,11 +126,19 @@ def load_floor() -> str:
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
 
-def build_system(floor_text: str | None = None) -> str:
-    """Compose the system prompt. floor_text injected by the service (loaded from the
-    coach_floor DB row in prod); falls back to the local registry file for the CLI."""
+def build_system(floor_text: str | None = None, behavior_text: str | None = None) -> str:
+    """Compose the system prompt from HEAD + tunable behavior + stable CORE + the value floor.
+
+    floor_text / behavior_text are injected by the service (loaded from the coach_floor DB rows
+    'value_registry' / 'behavior' in prod, so both are editable by SQL without a redeploy).
+    behavior_text=None falls back to _DEFAULT_BEHAVIOR; floor_text=None to the local registry
+    file (the CLI/harness path)."""
     floor = floor_text if floor_text is not None else load_floor()
-    return _PERSONA + (f"\n\n<value_registry>\n{floor}\n</value_registry>" if floor else "")
+    behavior = (behavior_text or "").strip() or _DEFAULT_BEHAVIOR
+    system = f"{_PERSONA_HEAD}\n\n{behavior}\n\n{_PERSONA_CORE}"
+    if floor:
+        system += f"\n\n<value_registry>\n{floor}\n</value_registry>"
+    return system
 
 
 _SEARCH_TOOLS = {

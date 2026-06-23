@@ -101,7 +101,7 @@ export function CoachChat() {
             <span className="inline-flex items-center justify-center w-8 h-8 shrink-0 rounded-full bg-primary/15 text-primary text-xs font-bold">
               Coach
             </span>
-            <span className="text-sm font-semibold text-text truncate">DME Sales Coach</span>
+            <span className="text-sm font-semibold text-text truncate">The Healing Journey Sales Coach</span>
           </div>
           <button
             onClick={newChat}

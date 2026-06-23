@@ -24,7 +24,12 @@ from __future__ import annotations
 VALUE_PROP_CATEGORY = "thj_brain"
 METHOD_CATEGORIES = ("sales_framework", "sales_expansion")   # CTWTCS + The Expansion Sale
 PODCAST_CATEGORY = "sales_podcast"                            # the team's Sales podcast (official feed pull)
-COACH_CATEGORIES = frozenset({VALUE_PROP_CATEGORY, *METHOD_CATEGORIES, PODCAST_CATEGORY})
+# Deep policy/legal research (bundling, the 90-day global period, CA employed-physician
+# side-practice/concierge rules). Reached ONLY via search_deep_research, which the model calls
+# only when a rep explicitly digs into the specifics — kept OUT of thj_brain so a normal pitch
+# question never pulls it (the intent gate, not a similarity threshold — COACH_BRAIN §4).
+POLICY_RESEARCH_CATEGORY = "policy_research"
+COACH_CATEGORIES = frozenset({VALUE_PROP_CATEGORY, *METHOD_CATEGORIES, PODCAST_CATEGORY, POLICY_RESEARCH_CATEGORY})
 
 _SEARCH_SQL = """
 SELECT rd.title, rd.audience, rd.category, dc.text,
@@ -68,3 +73,10 @@ def search_method(conn, query_vec: list[float], k: int = 6) -> list[dict]:
 def search_podcast(conn, query_vec: list[float], k: int = 6) -> list[dict]:
     """The team's Sales podcast — living, voice-of-the-team selling content (incl. competitor takes)."""
     return _search(conn, query_vec, [PODCAST_CATEGORY], k)
+
+
+def search_deep_research(conn, query_vec: list[float], k: int = 6) -> list[dict]:
+    """Deep policy/legal research — bundling economics, the 90-day surgical global period, and
+    California employed-physician side-practice/concierge rules. The rep's credibility backstop
+    for a sophisticated follow-up; NOT pitch material."""
+    return _search(conn, query_vec, [POLICY_RESEARCH_CATEGORY], k)

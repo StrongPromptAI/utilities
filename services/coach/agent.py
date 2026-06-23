@@ -80,6 +80,11 @@ Tools — call them when you need grounding; don't guess at specifics:
 for "how do I pitch/position THJ", "what does a DME provider care about", buyer psychology.
 - search_method: the two sales books above, for deeper method.
 - search_podcast: the team's own Sales podcast — how we actually talk about selling THJ.
+- search_deep_research: deep research with citations (DME bundling economics, the 90-day surgical \
+global period, California employed-physician side-practice/concierge rules, and clinical evidence such \
+as prehab/recovery outcomes for TKA). Use ONLY when the rep explicitly digs into the rules/citations/\
+studies/specifics on one of these topics — never for a normal pitch or opener. Lead with the plain \
+answer first; this is the credibility backstop for when they want to go deep.
 - mine_practice_reviews: live public-review intelligence for a SPECIFIC named doctor/practice the rep \
 is about to meet. Call it the moment a real practice/surgeon name is in play — it pulls the live Google/\
 Healthgrades rating and cited verbatim patient quotes, and hands you a framing guide to write the rep a \
@@ -109,6 +114,11 @@ TOOL_DEFS = [
         "name": "search_podcast",
         "description": "Search the team's own Sales podcast — how we actually talk about selling THJ, incl. takes on competitors (Force Therapeutics, Ask Hoag).",
         "input_schema": {"type": "object", "properties": {"query": {"type": "string", "description": "what to look up"}}, "required": ["query"]},
+    },
+    {
+        "name": "search_deep_research",
+        "description": "Deep research with citations: DME bundling economics (California payers/IDNs/COE networks), the 90-day surgical global period and surgeon accountability, California employed-physician side-practice / concierge-medicine rules, and clinical evidence (e.g. prehab / recovery outcomes for total knee replacement). ONLY call this when the rep EXPLICITLY digs into the detailed rules, citations, studies, or legal/financial/clinical specifics on one of these topics — e.g. 'what are the actual 90-day global-period rules', 'can an employed CA surgeon legally run a concierge side practice', 'walk me through how bundling threatens our DME position', 'what's the actual evidence that prehab improves TKA outcomes'. Do NOT call it for an ordinary pitch, objection, or opener — this is the rep's credibility backstop for a sophisticated follow-up, not lead material. Lead with the plain answer first; reach for this only once they want the depth.",
+        "input_schema": {"type": "object", "properties": {"query": {"type": "string", "description": "the specific rule / regulation / economics detail the rep is digging into"}}, "required": ["query"]},
     },
     {
         "name": "mine_practice_reviews",
@@ -145,6 +155,7 @@ _SEARCH_TOOLS = {
     "search_value_prop": tools.search_value_prop,
     "search_method": tools.search_method,
     "search_podcast": tools.search_podcast,
+    "search_deep_research": tools.search_deep_research,
 }
 
 

@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir \
 
 # Runtime modules only. build_brain.py / ingest_podcast.py / mint_coach_token.py are
 # OPERATOR scripts (reuse kb_core, not in the image) — run locally, not in the container.
-COPY app.py storage.py agent.py tools.py db.py embed.py auth.py ./
+COPY app.py storage.py agent.py tools.py db.py embed.py auth.py meeting_prep.py review_cache.py ./
 
 # No VOLUME instruction — Railway bans it. /data/figures is attached via Railway service
 # settings; COACH_FIGURES_ROOT defaults to it.

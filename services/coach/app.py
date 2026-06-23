@@ -177,6 +177,15 @@ async def chat(request: Request):
 # Same fail-closed gate as /api/chat (allowlisted coach_session). Returns a short-lived
 # aud="stt" JWT the browser sends as the first frame to shared-svcs STT.
 
+@app.get("/api/me")
+async def me(request: Request):
+    """Who the current session belongs to (for the account menu). 401 if not signed in."""
+    email = auth.email_from_request(request.headers.get("Authorization"), request.cookies.get(auth.COOKIE_NAME))
+    if not email:
+        raise HTTPException(401, "not authenticated")
+    return {"email": email}
+
+
 @app.get("/api/stt-token")
 async def stt_token(request: Request):
     conn = db.get_conn()
@@ -208,6 +217,15 @@ async def auth_login(token: str = ""):
         conn.close()
     resp = RedirectResponse(url="/coach/", status_code=302)
     resp.set_cookie(auth.COOKIE_NAME, token, max_age=30 * 86400, httponly=True, secure=True, samesite="lax")
+    return resp
+
+
+@app.get("/auth/logout")
+async def auth_logout():
+    """Clear the session cookie (account menu → Sign out), back to the widget. The cookie is
+    httponly, so only the server can delete it; attributes must match the set_cookie above."""
+    resp = RedirectResponse(url="/coach/", status_code=302)
+    resp.delete_cookie(auth.COOKIE_NAME, path="/", httponly=True, secure=True, samesite="lax")
     return resp
 
 

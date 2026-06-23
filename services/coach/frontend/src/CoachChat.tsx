@@ -22,6 +22,8 @@ export function CoachChat() {
   const [messages, setMessages] = useState<CoachMessage[]>([GREETING])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [email, setEmail] = useState<string | null>(null)
+  const [accountOpen, setAccountOpen] = useState(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
 
@@ -34,6 +36,14 @@ export function CoachChat() {
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
+
+  // Who's signed in (for the account menu). 401 → not signed in (link expired / no cookie).
+  useEffect(() => {
+    fetch('/api/me', { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setEmail(d?.email ?? null))
+      .catch(() => setEmail(null))
+  }, [])
 
   const send = useCallback(async () => {
     const text = input.trim()
@@ -103,17 +113,62 @@ export function CoachChat() {
             </span>
             <span className="text-sm font-semibold text-text truncate">The Healing Journey Sales Coach</span>
           </div>
-          <button
-            onClick={newChat}
-            aria-label="New chat"
-            title="New chat"
-            className="inline-flex items-center justify-center w-10 h-10 shrink-0 rounded-full text-text-secondary hover:bg-surface-dim hover:text-text active:scale-95 transition-colors"
-          >
-            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 20h9" />
-              <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              onClick={newChat}
+              aria-label="New chat"
+              title="New chat"
+              className="inline-flex items-center justify-center w-10 h-10 rounded-full text-text-secondary hover:bg-surface-dim hover:text-text active:scale-95 transition-colors"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 20h9" />
+                <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+              </svg>
+            </button>
+
+            <div className="relative">
+              <button
+                onClick={() => setAccountOpen((v) => !v)}
+                aria-label="Account"
+                title="Account"
+                aria-expanded={accountOpen}
+                className="inline-flex items-center justify-center w-10 h-10 rounded-full text-text-secondary hover:bg-surface-dim hover:text-text active:scale-95 transition-colors"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="8" r="4" />
+                  <path d="M4 20c0-4 4-6 8-6s8 2 8 6" />
+                </svg>
+              </button>
+
+              {accountOpen && (
+                <>
+                  {/* click-away backdrop */}
+                  <div className="fixed inset-0 z-30" onClick={() => setAccountOpen(false)} />
+                  <div className="absolute right-0 mt-2 w-64 z-40 rounded-xl border border-accent-light bg-surface shadow-lg overflow-hidden animate-fade-in">
+                    <div className="px-4 py-3 border-b border-accent-light">
+                      <div className="text-[11px] uppercase tracking-wide text-text-muted">Signed in as</div>
+                      <div className="text-sm text-text truncate">{email ?? 'Not signed in'}</div>
+                    </div>
+                    <div className="px-4 py-3 text-xs text-text-secondary border-b border-accent-light">
+                      Tip: name a doctor or practice and I'll pull their public reviews and an opener.
+                    </div>
+                    {email ? (
+                      <a
+                        href="/auth/logout"
+                        className="block px-4 py-3 text-sm text-text hover:bg-surface-dim transition-colors"
+                      >
+                        Sign out
+                      </a>
+                    ) : (
+                      <div className="px-4 py-3 text-xs text-text-muted">
+                        Use your magic link to sign in.
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         </div>
       </header>
 

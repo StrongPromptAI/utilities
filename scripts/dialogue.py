@@ -186,13 +186,15 @@ def _script_preview(data: dict) -> str:
 
 def _dialogue_markdown(data: dict, title: str) -> str:
     """Render the two-host dialogue as a renderable markdown transcript — a title heading
-    and one bold speaker label per turn. Feeds the episode-description pass."""
+    and one paragraph per turn. Feeds the episode-description pass. NO speaker labels:
+    the voices are anonymous (anonymous-voice rule), and the per-turn key is only a
+    voice-mapping token — printing it would leak "Host A"/a name into the show notes."""
     lines = [f"# {title}", ""]
     for turn in data["turns"]:
         text = str(turn["text"]).strip().replace("«", "").replace("»", "")  # drop synth marks
         if not text:
             continue
-        lines.append(f"**{str(turn['speaker']).strip()}:** {text}")
+        lines.append(text)
         lines.append("")
     return "\n".join(lines).strip() + "\n"
 

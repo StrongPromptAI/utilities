@@ -1,17 +1,19 @@
-"""Show-notes guard: two-voice podcast scripts must name their speakers.
+"""Anonymous-voice guard: podcast scripts must not bake in host identity.
 
-A `**Speaker:**`-labeled script is a TWO-VOICE dialogue (see the doc-to-audio
-skill). In two-voice the labels map the voice and are *never spoken* — but they
-are NOT cosmetic: the source `.md` is reproduced verbatim as the episode's
-`<base>-transcript.md` sidecar, which the feed renders into `<content:encoded>`
-show notes. So a label like `**Host A:**` is invisible in the audio yet shows up
-in every podcast app's show notes. Generic placeholders ("Host A", "Host B",
-"Speaker 1") read as unfinished there; real names (Anna, Chris, Sara) read as a
-produced show.
+A podcast episode is read by one or two **anonymous AI voices**, not by named
+characters. The production choice is purely technical — one voice or two, and
+which voice from the roster (main/backup, male/female) — never a persona. So:
 
-This lint fails if any podcast transcript source (`.md` turn labels or `.json`
-turn speakers) uses a placeholder speaker name — for any file not in the legacy
-grandfather set below.
+  * One-voice scripts carry NO `**Speaker:**` turn labels. The one-voice path
+    speaks the label aloud ("Host A:") AND prints it into the `<content:encoded>`
+    show notes — an awkward artifact for what is just a TTS voice.
+  * Two-voice scripts need a per-turn speaker key to alternate voices, but it
+    must be a NEUTRAL voice-mapping token (`Host A`/`A`/`Voice 1`), never a
+    personal name. A name (`Anna`, `Maya`) renders in the show notes and invites
+    the script to have the voices "introduce themselves," which they must not.
+
+This lint fails on a personal-name speaker label, or on any turn label in a
+one-voice script — for files not in the legacy grandfather set below.
 
 Run: python scripts/lint_podcast_speaker_names.py
 """
@@ -30,27 +32,27 @@ LABEL_RE = re.compile(r"^\*\*(.+?):\*\*")
 # Everything after this sentinel is the citations footer, not dialogue turns.
 SHOWNOTES = "<!-- shownotes -->"
 
-# A speaker name is a PLACEHOLDER when it is one of these generic role words,
-# optionally followed by a single disambiguating letter/number ("Host A",
-# "Speaker 1", "Guest"). Real names ("Anna", "Sara", "Maya") never match — the
-# match is anchored to the whole label.
-PLACEHOLDER_RE = re.compile(
-    r"^(?:host|co-?host|speaker|guest|voice|narrator|interviewer)(?:\s+[a-z0-9])?$",
+# A NEUTRAL voice-mapping token: a generic role word or a bare letter/number,
+# optionally with a single disambiguator ("Host A", "A", "Voice 1", "Speaker").
+# A personal name ("Anna", "Maya", "Ethan") never matches — the match is anchored
+# to the whole label and names have more than one trailing letter.
+NEUTRAL_RE = re.compile(
+    r"^(?:host|co-?host|speaker|guest|voice|narrator|interviewer|[a-z0-9])(?:\s*[a-z0-9])?$",
     re.IGNORECASE,
 )
 
-# Legacy episodes that predate the real-names rule. DELIBERATE, DOCUMENTED bridge
-# (global CLAUDE.md § Fail Fast): they ship today with "Host A/Host B" in their
-# already-published show notes. End-condition: when one of these is next recut,
-# rename its speakers to real names in the `.md` (+ regenerate the `.json`) and
-# DELETE it from this set. Do not add new entries — new placeholder scripts must
-# fail. Paths are relative to TRANSCRIPTS.
+# Episodes that predate the anonymous-voice rule and still ship with personal-name
+# hosts in their published show notes. DELIBERATE, DOCUMENTED bridge (global
+# CLAUDE.md § Fail Fast). End-condition: when one is next recut, drop the names
+# (neutral turn markers, no self-introductions in the text) and DELETE it here.
+# Do not add new entries — new named scripts must fail. Paths relative to TRANSCRIPTS.
 GRANDFATHERED = {
-    "sales/HealingJourneyPodcast_EP1.md",
-    "sales/HealingJourneyPodcast_EP1.json",
-    "sales/HealingJourneyPodcast_EP3.md",
-    "sales/HealingJourneyPodcast_EP3.json",
-    "sales/HealingJourneyPodcast_EP5.md",
+    "sales/HealingJourneyPodcast_EP2.md",
+    "sales/HealingJourneyPodcast_EP2.json",
+    "sales/HealingJourneyPodcast_EP4.md",
+    "sales/HealingJourneyPodcast_EP4.json",
+    "tech/sales-mentoring-teaser.md",
+    "tech/sales-mentoring-teaser.json",
 }
 
 
@@ -73,6 +75,28 @@ def _json_speakers(path: Path) -> set[str]:
     return {t.get("speaker", "").strip() for t in data.get("turns", []) if t.get("speaker")}
 
 
+def _check(path: Path) -> tuple[str, list[str]] | None:
+    """Return (reason, offending_labels) or None if the file is clean."""
+    if path.suffix == ".md":
+        speakers = _md_speakers(path)
+    elif path.suffix == ".json":
+        speakers = _json_speakers(path)
+    else:
+        return None
+    if not speakers:
+        return None  # one-voice prose with no turn labels — exactly right
+
+    two_voice = path.suffix == ".json" or path.with_suffix(".json").exists()
+    if not two_voice:
+        # A labeled .md with no .json sibling: a one-voice script must be pure prose.
+        return ("one-voice script carries turn labels (spoken aloud + shown in notes)",
+                sorted(speakers))
+    names = sorted(s for s in speakers if not NEUTRAL_RE.match(s))
+    if names:
+        return ("personal-name speaker labels (AI voices are anonymous — use a neutral marker)", names)
+    return None
+
+
 def main() -> int:
     if not TRANSCRIPTS.is_dir():
         print(f"SKIP — no transcripts dir at {TRANSCRIPTS}")
@@ -83,38 +107,28 @@ def main() -> int:
     scanned = 0
 
     for path in sorted(TRANSCRIPTS.rglob("*")):
-        if path.suffix == ".md":
-            speakers = _md_speakers(path)
-        elif path.suffix == ".json":
-            speakers = _json_speakers(path)
-        else:
+        if path.suffix not in (".md", ".json"):
             continue
-        if not speakers:
-            continue  # one-voice narration (no turn labels) — nothing to name
         scanned += 1
-
-        placeholders = sorted(s for s in speakers if PLACEHOLDER_RE.match(s))
-        if not placeholders:
+        result = _check(path)
+        if not result:
             continue
-
+        reason, labels = result
         rel = path.relative_to(TRANSCRIPTS).as_posix()
-        msg = f"{rel}: placeholder speaker name(s) {placeholders}"
-        if rel in GRANDFATHERED:
-            grandfathered_hits.append(msg)
-        else:
-            failures.append(msg)
+        msg = f"{rel}: {reason}: {labels}"
+        (grandfathered_hits if rel in GRANDFATHERED else failures).append(msg)
 
     for msg in grandfathered_hits:
-        print(f"  legacy (grandfathered, rename on next recut): {msg}")
+        print(f"  legacy (grandfathered, fix on next recut): {msg}")
 
     if failures:
-        print("FAIL — two-voice scripts must name their speakers (placeholders leak into show notes):")
+        print("FAIL — podcast scripts must use anonymous voices (no names, no labels in one-voice):")
         for msg in failures:
             print("  " + msg)
-        print("\nUse real host names in the `.md` turn labels (and regenerate the `.json`).")
+        print("\nOne-voice: remove the turn labels. Two-voice: use a neutral marker, not a name.")
         return 1
 
-    print(f"PASS — {scanned} labeled script(s) scanned; no new placeholder speaker names.")
+    print(f"PASS — {scanned} transcript file(s) scanned; voices stay anonymous.")
     return 0
 
 

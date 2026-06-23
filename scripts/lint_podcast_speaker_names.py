@@ -51,8 +51,6 @@ GRANDFATHERED = {
     "sales/HealingJourneyPodcast_EP2.json",
     "sales/HealingJourneyPodcast_EP4.md",
     "sales/HealingJourneyPodcast_EP4.json",
-    "tech/sales-mentoring-teaser.md",
-    "tech/sales-mentoring-teaser.json",
 }
 
 

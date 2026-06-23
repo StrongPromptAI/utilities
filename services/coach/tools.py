@@ -18,7 +18,7 @@ from __future__ import annotations
 # ── The coach's READ BOUNDARY (fail-closed allowlist) ──────────────────────
 # The coach sees ONLY these reference_docs categories. NOT meeting/call transcripts
 # (`call_chunks` — a different table, never queried here), NOT other books (Corporate
-# Lifecycles = `sales_lifecycle`, The Science of Trust = `other`), NOT the roadmap
+# Lifecycles = `org_design`, The Science of Trust = `other`), NOT the roadmap
 # chatbot's duplicate THJ ingest (`product_doctrine`/`sales_playbook`/`stakeholder_profile`).
 # Allowlist, not denylist: a new category is invisible to the coach until added here.
 VALUE_PROP_CATEGORY = "thj_brain"

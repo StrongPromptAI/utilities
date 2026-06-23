@@ -19,16 +19,19 @@ from __future__ import annotations
 import json
 import os
 
+import os.path
+
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from storage import MEDIA_TYPES, figure_path, safe_name, write_figure
 
 import agent
 import auth
 import db
-from embed import embed_query
+from embed import embed_query, make_stt_token
 
 UPLOAD_SECRET = os.environ.get("COACH_UPLOAD_SECRET", "")
 ZAI_API_KEY = os.environ.get("ZAI_API_KEY", "")
@@ -153,10 +156,29 @@ async def chat(request: Request):
     return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+# ── /api/stt-token — mint an STT token for the widget's voice WebSocket ─────
+#
+# Same fail-closed gate as /api/chat (allowlisted coach_session). Returns a short-lived
+# aud="stt" JWT the browser sends as the first frame to shared-svcs STT.
+
+@app.get("/api/stt-token")
+async def stt_token(request: Request):
+    conn = db.get_conn()
+    try:
+        email = auth.email_from_request(request.headers.get("Authorization"), request.cookies.get(auth.COOKIE_NAME))
+        if not email:
+            raise HTTPException(401, "not authenticated")
+        if not auth.is_allowed(email, conn):
+            raise HTTPException(403, "not on the coach allowlist")
+    finally:
+        conn.close()
+    return {"token": make_stt_token()}
+
+
 @app.get("/auth")
 async def auth_login(token: str = ""):
     """Magic-link login: validate a minted coach_session JWT (allowlisted email), set the
-    cookie, redirect home. Interim issuance until OTP/oidc is wired (mint_coach_token.py)."""
+    cookie, redirect to the widget. Interim issuance until OTP/oidc is wired (mint_coach_token.py)."""
     if not token:
         raise HTTPException(400, "missing token")
     email = auth.email_from_request(f"Bearer {token}", None)
@@ -168,6 +190,16 @@ async def auth_login(token: str = ""):
             raise HTTPException(403, "not on the coach allowlist")
     finally:
         conn.close()
-    resp = RedirectResponse(url="/", status_code=302)
+    resp = RedirectResponse(url="/coach/", status_code=302)
     resp.set_cookie(auth.COOKIE_NAME, token, max_age=30 * 86400, httponly=True, secure=True, samesite="lax")
     return resp
+
+
+# ── /coach — the chat widget (built Vite SPA), served as static files ───────
+# The multi-stage Docker build drops the compiled widget into COACH_STATIC_DIR. Mounted last
+# so it can't shadow the API routes above. Absent in a bare Phase-0 image → simply not mounted.
+_STATIC_DIR = os.environ.get("COACH_STATIC_DIR", "static")
+if os.path.isdir(_STATIC_DIR):
+    app.mount("/coach", StaticFiles(directory=_STATIC_DIR, html=True), name="coach-widget")
+else:
+    print(f"[coach] no widget build at {_STATIC_DIR!r} — /coach not mounted (API-only)")

@@ -26,6 +26,20 @@ def _embed_token(ttl_seconds: int = 1800) -> str:
     )
 
 
+def make_stt_token(ttl_seconds: int = 300) -> str:
+    """Mint an aud="stt" JWT for browser WebSocket auth against shared-svcs STT. Same
+    SHARED_SVC_JWT_SECRET as embed (one shared-svcs secret signs every aud). 5-min TTL maps
+    to the STT socket's reconnect cadence (shared-svcs closes at expiry; client refetches)."""
+    if not SHARED_SVC_JWT_SECRET:
+        raise RuntimeError("FAIL-FAST: SHARED_SVC_JWT_SECRET required to mint STT token")
+    now = int(time.time())
+    return jwt.encode(
+        {"iss": SERVICE_NAME, "aud": "stt", "iat": now, "exp": now + ttl_seconds},
+        SHARED_SVC_JWT_SECRET,
+        algorithm="HS256",
+    )
+
+
 def embed_query(text: str) -> list[float]:
     if not EMBED_URL or not SHARED_SVC_JWT_SECRET:
         raise RuntimeError("FAIL-FAST: EMBED_URL + SHARED_SVC_JWT_SECRET required for runtime embedding")

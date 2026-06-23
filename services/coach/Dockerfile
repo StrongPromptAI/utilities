@@ -1,3 +1,14 @@
+# ── Stage 1: build the chat widget (Vite/React/Tailwind) ───────────────────
+FROM node:20-slim AS web
+WORKDIR /web
+# Install deps first (cache layer). The frontend's local .npmrc opts back into install
+# scripts (ignore-scripts=false) — Vite/esbuild need them.
+COPY frontend/package.json frontend/package-lock.json frontend/.npmrc ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build   # → /web/dist (base '/coach/')
+
+# ── Stage 2: runtime (FastAPI) ─────────────────────────────────────────────
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -13,6 +24,9 @@ RUN pip install --no-cache-dir \
 # Runtime modules only. build_brain.py / ingest_podcast.py / mint_coach_token.py are
 # OPERATOR scripts (reuse kb_core, not in the image) — run locally, not in the container.
 COPY app.py storage.py agent.py tools.py db.py embed.py auth.py meeting_prep.py review_cache.py ./
+
+# The built widget — served by app.py at /coach (StaticFiles). COACH_STATIC_DIR=static.
+COPY --from=web /web/dist ./static
 
 # No VOLUME instruction — Railway bans it. /data/figures is attached via Railway service
 # settings; COACH_FIGURES_ROOT defaults to it.

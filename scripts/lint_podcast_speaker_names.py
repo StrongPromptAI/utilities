@@ -49,6 +49,8 @@ NEUTRAL_RE = re.compile(
 DRAMATIZATIONS = {
     "sales/HealingJourneyPodcast_EP2.md",   # "Sara Delivers Nancy's Equipment": Narrator + Sara (rep) + Nancy (patient), both women by design
     "sales/HealingJourneyPodcast_EP2.json",
+    "tech/real-estate-18-year-cycle.md",    # simulated round table: Moderator + 3 named market commentators (Wright F, Collum M, Armstrong M), distinct voices by design
+    "tech/real-estate-18-year-cycle.json",
 }
 
 # Episodes that predate the anonymous-voice rule and still ship with personal-name

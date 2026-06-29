@@ -289,7 +289,7 @@ _EXEC_SYSTEM = (
     "- Mark emphasis SPARINGLY for the ear: wrap a small number of the single most "
     "load-bearing lines in guillemets, «like this» (a whole clause or sentence, never a "
     "single word, never a whole paragraph; only a handful in the whole recap), so they are "
-    "read a touch slower for weight. Used rarely they land; used often they deaden.\n\n"
+    "set apart by a brief pause for weight. Used rarely they land; used often they deaden.\n\n"
     "Do NOT:\n"
     "- Mention or read aloud ANY file path, file name, document name, section pointer, "
     "URL, code, or cross-reference scaffolding (e.g. 'see X dot M D', 'per the registry'). "
@@ -320,8 +320,8 @@ _PM_SYSTEM = (
     "reasoning. Translate engineering and clinical jargon into plain language; keep a term "
     "only if it carries product meaning.\n"
     "- Mark emphasis SPARINGLY for the ear. Wrap a SMALL number of the single most "
-    "load-bearing lines in guillemets, «like this», so they are read a touch slower for "
-    "weight. Rules: wrap a WHOLE clause or sentence, never a single word; at most one per "
+    "load-bearing lines in guillemets, «like this», so they are set apart by a brief pause "
+    "for weight. Rules: wrap a WHOLE clause or sentence, never a single word; at most one per "
     "few paragraphs and only a handful in the whole briefing (well under one line in "
     "twenty); include the trailing punctuation inside the marks. Used rarely they land; "
     "used often they deaden — when in doubt, leave it unmarked.\n\n"
@@ -345,7 +345,7 @@ _EMPHASIZE_SYSTEM = (
     "You are a post-processor that marks emphasis for a text-to-speech reading. You are "
     "given a FINISHED, authored passage of spoken prose. Your ONLY job is to wrap a SMALL "
     "number of the single most load-bearing lines in guillemets «like this», so the narrator "
-    "reads them a touch slower for weight.\n\n"
+    "sets them apart by a brief pause for weight.\n\n"
     "ABSOLUTE RULES:\n"
     "- Reproduce the passage VERBATIM — every word, number, punctuation mark, and line break "
     "EXACTLY as given. Do NOT rewrite, reword, summarize, shorten, expand, correct, translate, "
@@ -788,12 +788,11 @@ class _Synth:
     resolves these concurrently; silence segments in the same list are plain bytes
     that need no network call and pass straight through."""
 
-    __slots__ = ("text", "voice", "speed")
+    __slots__ = ("text", "voice")
 
-    def __init__(self, text: str, voice: str, speed: float | None = None) -> None:
+    def __init__(self, text: str, voice: str) -> None:
         self.text = text
         self.voice = voice
-        self.speed = speed  # None → use the run-global --speed; set for emphasis spans
 
 
 def synthesize_ordered(
@@ -827,8 +826,7 @@ def synthesize_ordered(
         futs = {
             ex.submit(
                 synthesize, job.text, tts_url=tts_url, voice=job.voice,
-                speed=job.speed if job.speed is not None else speed,
-                language=language, token=token,
+                speed=speed, language=language, token=token,
             ): idx
             for idx, job in jobs
         }

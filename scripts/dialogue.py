@@ -118,7 +118,7 @@ HARD RULES:
 - About {words} words of spoken text total (~{minutes:g} minutes aloud). Tighter is better than padded — do NOT stuff filler to hit the count.
 - Turns alternate but not robotically: a host may take two short turns in a row, or a one-word reaction. Each turn is 1–4 sentences.
 - This is read by TTS, so write only what should be SPOKEN. NO stage directions, NO sound cues, NO markdown, NO asterisks, NO emoji, NO headings, NO host-name prefixes inside the text. (One narrow exception: the emphasis guillemets below.)
-- Emphasis, used SPARINGLY: wrap the single most load-bearing line of a turn — a WHOLE clause or sentence, never a single word, never a whole turn — in guillemets «like this», so the TTS reads it a touch slower for weight. At most a few in the whole episode, never more than one per turn, often none. Used rarely they land; used often they deaden. Guillemets are the ONLY markup allowed.
+- Emphasis, used SPARINGLY: wrap the single most load-bearing line of a turn — a WHOLE clause or sentence, never a single word, never a whole turn — in guillemets «like this», so the TTS sets it apart by a brief pause for weight. At most a few in the whole episode, never more than one per turn, often none. Used rarely they land; used often they deaden. Guillemets are the ONLY markup allowed.
 - This is for a non-technical executive / sales audience: do NOT name or spell out file paths, file names, document names, section pointers, URLs, or code — convey the idea, never the pointer. Translate any technical, clinical, or product-internal jargon into plain business language, or drop it.
 - Lead with the business angle and keep returning to it — the opportunity, the money, the positioning, the bet. Do not dwell on implementation or step-by-step detail. Never invent numbers or prices; use only figures the source supports, and if the source leaves a price open, say it's still open.
 - For any term that must be spoken where a TTS would mangle it, write the spoken form ("JSON" as a word is fine; only spell out an acronym if it reads cleanly aloud).
@@ -159,18 +159,39 @@ def generate_dialogue(
 
 
 # ── Voice mapping ────────────────────────────────────────────────────────────────
+#
+# The cast is a speaker→voice map. Two hosts is just the small case: the LLM-generated
+# script has exactly two speakers (female_name, male_name) mapped to --female-voice /
+# --male-voice. A provided --script-in may have ANY number of named speakers (a round
+# table, a panel) and carries its own top-level `voices` map; that map is authoritative
+# and extends/overrides the two-host defaults. Either way the renderer pins one Kokoro
+# voice per speaker — the same drift-free guarantee, N voices instead of 2.
 
-def _voice_for(
-    speaker: str, *, female: str, male: str, female_voice: str, male_voice: str, prev_voice: str | None
-) -> str:
+def _build_cast(script: dict, args) -> dict[str, str]:
+    """speaker (lowercased) → Kokoro voice. Seeded with the two-host defaults so the
+    LLM-generated 2-voice path is unchanged; a multi-speaker script's own top-level
+    `voices` map overrides/extends it (the cast travels with the script)."""
+    cast = {
+        args.female_name.strip().lower(): args.female_voice,
+        args.male_name.strip().lower(): args.male_voice,
+    }
+    voices = script.get("voices") or {}
+    if not isinstance(voices, dict):
+        _die(f"script 'voices' must be an object of speaker→voice, got {type(voices).__name__}")
+    for name, voice in voices.items():
+        if not isinstance(voice, str) or not voice.strip():
+            _die(f"script 'voices' entry for {name!r} is not a voice string: {voice!r}")
+        cast[str(name).strip().lower()] = voice.strip()
+    return cast
+
+
+def _voice_for(speaker: str, *, cast: dict[str, str], pool: list[str], prev_voice: str | None) -> str:
     s = speaker.strip().lower()
-    if s == female.lower():
-        return female_voice
-    if s == male.lower():
-        return male_voice
-    # Tolerant: a mislabeled speaker shouldn't tank a multi-minute render. Alternate
-    # off the previous turn and warn loudly so it's visible in the log.
-    fallback = male_voice if prev_voice == female_voice else female_voice
+    if s in cast:
+        return cast[s]
+    # Tolerant: a mislabeled speaker shouldn't tank a multi-minute render. Rotate to a
+    # voice other than the previous turn's and warn loudly so it's visible in the log.
+    fallback = next((v for v in pool if v != prev_voice), pool[0]) if pool else (prev_voice or "")
     _log(f"⚠️  unknown speaker {speaker!r} — falling back to {fallback}")
     return fallback
 
@@ -243,6 +264,10 @@ def process_dialogue(
     if overrides:
         _log(f"🗣️  {len(overrides)} pronunciation override(s) active: {', '.join(sorted(overrides))}")
 
+    cast = _build_cast(script, args)
+    pool = list(dict.fromkeys(cast.values()))  # distinct voices, in cast order — fallback rotation
+    _log(f"🎭 cast: {', '.join(f'{k}→{v}' for k, v in cast.items())}")
+
     turn_gap = _silence(args.turn_gap)
     prev_voice: str | None = None
     turns = [t for t in script["turns"] if str(t.get("text", "")).strip()]
@@ -250,10 +275,7 @@ def process_dialogue(
     for i, turn in enumerate(turns, 1):
         speaker = str(turn["speaker"]).strip()
         text = strip_llm_markup(str(turn["text"]).strip())            # asterisk fix
-        voice = _voice_for(
-            speaker, female=args.female_name, male=args.male_name,
-            female_voice=args.female_voice, male_voice=args.male_voice, prev_voice=prev_voice,
-        )
+        voice = _voice_for(speaker, cast=cast, pool=pool, prev_voice=prev_voice)
         prev_voice = voice
         if overrides:
             text = apply_pron_overrides(text, overrides)

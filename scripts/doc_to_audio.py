@@ -179,9 +179,16 @@ def _preflight(args, episodes, is_dialogue: bool, *, recut_before, base_url, sec
         mode = "NEW episode"
 
     if is_dialogue:
-        fv, mv = args.female_voice, args.male_voice
-        voices = (f"2 — {args.female_name}→{fv} ({_voice_gender(fv)}) · "
-                  f"{args.male_name}→{mv} ({_voice_gender(mv)})")
+        cast = None
+        if getattr(args, "script_in", None):
+            cast = (json.loads(Path(args.script_in).read_text(encoding="utf-8")).get("voices") or None)
+        if cast:  # multi-speaker script carries its own speaker→voice map
+            voices = f"{len(cast)} — " + " · ".join(
+                f"{name}→{v} ({_voice_gender(v)})" for name, v in cast.items())
+        else:
+            fv, mv = args.female_voice, args.male_voice
+            voices = (f"2 — {args.female_name}→{fv} ({_voice_gender(fv)}) · "
+                      f"{args.male_name}→{mv} ({_voice_gender(mv)})")
     else:
         voices = f"1 — {args.voice} ({_voice_gender(args.voice)})"
     if "dramatization" in _hosts_line(src).lower():
@@ -439,7 +446,7 @@ def main() -> None:
                 _log(f"📄 {doc.name}: {raw_len} raw → {total} speakable → {len(chunks)} chunks")
                 _log(f"   title: {title!r}")
                 preview = "\n\n".join(
-                    f"[{i+1}/{len(chunks)}]{' «slow»' if isinstance(c, Emph) else ''} {c}"
+                    f"[{i+1}/{len(chunks)}]{' «emph»' if isinstance(c, Emph) else ''} {c}"
                     for i, c in enumerate(chunks[:3])
                 )
                 print(preview)

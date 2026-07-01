@@ -35,17 +35,23 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(title="tts")
 
-MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/app/models/kokoro"))
-KOKORO_MODEL_PATH = MODELS_DIR / "kokoro-v1.0.onnx"
-KOKORO_VOICES_PATH = MODELS_DIR / "voices-v1.0.bin"
-KOKORO_SAMPLE_RATE = 24000  # Kokoro's native output rate
-
 ENVIRONMENT = (
     os.environ.get("ENVIRONMENT")
     or os.environ.get("RAILWAY_ENVIRONMENT")
     or "development"
 )
 _IS_PROD = ENVIRONMENT in ("production", "staging")
+
+# Model cache location. Prod bakes the model into the image at /app/models/kokoro. In dev there is
+# no /app (and it's read-only on a Mac), so default to a writable user-cache dir the app can download
+# the model INTO — otherwise a fresh dev boot dies with `Errno 30: Read-only file system: '/app'`.
+# This is what makes local synth work out of the box (the doc-to-audio default). MODELS_DIR env
+# overrides either way.
+_DEFAULT_MODELS_DIR = "/app/models/kokoro" if _IS_PROD else str(Path.home() / ".cache" / "kokoro")
+MODELS_DIR = Path(os.environ.get("MODELS_DIR", _DEFAULT_MODELS_DIR))
+KOKORO_MODEL_PATH = MODELS_DIR / "kokoro-v1.0.onnx"
+KOKORO_VOICES_PATH = MODELS_DIR / "voices-v1.0.bin"
+KOKORO_SAMPLE_RATE = 24000  # Kokoro's native output rate
 
 if _IS_PROD:
     JWT_SECRET = os.environ["JWT_SECRET"]
@@ -56,10 +62,16 @@ else:
 
 _JWT_OPTIONS = {"require": ["exp", "iss", "aud"]}
 
-VOICE_ALLOWLIST = set(
-    v.strip() for v in os.environ.get("TTS_VOICE_ALLOWLIST", "af_heart").split(",") if v.strip()
+# Voice allowlist. Prod pins its own via TTS_VOICE_ALLOWLIST env. Dev defaults to the doc-to-audio
+# podcast roster (the two-voice defaults af_nova + am_liam and their auditioned backups) so local
+# synth of a two-voice episode works without setting the env first. Prod's env override is unaffected.
+_DEFAULT_ALLOWLIST = (
+    "af_heart" if _IS_PROD else "af_heart,af_nova,af_sarah,am_liam,am_eric,am_adam"
 )
-DEFAULT_VOICE = os.environ.get("TTS_DEFAULT_VOICE", "af_heart")
+VOICE_ALLOWLIST = set(
+    v.strip() for v in os.environ.get("TTS_VOICE_ALLOWLIST", _DEFAULT_ALLOWLIST).split(",") if v.strip()
+)
+DEFAULT_VOICE = os.environ.get("TTS_DEFAULT_VOICE", "af_heart" if _IS_PROD else "af_nova")
 MAX_INPUT_CHARS = int(os.environ.get("TTS_MAX_INPUT_CHARS", "800"))
 MAX_CONCURRENCY = int(os.environ.get("TTS_MAX_CONCURRENCY", "4"))
 

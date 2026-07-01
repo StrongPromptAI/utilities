@@ -1299,11 +1299,28 @@ def _normalize_and_chunk(doc: Path, args) -> tuple[list[str], str, str, str, int
 
 
 def _resolve_tts_endpoint(args) -> tuple[str, str | None]:
-    """Resolve the TTS base URL and (for prod) a freshly-minted aud=tts token. Once
-    per run — the token is shared across all docs."""
+    """Resolve the TTS base URL and (only for the prod box) a freshly-minted aud=tts token. Once
+    per run — the token is shared across all docs.
+
+    DEFAULT is LOCAL synth (services/tts on :8102, auth-off): fast, free, and re-synth-friendly —
+    a recut re-synthesizes every time, so paying the prod TTS box on every cut is waste. Opt into
+    the shared-svcs prod box with --prod-tts. --tts-url overrides the base URL entirely.
+    """
     if args.tts_url:
         return args.tts_url.rstrip("/"), None
-    if args.local_tts:
+    if not getattr(args, "prod_tts", False):
+        # Local default. Fail LOUD + fast if it isn't running — do NOT silently fall back to prod
+        # (one happy path): the fix is to start it, or pass --prod-tts. A 503 (model still loading)
+        # counts as reachable; _wait_for_tts_ready then gates synth on the 200.
+        try:
+            requests.get(f"{LOCAL_TTS_URL}/health", timeout=3)
+        except requests.RequestException:
+            _die(
+                f"local TTS not reachable at {LOCAL_TTS_URL} (the default). Start it:\n"
+                f"    cd services/tts && uv run uvicorn app:app --port 8102\n"
+                f"  (dev auto-downloads Kokoro to ~/.cache/kokoro on first boot; the podcast voices "
+                f"af_nova/am_liam are dev-allowlisted). Or pass --prod-tts for the shared-svcs box."
+            )
         return LOCAL_TTS_URL, None
     _log("🔑 pulling shared-svcs JWT_SECRET from Railway…")
     secret = _railway_vars(

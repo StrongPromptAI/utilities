@@ -187,6 +187,27 @@ def _prosody_rows(args, is_dialogue: bool, src: Path) -> list[tuple[str, str]]:
     return rows
 
 
+def _filler_rows(args, is_dialogue: bool, src: Path) -> list[tuple[str, str]]:
+    """PREFLIGHT cliché-filler warnings, computed from the spoken text with NO synth: throat-clear
+    ('Here's the ___') / payoff-bow ('That's the whole ___') / reflex 'Exactly.' openers. Advisory —
+    one source of truth with the standalone `lint_podcast_filler` (+ STYLE.md)."""
+    try:
+        from lint_podcast_filler import _spoken, scan
+    except Exception:
+        return []
+    if is_dialogue and getattr(args, "script_in", None):
+        data = json.loads(Path(args.script_in).read_text(encoding="utf-8"))
+        spoken = " ".join(str(t.get("text", "")) for t in data.get("turns", []))
+    else:
+        raw, _notes = _split_shownotes(src.read_text(encoding="utf-8"))
+        spoken = _spoken(raw)
+    hits = scan(spoken)
+    if not hits:
+        return []
+    sample = ", ".join(f'"{s}"' for s, _ in hits[:3])
+    return [("⚠ Filler", f"{len(hits)} cliché-filler opener(s) — see STYLE.md: {sample}")]
+
+
 def _preflight(args, episodes, is_dialogue: bool, *, recut_before, base_url, secret) -> None:
     """Print a formatted publish summary BEFORE the billed synth — source, target, new/recut,
     words, voices, ~length, channel + show title/description, episode, anonymity check, emphasis,
@@ -251,6 +272,8 @@ def _preflight(args, episodes, is_dialogue: bool, *, recut_before, base_url, sec
     _row("Words", f"{words:,}        Est. length  ~{est}")
     _row("Emphasis", emph_str)
     for warn in _prosody_rows(args, is_dialogue, src):
+        _row(*warn)
+    for warn in _filler_rows(args, is_dialogue, src):
         _row(*warn)
     _row("Hosts", _hosts_line(src))
     _row("Notes", "full transcript + any citations footer → show notes"
@@ -364,7 +387,13 @@ def main() -> None:
     p.add_argument("--title", help="ID3 title (single episode only).")
 
     # ── TTS endpoint + output ──
-    p.add_argument("--local-tts", action="store_true", help="Use localhost:8102 (no token).")
+    # Local synth (:8102) is the DEFAULT — fast, free, re-synth-friendly (a recut re-synthesizes).
+    p.add_argument("--prod-tts", action="store_true",
+                   help="Synth on the shared-svcs PROD TTS box (mints an aud=tts token). "
+                        "Default is LOCAL synth (:8102) — start it with "
+                        "`cd services/tts && uv run uvicorn app:app --port 8102`.")
+    p.add_argument("--local-tts", action="store_true",
+                   help="Explicitly select local TTS (:8102). This is now the DEFAULT; kept for back-compat.")
     p.add_argument("--tts-url", help="Override the TTS base URL entirely.")
     p.add_argument("--podcast-url",
                    help="Override the podcast server base URL (default: pulled from Railway). Point at "

@@ -66,6 +66,25 @@ def list_audio(folder: str) -> list[AudioFile]:
     return out
 
 
+def folder_signature(folder: str) -> tuple:
+    """A cheap change-signature for a show folder: `(name, size, mtime)` for every file, sorted.
+    Pure `stat()` — reads **no** file content (unlike `list_audio`, which slurps every transcript
+    up to 200 KB). Lets the feed builder skip the expensive read-every-transcript + render-to-HTML
+    pass when nothing in the folder changed. Any upload / recut / delete changes a size or mtime and
+    busts it; the `.part` temp of an in-flight upload settles out on the atomic rename."""
+    d = folder_dir(folder)
+    if not d.is_dir():
+        return ()
+    sig = [
+        (p.name, st.st_size, st.st_mtime)
+        for p in d.iterdir()
+        if p.is_file() and not p.name.startswith(".")
+        for st in (p.stat(),)
+    ]
+    sig.sort()
+    return tuple(sig)
+
+
 def _read_capped(path: Path, cap: int) -> str | None:
     """Read a sidecar file's text, truncated to `cap` chars (… marker if cut). Missing → None."""
     if not path.is_file():

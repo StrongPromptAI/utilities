@@ -16,7 +16,29 @@ from xml.sax.saxutils import escape, quoteattr
 from sqlalchemy.orm import Session
 
 from models import Episode, Podcast
-from storage import AudioFile, list_audio
+from storage import AudioFile, folder_signature, list_audio
+
+# Rendered-feed cache: slug → (signature, xml). The feed is expensive to build (read every
+# transcript off the volume + render each markdown→HTML on every request — ~20 s on a big show),
+# but it changes only when a file or an episode row changes. So we cache the built XML keyed on a
+# cheap signature (folder stat + the DB rows/podcast fields the feed renders); an unchanged show
+# returns the cached XML in O(stat) instead of re-reading + re-rendering. Per-process (a module
+# global); a multi-worker deploy just caches independently, still correct.
+_FEED_CACHE: dict[str, tuple] = {}
+
+
+def _feed_signature(podcast: Podcast, rows: dict, base_url: str) -> tuple:
+    """Everything the feed's bytes depend on, cheaply: the folder's stat signature (no content
+    reads), the podcast-channel fields, the per-episode DB overrides, and base_url (enclosure URLs
+    embed it + the private code). If this is unchanged, the built XML is byte-identical."""
+    pod = (podcast.slug, podcast.code, podcast.access, podcast.title, podcast.description,
+           podcast.author, podcast.language, podcast.category, podcast.explicit)
+    eps = tuple(sorted(
+        (fn, e.hidden, e.sort_order, e.title, e.description, e.duration_seconds,
+         e.published_at.isoformat() if e.published_at else None)
+        for fn, e in rows.items()
+    ))
+    return (base_url, pod, eps, folder_signature(podcast.folder))
 
 
 def _derive_title(filename: str) -> str:
@@ -84,10 +106,25 @@ def _episode_base(podcast: Podcast, base_url: str) -> str:
 
 
 def build_feed(session: Session, podcast: Podcast, base_url: str) -> str:
+    """Cached RSS build. Fetches the (cheap) DB rows, computes a change-signature, and returns the
+    cached XML if nothing the feed depends on has changed — otherwise reads the transcripts and
+    renders. Correctness rides on the signature capturing every input (`_feed_signature`)."""
     rows = {
         e.filename: e
         for e in session.query(Episode).filter_by(podcast_slug=podcast.slug).all()
     }
+    sig = _feed_signature(podcast, rows, base_url)
+    hit = _FEED_CACHE.get(podcast.slug)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    xml = _render_feed(podcast, base_url, rows)
+    _FEED_CACHE[podcast.slug] = (sig, xml)
+    return xml
+
+
+def _render_feed(podcast: Podcast, base_url: str, rows: dict) -> str:
+    """The actual (expensive) build: read every transcript off the volume and render it to HTML.
+    Only called on a cache miss. `rows` is the already-fetched {filename: Episode} override map."""
     files: list[AudioFile] = list_audio(podcast.folder)
 
     ep_base = _episode_base(podcast, base_url)

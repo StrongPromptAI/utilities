@@ -163,6 +163,30 @@ def _hosts_line(src: Path) -> str:
     return f"⚠ {reason}: {labels}"
 
 
+def _prosody_rows(args, is_dialogue: bool, src: Path) -> list[tuple[str, str]]:
+    """PREFLIGHT prosody warnings, computed from the spoken text with NO synth: short «…»
+    emphasis spans (island effect) and homographs to verify (the 'lives'→/laɪvz/ long-i bug).
+    One source of truth with the standalone `lint_podcast_prosody`."""
+    try:
+        from lint_podcast_prosody import EMPH_MIN_WORDS, _spoken, scan
+    except Exception:
+        return []
+    if is_dialogue and getattr(args, "script_in", None):
+        data = json.loads(Path(args.script_in).read_text(encoding="utf-8"))
+        spoken = " ".join(str(t.get("text", "")) for t in data.get("turns", []))
+    else:
+        raw, _notes = _split_shownotes(src.read_text(encoding="utf-8"))
+        spoken = _spoken(raw)
+    short, homs = scan(spoken)
+    rows: list[tuple[str, str]] = []
+    if short:
+        rows.append(("⚠ Emphasis", f"{len(short)} short span(s) <{EMPH_MIN_WORDS}w — whole "
+                                    f"clauses only: {', '.join(short[:3])}"))
+    if homs:
+        rows.append(("⚠ Pronounce", "verify w/ espeak, fix via --pron/reword: " + ", ".join(homs)))
+    return rows
+
+
 def _preflight(args, episodes, is_dialogue: bool, *, recut_before, base_url, secret) -> None:
     """Print a formatted publish summary BEFORE the billed synth — source, target, new/recut,
     words, voices, ~length, channel + show title/description, episode, anonymity check, emphasis,
@@ -226,6 +250,8 @@ def _preflight(args, episodes, is_dialogue: bool, *, recut_before, base_url, sec
     _row("Voices", voices)
     _row("Words", f"{words:,}        Est. length  ~{est}")
     _row("Emphasis", emph_str)
+    for warn in _prosody_rows(args, is_dialogue, src):
+        _row(*warn)
     _row("Hosts", _hosts_line(src))
     _row("Notes", "full transcript + any citations footer → show notes"
          if not args.no_transcript else "blurb only (--no-transcript)")

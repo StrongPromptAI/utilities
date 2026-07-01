@@ -79,6 +79,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import requests
 
 # ── Railway coordinates (mirrors CLAUDE.md § Railway / § Shared Services) ────────
@@ -834,10 +835,40 @@ def synthesize_ordered(
             results[futs[fut]] = fut.result()
             done += 1
             _log(f"🗣️  [{done}/{total}] {label} ✓")
+    results = _balance_voice_levels(parts, results)
     return b"".join(
         results[i] if isinstance(part, _Synth) else part
         for i, part in enumerate(parts)
     )
+
+
+def _balance_voice_levels(parts: list, results: dict[int, bytes]) -> dict[int, bytes]:
+    """Match each voice's loudness to the quietest voice so no speaker sits hotter
+    than another in a multi-voice mix (Kokoro voices differ in inherent level — e.g.
+    `am_liam` reads louder than `af_nova`). Per-voice RMS → gain toward the quietest
+    voice, so it is pure attenuation and no chunk can clip; the downstream `loudnorm`
+    pass in `pcm_to_mp3` restores absolute level. A no-op when every chunk shares one
+    voice (one-voice path) or when levels already match."""
+    synth_idx = [i for i, p in enumerate(parts) if isinstance(p, _Synth)]
+    arrs = {i: np.frombuffer(results[i], dtype=np.int16).astype(np.float64) for i in synth_idx}
+    agg: dict[str, list[float]] = {}  # voice -> [sum_of_squares, sample_count]
+    for i in synth_idx:
+        v = agg.setdefault(parts[i].voice, [0.0, 0])
+        v[0] += float(np.dot(arrs[i], arrs[i]))
+        v[1] += arrs[i].size
+    rms = {vc: (ssq / n) ** 0.5 for vc, (ssq, n) in agg.items() if n and ssq > 0}
+    if len(rms) < 2:
+        return results  # one voice (or silence) — nothing to balance
+    target = min(rms.values())
+    gains = {vc: (target / r) for vc, r in rms.items()}
+    _log("🔊 voice balance: " + ", ".join(f"{vc}×{gains[vc]:.2f}" for vc in sorted(gains)))
+    out = dict(results)
+    for i in synth_idx:
+        g = gains.get(parts[i].voice, 1.0)
+        if abs(g - 1.0) < 1e-3:
+            continue
+        out[i] = np.clip(arrs[i] * g, -32768, 32767).astype(np.int16).tobytes()
+    return out
 
 
 # ── Chunks → ordered parts list (shared by both front-ends) ──────────────────────
